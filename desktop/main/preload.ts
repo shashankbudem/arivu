@@ -1,0 +1,57 @@
+import { contextBridge, ipcRenderer } from "electron";
+
+const desktopApi = {
+  getState: () => ipcRenderer.invoke("app:getState"),
+  chooseWorkspace: () => ipcRenderer.invoke("workspace:choose"),
+  chooseImages: () => ipcRenderer.invoke("images:choose"),
+  createWorkspace: (options: unknown) => ipcRenderer.invoke("workspace:create", options),
+  openJustChats: () => ipcRenderer.invoke("project:justChats"),
+  selectChatProject: (projectRoot: string | null) => ipcRenderer.invoke("project:selectForChat", projectRoot),
+  listSessions: () => ipcRenderer.invoke("sessions:list"),
+  openSession: (id: string) => ipcRenderer.invoke("sessions:open", id),
+  newChat: () => ipcRenderer.invoke("sessions:new"),
+  deleteSession: (id: string) => ipcRenderer.invoke("sessions:delete", id),
+  compactContext: () => ipcRenderer.invoke("context:compact"),
+  saveConfig: (patch: unknown) => ipcRenderer.invoke("config:save", patch),
+  listModels: (patch: unknown) => ipcRenderer.invoke("models:list", patch),
+  runDoctor: (patch: unknown) => ipcRenderer.invoke("doctor:run", patch),
+  listTools: () => ipcRenderer.invoke("tools:list"),
+  listSkills: () => ipcRenderer.invoke("skills:list"),
+  createSkill: (input: unknown) => ipcRenderer.invoke("skills:create", input),
+  sendPrompt: (prompt: unknown) => ipcRenderer.invoke("agent:sendPrompt", prompt),
+  getBrowserState: () => ipcRenderer.invoke("browser:getState"),
+  setBrowserPaneOpen: (open: boolean) => ipcRenderer.invoke("browser:setPaneOpen", open),
+  setBrowserDefaultMode: (mode: unknown) => ipcRenderer.invoke("browser:setDefaultMode", mode),
+  setBrowserBounds: (bounds: unknown) => ipcRenderer.invoke("browser:setBounds", bounds),
+  setBrowserVisibleSuppressed: (suppressed: boolean) => ipcRenderer.invoke("browser:setVisibleSuppressed", suppressed),
+  openBrowserUrl: (args: unknown) => ipcRenderer.invoke("browser:open", args),
+  browserGoBack: (mode?: unknown) => ipcRenderer.invoke("browser:goBack", mode),
+  browserGoForward: (mode?: unknown) => ipcRenderer.invoke("browser:goForward", mode),
+  browserReload: (mode?: unknown) => ipcRenderer.invoke("browser:reload", mode),
+  browserStop: (mode?: unknown) => ipcRenderer.invoke("browser:stop", mode),
+  captureBrowserScreenshot: (args?: unknown) => ipcRenderer.invoke("browser:screenshot", args),
+  respondApproval: (id: string, approved: boolean) => ipcRenderer.invoke("approval:respond", { id, approved }),
+  onApprovalRequest: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("approval:request", listener);
+    return () => ipcRenderer.removeListener("approval:request", listener);
+  },
+  onAgentEvent: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("agent:event", listener);
+    return () => ipcRenderer.removeListener("agent:event", listener);
+  },
+  onSessionEvent: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("session:event", listener);
+    return () => ipcRenderer.removeListener("session:event", listener);
+  },
+  onBrowserState: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("browser:state", listener);
+    return () => ipcRenderer.removeListener("browser:state", listener);
+  }
+};
+
+contextBridge.exposeInMainWorld("arivu", desktopApi);
+contextBridge.exposeInMainWorld("shankinster", desktopApi);

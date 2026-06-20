@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-desktop/
+coverage/
+.agents/
+.DS_Store
+*.log
+.env

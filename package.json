@@ -1,0 +1,56 @@
+{
+  "name": "arivu",
+  "version": "0.1.0",
+  "description": "A local desktop, TUI, and CLI coding agent with OpenAI-compatible model support.",
+  "type": "module",
+  "bin": {
+    "arivu": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsup",
+    "desktop:main:build": "tsup --config desktop.tsup.config.ts",
+    "desktop:renderer:build": "vite build --config desktop/renderer/vite.config.ts",
+    "desktop:build": "npm run desktop:main:build && npm run desktop:renderer:build",
+    "desktop:dev": "npm run desktop:main:build && concurrently -k \"vite --config desktop/renderer/vite.config.ts --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && ARIVU_DESKTOP_DEV_URL=http://127.0.0.1:5173 electron dist-desktop/main/main.js\"",
+    "desktop:start": "npm run desktop:build && electron dist-desktop/main/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^5.5.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "blessed": "^0.1.81",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "execa": "^9.3.1",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "shiki": "^4.2.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^10.0.3",
+    "electron": "^42.3.2",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.21",
+    "vitest": "^2.1.8",
+    "wait-on": "^9.0.10"
+  }
+}

@@ -1,0 +1,75 @@
+import { describe, expect, it } from "vitest";
+import { normalizePromptPayload, normalizePromptSkillNames } from "../src/agent/promptPayload.js";
+
+describe("prompt payload normalization", () => {
+  it("accepts legacy raw string prompts", () => {
+    expect(normalizePromptPayload("  hello  ")).toBe("hello");
+  });
+
+  it("accepts rich content payloads from the renderer", () => {
+    expect(
+      normalizePromptPayload({
+        content: [
+          { type: "text", text: "  describe this  " },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "low" },
+            name: "diagram.png",
+            mimeType: "image/png",
+            size: 5
+          }
+        ]
+      })
+    ).toEqual([
+      { type: "text", text: "describe this" },
+      {
+        type: "image_url",
+        image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "low" },
+        name: "diagram.png",
+        mimeType: "image/png",
+        size: 5
+      }
+    ]);
+  });
+
+  it("accepts older text plus images payloads", () => {
+    expect(
+      normalizePromptPayload({
+        text: "  look here  ",
+        images: [
+          {
+            id: "image-1",
+            name: "example.png",
+            mimeType: "image/png",
+            size: 5,
+            dataUrl: "data:image/png;base64,aGVsbG8="
+          }
+        ]
+      })
+    ).toEqual([
+      { type: "text", text: "look here" },
+      {
+        type: "image_url",
+        image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "auto" },
+        name: "example.png",
+        mimeType: "image/png",
+        size: 5
+      }
+    ]);
+  });
+
+  it("does not throw trim type errors for invalid event-like objects", () => {
+    expect(normalizePromptPayload({ target: { value: "not a prompt payload" } })).toEqual([]);
+    expect(() => normalizePromptPayload({ content: { text: "not an array" } })).toThrow(/text or content parts/);
+  });
+
+  it("normalizes selected skill names from prompt payloads", () => {
+    expect(
+      normalizePromptSkillNames({
+        content: "review this",
+        skills: ["$review", "/qa-check", "review", "bad name", 42]
+      })
+    ).toEqual(["review", "qa-check"]);
+    expect(normalizePromptSkillNames("plain prompt")).toEqual([]);
+  });
+});
