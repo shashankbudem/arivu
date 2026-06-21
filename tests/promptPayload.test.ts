@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { normalizePromptPayload, normalizePromptSkillNames } from "../src/agent/promptPayload.js";
+import {
+  normalizePromptLoopOptions,
+  normalizePromptPayload,
+  normalizePromptReuseLastUserMessage,
+  normalizePromptSkillNames
+} from "../src/agent/promptPayload.js";
 
 describe("prompt payload normalization", () => {
   it("accepts legacy raw string prompts", () => {
@@ -71,5 +76,24 @@ describe("prompt payload normalization", () => {
       })
     ).toEqual(["review", "qa-check"]);
     expect(normalizePromptSkillNames("plain prompt")).toEqual([]);
+  });
+
+  it("normalizes retry prompt reuse intent from prompt payloads", () => {
+    expect(normalizePromptReuseLastUserMessage({ content: "retry", reuseLastUserMessage: true })).toBe(true);
+    expect(normalizePromptReuseLastUserMessage({ content: "retry", reuseLastUserMessage: false })).toBe(false);
+    expect(normalizePromptReuseLastUserMessage("retry")).toBe(false);
+  });
+
+  it("normalizes bounded agent loop options", () => {
+    expect(normalizePromptLoopOptions({ content: "fix this", loop: true })).toEqual({ enabled: true, maxIterations: 5 });
+    expect(normalizePromptLoopOptions({ content: "fix this", loop: { enabled: true, maxIterations: 12 } })).toEqual({
+      enabled: true,
+      maxIterations: 10
+    });
+    expect(normalizePromptLoopOptions({ content: "fix this", loop: { enabled: false, maxIterations: 3 } })).toEqual({
+      enabled: false,
+      maxIterations: 3
+    });
+    expect(normalizePromptLoopOptions("fix this")).toEqual({ enabled: false, maxIterations: 5 });
   });
 });

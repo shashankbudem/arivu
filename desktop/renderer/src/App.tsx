@@ -1,4 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
+import {
+  Fragment,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentPropsWithoutRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject
+} from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -42,6 +52,7 @@ import {
   X
 } from "lucide-react";
 import { estimateTokenCount, truncateTextToTokenBudget } from "./tokenBudget";
+import arivuLogoUrl from "../../../assets/arivu-logo.svg";
 
 type ViewMode = "chat" | "history" | "settings" | "ui";
 type SidebarSectionId = "projects" | "chats";
@@ -56,6 +67,7 @@ type ProviderFormState = LlmProviderPatch & {
 const AUTO_MODEL_VALUE = "auto";
 const STANDALONE_PROJECT_VALUE = "__standalone__";
 const COMPOSER_TOKEN_BUDGET = 8_000;
+const DEFAULT_AGENT_LOOP_MAX_ITERATIONS = 5;
 const MAX_IMAGE_ATTACHMENTS = 6;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -149,6 +161,39 @@ type ActivityItem = {
   kind: "call" | "result" | "system";
   title: string;
   detail: string;
+  summary?: string;
+  status?: "running" | "done" | "waiting";
+  imagePreview?: {
+    path: string;
+    width?: number;
+    height?: number;
+    caption: string;
+  };
+};
+
+type ActivityGroupStatus = "running" | "done" | "waiting";
+
+type ActivityGroup = {
+  id: string;
+  userMessageIndex: number | null;
+  title: string;
+  detail: string;
+  items: ActivityItem[];
+  status: ActivityGroupStatus;
+};
+
+type ActivityModel = {
+  items: ActivityItem[];
+  systemItems: ActivityItem[];
+  groups: ActivityGroup[];
+  groupsByUserMessageIndex: Map<number, ActivityGroup>;
+};
+
+type VisibleMessageEntry = {
+  message: ChatMessage;
+  messageIndex: number;
+  sourceIndexes: number[];
+  key: string;
 };
 
 type DiffLine = {
@@ -247,14 +292,16 @@ type FailedPrompt = {
   messageIndex: number;
   content: ChatContent;
   skillNames: string[];
+  loopEnabled: boolean;
 };
 
 type SubmitPromptOptions = {
   reuseFailedPrompt?: boolean;
   skillNames?: string[];
+  loopEnabled?: boolean;
 };
 
-type SlashCommandId = "compact" | "session" | "tools" | "skills" | "browser";
+type SlashCommandId = "compact" | "session" | "tools" | "skills" | "browser" | "loop";
 
 type SlashCommandDefinition = {
   id: SlashCommandId;
@@ -315,6 +362,13 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
     title: "Browser window",
     description: "Open the separate browser window.",
     keywords: ["open", "page", "window", "visible", "dev"]
+  },
+  {
+    id: "loop",
+    command: "loop",
+    title: "Agent loop",
+    description: "Toggle bounded loop mode for the next prompt.",
+    keywords: ["continue", "iterate", "autonomous", "until", "done"]
   }
 ];
 
@@ -340,6 +394,7 @@ export function App() {
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [skillsRoot, setSkillsRoot] = useState("");
   const [pendingSkillNames, setPendingSkillNames] = useState<string[]>([]);
+  const [agentLoopEnabled, setAgentLoopEnabled] = useState(false);
   const [browserState, setBrowserState] = useState<BrowserState | null>(null);
   const [toolsPopoverOpen, setToolsPopoverOpen] = useState(false);
   const [skillsPopoverOpen, setSkillsPopoverOpen] = useState(false);
@@ -370,6 +425,7 @@ export function App() {
   const [expandedProjectRoots, setExpandedProjectRoots] = useState<Record<string, boolean>>({});
   const [rememberedProjectOptions, setRememberedProjectOptions] = useState<Record<string, string>>({});
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const activityListRef = useRef<HTMLDivElement | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const chatSearchInputRef = useRef<HTMLInputElement | null>(null);
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -534,7 +590,26 @@ export function App() {
     };
   }, [toolsPopoverOpen, skillsPopoverOpen, composerOptionsOpen]);
 
-  const activity = useMemo(() => deriveActivity(messages, state), [messages, state]);
+  const activityModel = useMemo(() => deriveActivityModel(messages, state), [messages, state]);
+  const activity = activityModel.items;
+  const activityGroups = activityModel.groups.filter((group) => group.items.length > 0);
+  const activityGroupByUserMessageIndex = activityModel.groupsByUserMessageIndex;
+  const latestScreenshotActivity = useMemo(() => findLatestActivityScreenshot(activity), [activity]);
+  const lastActivity = activity.at(-1);
+  useEffect(() => {
+    const list = activityListRef.current;
+    if (activityCollapsed || !list) {
+      return;
+    }
+    list.scrollTop = list.scrollHeight;
+  }, [
+    activityCollapsed,
+    activity.length,
+    latestScreenshotActivity?.imagePreview?.path,
+    lastActivity?.id,
+    lastActivity?.status,
+    state?.sessionId
+  ]);
   const promptTokens = useMemo(() => estimateTokenCount(prompt), [prompt]);
   const nonSystemMessageCount = useMemo(() => messages.filter((message) => message.role !== "system").length, [messages]);
   const estimatedContextTokens = useMemo(() => estimateContextTokens(messages), [messages]);
@@ -558,9 +633,10 @@ export function App() {
         nonSystemMessageCount,
         availableToolCount: availableTools.length,
         availableSkillCount: availableSkills.length,
-        pendingSkillCount: pendingSkillNames.length
+        pendingSkillCount: pendingSkillNames.length,
+        agentLoopEnabled
       }),
-    [availableSkills.length, availableTools.length, busy, compactingContext, nonSystemMessageCount, pendingSkillNames.length, state]
+    [agentLoopEnabled, availableSkills.length, availableTools.length, busy, compactingContext, nonSystemMessageCount, pendingSkillNames.length, state]
   );
   const filteredSlashCommands = useMemo(
     () => (slashQuery === null ? [] : filterSlashCommands(slashCommandEntries, slashQuery)),
@@ -568,10 +644,7 @@ export function App() {
   );
   const slashCommandMenuOpen = slashQuery !== null && !busy;
   const visibleMessages = useMemo(
-    () =>
-      messages
-        .map((message, messageIndex) => ({ message, messageIndex }))
-        .filter(({ message }) => message.role === "user" || (message.role === "assistant" && chatContentHasText(message.content))),
+    () => deriveVisibleMessages(messages),
     [messages]
   );
   const chatSearchMatches = useMemo(() => {
@@ -580,8 +653,8 @@ export function App() {
       return [];
     }
     return visibleMessages
-      .map(({ message, messageIndex }) => ({
-        key: `${message.role}-${messageIndex}`,
+      .map(({ message, key }) => ({
+        key,
         text: chatContentToText(message.content).toLowerCase()
       }))
       .filter((entry) => entry.text.includes(query));
@@ -990,7 +1063,9 @@ export function App() {
       return {
         ...current,
         runningSessionIds: event.runningSessionIds,
-        ...(current.sessionId === event.sessionId ? { messages: event.messages, modelSelection: event.modelSelection } : {})
+        ...(current.sessionId === event.sessionId
+          ? { messages: event.messages, modelSelection: event.modelSelection, agentLoop: event.agentLoop }
+          : {})
       };
     });
 
@@ -1000,7 +1075,7 @@ export function App() {
         setError(null);
         setRetryPrompt(null);
         setFailedPrompt(null);
-        setStatus(modelSelectionStatus(event.modelSelection) ?? `Saved session ${event.sessionId}`);
+        setStatus(agentLoopStatusFromEvent(event) ?? modelSelectionStatus(event.modelSelection) ?? `Saved session ${event.sessionId}`);
       } else if (event.type === "failed") {
         const lastUserMessage = findLastUserMessage(event.messages);
         setError(event.error ?? "Agent run failed.");
@@ -1010,19 +1085,20 @@ export function App() {
             ? {
                 messageIndex: lastUserMessage.index,
                 content: lastUserMessage.content,
-                skillNames: []
+                skillNames: [],
+                loopEnabled: Boolean(event.agentLoop)
               }
             : null
         );
         setStatus("Error");
       } else {
-        setStatus(modelSelectionStatus(event.modelSelection) ?? "Running agent");
+        setStatus(agentLoopStatusFromEvent(event) ?? modelSelectionStatus(event.modelSelection) ?? "Running agent");
       }
       return;
     }
 
     if (event.type === "completed") {
-      setStatus("Background chat saved");
+      setStatus(event.agentLoop ? `Background ${agentLoopStatusLabel(event.agentLoop).toLowerCase()}` : "Background chat saved");
     } else if (event.type === "failed") {
       setStatus("Background chat failed");
     }
@@ -1110,6 +1186,17 @@ export function App() {
       return;
     }
 
+    if (command.id === "loop") {
+      setAgentLoopEnabled((current) => {
+        const next = !current;
+        setStatus(next ? `Agent loop armed for ${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iterations` : "Agent loop off");
+        return next;
+      });
+      setPrompt("");
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+
     setPrompt("");
 
     if (command.id === "session") {
@@ -1158,6 +1245,7 @@ export function App() {
     const usingComposer = content === undefined;
     const nextContent = content ?? createPromptContent(prompt, imageAttachments);
     const nextSkillNames = usingComposer ? pendingSkillNames : options.skillNames ?? [];
+    const nextLoopEnabled = options.loopEnabled ?? (usingComposer ? agentLoopEnabled : false);
     if (!chatContentHasRenderableContent(nextContent) || busy) {
       return;
     }
@@ -1172,6 +1260,7 @@ export function App() {
     if (usingComposer) {
       setPrompt("");
       setImageAttachments([]);
+      setAgentLoopEnabled(false);
     }
     setToolsPopoverOpen(false);
     setCommandOutput(null);
@@ -1189,7 +1278,17 @@ export function App() {
     }
 
     try {
-      const result = await window.arivu.sendPrompt({ content: nextContent, skills: nextSkillNames });
+      const result = await window.arivu.sendPrompt({
+        content: nextContent,
+        skills: nextSkillNames,
+        reuseLastUserMessage: canReuseFailedPrompt,
+        loop: nextLoopEnabled
+          ? {
+              enabled: true,
+              maxIterations: DEFAULT_AGENT_LOOP_MAX_ITERATIONS
+            }
+          : undefined
+      });
       const stillViewingSubmittedChat = activeSubmissionTokenRef.current === submissionToken;
       if (stillViewingSubmittedChat) {
         activeSubmissionTokenRef.current = null;
@@ -1202,6 +1301,7 @@ export function App() {
                 sessionId: result.sessionId,
                 messages: result.messages,
                 modelSelection: result.modelSelection,
+                agentLoop: result.agentLoop,
                 runningSessionIds: result.running
                   ? Array.from(new Set([...current.runningSessionIds, result.sessionId]))
                   : current.runningSessionIds.filter((id) => id !== result.sessionId)
@@ -1219,10 +1319,13 @@ export function App() {
       if (activeSubmissionTokenRef.current === submissionToken) {
         activeSubmissionTokenRef.current = null;
         setMessages(canReuseFailedPrompt ? messagesBeforeRun : [...messagesBeforeRun, { role: "user", content: nextContent }]);
+        if (usingComposer && nextLoopEnabled) {
+          setAgentLoopEnabled(true);
+        }
         setBusy(false);
         setError(formatError(err));
         setRetryPrompt(nextContent);
-        setFailedPrompt({ messageIndex: failedMessageIndex, content: nextContent, skillNames: nextSkillNames });
+        setFailedPrompt({ messageIndex: failedMessageIndex, content: nextContent, skillNames: nextSkillNames, loopEnabled: nextLoopEnabled });
         setStatus("Error");
       }
     }
@@ -1234,7 +1337,8 @@ export function App() {
     }
     void submitPrompt(retryPrompt, {
       reuseFailedPrompt: canReuseFailedPrompt(retryPrompt),
-      skillNames: failedPrompt?.skillNames ?? []
+      skillNames: failedPrompt?.skillNames ?? [],
+      loopEnabled: failedPrompt?.loopEnabled ?? false
     });
   }
 
@@ -1260,6 +1364,20 @@ export function App() {
       }
     }
     return null;
+  }
+
+  async function stopAgentLoop() {
+    if (!state?.sessionId || !agentLoopRunning) {
+      return;
+    }
+    try {
+      const next = await window.arivu.stopAgentLoop(state.sessionId);
+      applyDesktopState(next);
+      setStatus("Stopping agent loop");
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
   }
 
   async function copyMessageContent(content: ChatContent, messageKey: string) {
@@ -1370,7 +1488,7 @@ export function App() {
   if (!state) {
     return (
       <main className="boot">
-        <div className="boot-mark">A</div>
+        <img className="boot-mark" src={arivuLogoUrl} alt="" />
         <div>
           <h1>Arivu</h1>
           <p>{status}</p>
@@ -1395,6 +1513,9 @@ export function App() {
   const toolActivityCount = activity.filter((item) => item.kind !== "system").length;
   const effectiveActivityWidth = activityCollapsed ? ACTIVITY_COLLAPSED_WIDTH : clamp(activityWidth, ACTIVITY_MIN_WIDTH, ACTIVITY_MAX_WIDTH);
   const browserOpen = Boolean(browserState?.paneOpen);
+  const activeAgentLoop = state.agentLoop;
+  const agentLoopRunning = Boolean(activeAgentLoop && ["running", "stopping"].includes(activeAgentLoop.status));
+  const agentLoopLabel = activeAgentLoop ? agentLoopStatusLabel(activeAgentLoop) : "Loop off";
   const workspaceGridClassName = [
     "workspace-grid",
     activityCollapsed ? "activity-collapsed" : ""
@@ -1409,7 +1530,7 @@ export function App() {
     >
       <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="brand-row">
-          <div className="brand-mark">A</div>
+          <img className="brand-mark" src={arivuLogoUrl} alt="" />
           {!sidebarCollapsed ? <div className="brand-copy">
             <div className="brand-title">Arivu</div>
           </div> : null}
@@ -1676,44 +1797,68 @@ export function App() {
                 {visibleMessages.length === 0 ? (
                   <EmptyConversation />
                 ) : (
-                  visibleMessages.map(({ message, messageIndex }, index) => {
-                    const messageKey = `${message.role}-${messageIndex}`;
+                  visibleMessages.map(({ message, messageIndex, sourceIndexes, key: messageKey }, index) => {
                     const failedUserPrompt =
                       message.role === "user" &&
-                      failedPrompt?.messageIndex === messageIndex &&
+                      failedPrompt !== null &&
+                      sourceIndexes.includes(failedPrompt.messageIndex) &&
                       chatContentEquals(failedPrompt.content, message.content);
                     const assistantPromptToRetry = retryPromptForAssistant(index);
                     const promptToRetry = failedUserPrompt ? message.content : assistantPromptToRetry;
+                    const activityGroup =
+                      message.role === "user"
+                        ? sourceIndexes
+                            .map((sourceIndex) => activityGroupByUserMessageIndex.get(sourceIndex))
+                            .find((group): group is ActivityGroup => Boolean(group && group.items.length > 0))
+                        : undefined;
                     return (
-                      <MessageBubble
-                        key={messageKey}
-                        message={message}
-                        searchKey={messageKey}
-                        searchActive={activeChatSearchKey === messageKey}
-                        theme={theme}
-                        busy={busy}
-                        copied={copiedMessageKey === messageKey}
-                        canRetry={Boolean(promptToRetry)}
-                        canEdit={message.role === "user"}
-                        onCopy={() => void copyMessageContent(message.content, messageKey)}
-                        onRetry={() => {
-                          if (failedUserPrompt) {
-                            void submitPrompt(message.content, { reuseFailedPrompt: true, skillNames: failedPrompt?.skillNames ?? [] });
-                            return;
-                          }
-                          if (assistantPromptToRetry) {
-                            void submitPrompt(assistantPromptToRetry);
-                          }
-                        }}
-                        onEdit={() => editPromptContent(message.content)}
-                      />
+                      <Fragment key={messageKey}>
+                        <MessageBubble
+                          message={message}
+                          searchKey={messageKey}
+                          searchActive={activeChatSearchKey === messageKey}
+                          theme={theme}
+                          busy={busy}
+                          copied={copiedMessageKey === messageKey}
+                          canRetry={Boolean(promptToRetry)}
+                          canEdit={message.role === "user"}
+                          onCopy={() => void copyMessageContent(message.content, messageKey)}
+                          onRetry={() => {
+                            if (failedUserPrompt) {
+                              void submitPrompt(message.content, {
+                                reuseFailedPrompt: true,
+                                skillNames: failedPrompt?.skillNames ?? [],
+                                loopEnabled: failedPrompt?.loopEnabled ?? false
+                              });
+                              return;
+                            }
+                            if (assistantPromptToRetry) {
+                              void submitPrompt(assistantPromptToRetry);
+                            }
+                          }}
+                          onEdit={() => editPromptContent(message.content)}
+                        />
+                        {activityGroup && activityGroup.items.length > 0 ? <ToolRunSummary group={activityGroup} /> : null}
+                      </Fragment>
                     );
                   })
                 )}
                 {busy ? (
-                  <div className="agent-thinking">
+                  <div className={agentLoopRunning ? "agent-thinking loop-active" : "agent-thinking"}>
                     <span className="pulse-dot" />
-                    Agent is working
+                    <span>{agentLoopRunning && activeAgentLoop ? agentLoopLabel : "Agent is working"}</span>
+                    {agentLoopRunning ? (
+                      <button
+                        type="button"
+                        onClick={() => void stopAgentLoop()}
+                        disabled={activeAgentLoop?.status === "stopping"}
+                        title="Stop agent loop after the current iteration"
+                        aria-label="Stop agent loop"
+                      >
+                        <X size={13} />
+                        Stop
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1851,6 +1996,21 @@ export function App() {
                           setSkillsPopoverOpen(false);
                         }}
                       />
+                      <button
+                        className={agentLoopEnabled ? "composer-loop-button active" : "composer-loop-button"}
+                        type="button"
+                        onClick={() => {
+                          setAgentLoopEnabled((current) => !current);
+                          setStatus(!agentLoopEnabled ? `Agent loop armed for ${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iterations` : "Agent loop off");
+                        }}
+                        disabled={busy}
+                        title={agentLoopEnabled ? "Turn off agent loop" : "Turn on agent loop for the next prompt"}
+                        aria-label={agentLoopEnabled ? "Turn off agent loop" : "Turn on agent loop for the next prompt"}
+                        aria-pressed={agentLoopEnabled}
+                      >
+                        <RefreshCw size={14} />
+                        <span>{agentLoopEnabled ? "Loop on" : "Loop"}</span>
+                      </button>
                       <span className={promptTokens > COMPOSER_TOKEN_BUDGET ? "composer-meter over" : "composer-meter"}>
                         {formatNumber(promptTokens)} / {formatNumber(COMPOSER_TOKEN_BUDGET)} tok
                       </span>
@@ -1900,13 +2060,27 @@ export function App() {
                   {activityCollapsed && toolActivityCount > 0 ? <span className="activity-count-badge rail">{toolActivityCount}</span> : null}
                 </button>
               </div>
-              {!activityCollapsed ? <div className="activity-list">
-                {activity.length === 0 ? (
-                  <div className="empty-activity">Tool calls and approvals will appear here.</div>
-                ) : (
-                  activity.map((item) => <ActivityRow key={item.id} item={item} />)
-                )}
-              </div> : null}
+              {!activityCollapsed ? (
+                <div className="activity-content">
+                  {latestScreenshotActivity?.imagePreview ? (
+                    <LatestActivityScreenshot item={latestScreenshotActivity} />
+                  ) : null}
+                  <div className="activity-list" ref={activityListRef}>
+                    {activity.length === 0 ? (
+                      <div className="empty-activity">Tool calls and approvals will appear here.</div>
+                    ) : (
+                      <>
+                        {activityModel.systemItems.map((item) => (
+                          <ActivityRow key={item.id} item={item} />
+                        ))}
+                        {activityGroups.map((group) => (
+                          <ActivityGroupCard key={group.id} group={group} />
+                        ))}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ) : null}
             </aside>
           </section>
         ) : view === "history" ? (
@@ -2388,6 +2562,9 @@ function SlashCommandIcon({ id }: { id: SlashCommandId }) {
   }
   if (id === "browser") {
     return <Globe size={15} />;
+  }
+  if (id === "loop") {
+    return <RefreshCw size={15} />;
   }
   return <Info size={15} />;
 }
@@ -2891,6 +3068,7 @@ function HistoryView({
                 <span>{formatDateTime(session.updatedAt)}</span>
                 <span title={session.cwd}>{basename(session.cwd)}</span>
                 <span title={sessionModelTitle(session)}>{sessionModelLabel(session)}</span>
+                {session.agentLoop ? <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span> : null}
                 <span>{session.messageCount} messages</span>
               </div>
             </button>
@@ -2937,6 +3115,7 @@ function SidebarChatItem({
         <div className="recent-chat-details">
           <span>{formatDateTime(session.updatedAt)}</span>
           <span title={sessionModelTitle(session)}>{sessionModelLabel(session)}</span>
+          {session.agentLoop ? <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span> : null}
           <span>{session.messageCount} messages</span>
         </div>
       </button>
@@ -3233,12 +3412,87 @@ function UserMessageContent({ content }: { content: ChatContent }) {
   );
 }
 
-function ActivityRow({ item }: { item: ActivityItem }) {
-  const [collapsed, setCollapsed] = useState(item.kind === "system");
+function ToolRunSummary({ group }: { group: ActivityGroup }) {
+  const [expanded, setExpanded] = useState(group.status === "running");
+  const toolItems = group.items.filter((item) => item.kind !== "system");
+  if (toolItems.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className={`tool-run-summary ${group.status}`} aria-label={`Tool activity for ${group.title}`}>
+      <button
+        className="tool-run-summary-button"
+        type="button"
+        aria-expanded={expanded}
+        title={expanded ? "Collapse tool calls" : "Expand tool calls"}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <span className="tool-run-icon">{group.status === "running" ? <span className="pulse-dot" /> : <TerminalSquare size={13} />}</span>
+        <strong>{toolRunSummaryLabel(group)}</strong>
+        <span>{group.title}</span>
+      </button>
+      {expanded ? (
+        <div className="tool-run-list">
+          {toolItems.map((item, itemIndex) => {
+            const detailPreview = toolRunDetailPreview(item);
+            return (
+              <div className={`tool-run-item ${item.kind}${item.status ? ` status-${item.status}` : ""}`} key={item.id}>
+                <span className="tool-run-step">{itemIndex + 1}</span>
+                <span className="tool-run-kind">{toolRunKindLabel(item)}</span>
+                <strong>{item.title}</strong>
+                {item.status ? <span className={`activity-status ${item.status}`}>{activityStatusLabel(item.status)}</span> : null}
+                {item.imagePreview ? <span className="tool-run-chip">Screenshot</span> : null}
+                {item.summary ? <p>{item.summary}</p> : null}
+                {detailPreview ? <pre>{detailPreview}</pre> : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ActivityGroupCard({ group }: { group: ActivityGroup }) {
+  const [collapsed, setCollapsed] = useState(group.status !== "running");
+  const toolItemCount = group.items.filter((item) => item.kind !== "system").length;
+
+  return (
+    <section className={`activity-group ${group.status}`}>
+      <button
+        className="activity-group-header"
+        type="button"
+        aria-expanded={!collapsed}
+        title={collapsed ? "Expand query tool activity" : "Collapse query tool activity"}
+        onClick={() => setCollapsed((current) => !current)}
+      >
+        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+        <div className="activity-group-title">
+          <span>Query</span>
+          <strong>{group.title}</strong>
+        </div>
+        <span className="activity-group-count">{toolEventCountLabel(toolItemCount)}</span>
+        <span className={`activity-status ${group.status}`}>{activityStatusLabel(group.status)}</span>
+      </button>
+      {!collapsed ? (
+        <div className="activity-group-body">
+          {group.items.map((item) => (
+            <ActivityRow key={item.id} item={item} defaultCollapsed />
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ActivityRow({ item, defaultCollapsed }: { item: ActivityItem; defaultCollapsed?: boolean }) {
+  const [collapsed, setCollapsed] = useState(defaultCollapsed ?? item.kind === "system");
   const diff = buildActivityDiffPreview(item);
 
   return (
-    <article className={collapsed ? `activity-row ${item.kind} collapsed` : `activity-row ${item.kind}`}>
+    <article className={activityRowClassName(item, collapsed)}>
       <button
         className="activity-title"
         type="button"
@@ -3249,10 +3503,117 @@ function ActivityRow({ item }: { item: ActivityItem }) {
         {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         <span>{item.kind}</span>
         <strong>{item.title}</strong>
+        {item.status ? <span className={`activity-status ${item.status}`}>{activityStatusLabel(item.status)}</span> : null}
       </button>
-      {!collapsed ? diff ? <DiffBlock preview={diff} /> : <pre>{item.detail}</pre> : null}
+      {!collapsed ? (
+        <div className="activity-body">
+          {item.summary ? <p className="activity-summary">{item.summary}</p> : null}
+          {item.imagePreview ? <ActivityScreenshotPreview preview={item.imagePreview} /> : null}
+          {diff ? <DiffBlock preview={diff} /> : item.detail ? <pre>{item.detail}</pre> : null}
+        </div>
+      ) : null}
     </article>
   );
+}
+
+function LatestActivityScreenshot({ item }: { item: ActivityItem }) {
+  if (!item.imagePreview) {
+    return null;
+  }
+
+  return (
+    <section className="activity-latest-screenshot" aria-label="Latest browser screenshot">
+      <div className="activity-latest-heading">
+        <ImageIcon size={13} />
+        <span>Latest screenshot</span>
+      </div>
+      {item.summary ? <p>{item.summary}</p> : null}
+      <ActivityScreenshotPreview preview={item.imagePreview} compact />
+    </section>
+  );
+}
+
+function ActivityScreenshotPreview({ preview, compact = false }: { preview: NonNullable<ActivityItem["imagePreview"]>; compact?: boolean }) {
+  const [imageState, setImageState] = useState<{ src: string | null; failed: boolean }>({ src: null, failed: false });
+
+  useEffect(() => {
+    let cancelled = false;
+    setImageState({ src: null, failed: false });
+
+    if (/^(?:data|blob|https?|file):/i.test(preview.path)) {
+      setImageState({ src: localImageSrc(preview.path), failed: false });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    window.arivu
+      .readLocalImage(preview.path)
+      .then((image) => {
+        if (!cancelled) {
+          setImageState({ src: image.dataUrl, failed: false });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setImageState({ src: localImageSrc(preview.path), failed: false });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [preview.path]);
+
+  return (
+    <figure className={compact ? "activity-screenshot compact" : "activity-screenshot"}>
+      {!imageState.failed && imageState.src ? (
+        <img src={imageState.src} alt={preview.caption} onError={() => setImageState({ src: null, failed: true })} />
+      ) : imageState.failed ? (
+        <div className="activity-screenshot-missing">Screenshot file unavailable</div>
+      ) : (
+        <div className="activity-screenshot-loading">Loading screenshot...</div>
+      )}
+      <figcaption>{preview.caption}</figcaption>
+    </figure>
+  );
+}
+
+function activityRowClassName(item: ActivityItem, collapsed: boolean) {
+  return [
+    "activity-row",
+    item.kind,
+    item.status ? `status-${item.status}` : "",
+    item.imagePreview ? "has-image-preview" : "",
+    collapsed ? "collapsed" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function activityStatusLabel(status: NonNullable<ActivityItem["status"]>) {
+  if (status === "running") {
+    return "Running";
+  }
+  if (status === "done") {
+    return "Done";
+  }
+  return "Waiting";
+}
+
+function localImageSrc(filePath: string) {
+  if (/^(?:data|blob|https?|file):/i.test(filePath)) {
+    return filePath;
+  }
+
+  const normalized = filePath.replace(/\\/g, "/");
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    return `file:///${normalized.split("/").map(encodeURIComponent).join("/")}`;
+  }
+  if (normalized.startsWith("/")) {
+    return `file://${normalized.split("/").map((part) => encodeURIComponent(part)).join("/")}`;
+  }
+  return normalized;
 }
 
 function DiffBlock({ preview }: { preview: DiffPreview }) {
@@ -4172,6 +4533,33 @@ function modelSelectionStatus(selection: PublicModelSelection | undefined) {
   return `Auto picked ${selection.model}`;
 }
 
+function agentLoopStatusFromEvent(event: SessionLifecycleEvent) {
+  return event.agentLoop ? agentLoopStatusLabel(event.agentLoop) : null;
+}
+
+function agentLoopStatusLabel(loop: AgentLoopState) {
+  const progress = `${loop.iteration}/${loop.maxIterations}`;
+  if (loop.status === "running") {
+    return `Agent loop ${progress}`;
+  }
+  if (loop.status === "stopping") {
+    return `Stopping loop ${progress}`;
+  }
+  if (loop.status === "completed") {
+    return `Loop completed in ${loop.iteration} ${loop.iteration === 1 ? "iteration" : "iterations"}`;
+  }
+  if (loop.status === "stopped") {
+    return `Loop stopped at ${progress}`;
+  }
+  if (loop.status === "blocked") {
+    return `Loop blocked at ${progress}`;
+  }
+  if (loop.status === "failed") {
+    return `Loop failed at ${progress}`;
+  }
+  return `Loop reached ${loop.maxIterations} iterations`;
+}
+
 function sessionModelLabel(session: SessionSummary) {
   if (session.modelMode === "auto" || isAutoModelId(session.model)) {
     return session.selectedModel ? `Auto -> ${session.selectedModel}` : "Auto";
@@ -4184,6 +4572,19 @@ function sessionModelTitle(session: SessionSummary) {
     return [session.selectedProviderName, session.modelSelectionReason].filter(Boolean).join(" - ") || "Auto model selection";
   }
   return session.model ?? "default model";
+}
+
+function sessionLoopLabel(loop: AgentLoopState) {
+  if (loop.status === "running" || loop.status === "stopping") {
+    return `Loop ${loop.iteration}/${loop.maxIterations}`;
+  }
+  if (loop.status === "completed") {
+    return "Loop done";
+  }
+  if (loop.status === "max_iterations") {
+    return "Loop max";
+  }
+  return `Loop ${loop.status}`;
 }
 
 function uniqueProviderId(baseId: string, providers: ProviderFormState[]) {
@@ -4318,7 +4719,8 @@ function buildSlashCommandEntries({
   nonSystemMessageCount,
   availableToolCount,
   availableSkillCount,
-  pendingSkillCount
+  pendingSkillCount,
+  agentLoopEnabled
 }: {
   state: DesktopState | null;
   busy: boolean;
@@ -4327,6 +4729,7 @@ function buildSlashCommandEntries({
   availableToolCount: number;
   availableSkillCount: number;
   pendingSkillCount: number;
+  agentLoopEnabled: boolean;
 }): SlashCommandEntry[] {
   return SLASH_COMMANDS.map((command) => {
     if (command.id === "compact") {
@@ -4365,6 +4768,13 @@ function buildSlashCommandEntries({
       return {
         ...command,
         detail: state?.browser.paneOpen ? "Browser window open" : "Browser window hidden"
+      };
+    }
+
+    if (command.id === "loop") {
+      return {
+        ...command,
+        detail: agentLoopEnabled ? "Currently armed" : `${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iteration budget`
       };
     }
 
@@ -4407,6 +4817,7 @@ function buildSessionCommandOutput({
       ...(state.modelSelection?.mode === "auto" && !isAutoModelId(state.modelSelection.model)
         ? [{ label: "Auto picked", value: `${state.modelSelection.model} (${state.modelSelection.providerName})` }]
         : []),
+      ...(state.agentLoop ? [{ label: "Agent loop", value: agentLoopStatusLabel(state.agentLoop) }] : []),
       { label: "Trust mode", value: state.config.trustMode },
       {
         label: "Context used",
@@ -4622,6 +5033,52 @@ function chatContentEquals(left: ChatContent, right: ChatContent) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function deriveVisibleMessages(messages: ChatMessage[]): VisibleMessageEntry[] {
+  const visible: VisibleMessageEntry[] = [];
+
+  messages.forEach((message, messageIndex) => {
+    if (message.role === "user") {
+      const last = visible.at(-1);
+      if (last?.message.role === "user" && chatContentEquals(last.message.content, message.content)) {
+        last.sourceIndexes.push(messageIndex);
+        last.key = `${last.message.role}-${last.sourceIndexes.join("-")}`;
+        return;
+      }
+      visible.push({
+        message,
+        messageIndex,
+        sourceIndexes: [messageIndex],
+        key: `user-${messageIndex}`
+      });
+      return;
+    }
+
+    if (message.role !== "assistant" || !chatContentHasText(message.content)) {
+      return;
+    }
+
+    const last = visible.at(-1);
+    if (last?.message.role === "assistant") {
+      last.message = {
+        ...last.message,
+        content: [chatContentToText(last.message.content), chatContentToText(message.content)].filter(Boolean).join("\n\n")
+      };
+      last.sourceIndexes.push(messageIndex);
+      last.key = `${last.message.role}-${last.sourceIndexes.join("-")}`;
+      return;
+    }
+
+    visible.push({
+      message,
+      messageIndex,
+      sourceIndexes: [messageIndex],
+      key: `assistant-${messageIndex}`
+    });
+  });
+
+  return visible;
+}
+
 function imagePartsFromContent(content: ChatContent): ChatImagePart[] {
   return Array.isArray(content) ? content.filter((part): part is ChatImagePart => part.type === "image_url") : [];
 }
@@ -4649,39 +5106,330 @@ function mimeTypeFromDataUrl(dataUrl: string) {
   return /^data:([^;,]+);base64,/i.exec(dataUrl)?.[1] ?? "image";
 }
 
-function deriveActivity(messages: ChatMessage[], state: DesktopState | null): ActivityItem[] {
-  const activity: ActivityItem[] = [];
+function findLatestActivityScreenshot(activity: ActivityItem[]) {
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    const item = activity[index];
+    if (item?.imagePreview) {
+      return item;
+    }
+  }
+  return null;
+}
+
+function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null): ActivityModel {
+  const systemItems: ActivityItem[] = [];
+  const groups: ActivityGroup[] = [];
+  const groupsByUserMessageIndex = new Map<number, ActivityGroup>();
+  const completedToolCallIds = new Set(
+    messages.flatMap((message) => (message.role === "tool" && message.toolCallId ? [message.toolCallId] : []))
+  );
+  const currentSessionRunning = state ? isSessionRunning(state, state.sessionId) : false;
   if (state) {
-    activity.push({
+    systemItems.push({
       id: "workspace",
       kind: "system",
       title: "workspace",
       detail: `${state.workspace.root}\n${state.workspace.dirty ? "git: dirty" : "git: clean"}`
     });
+    if (state.agentLoop) {
+      systemItems.push({
+        id: "agent-loop",
+        kind: "system",
+        title: "agent loop",
+        detail: [
+          agentLoopStatusLabel(state.agentLoop),
+          `Goal: ${state.agentLoop.goal}`,
+          `Started: ${formatDateTime(state.agentLoop.startedAt)}`,
+          `Updated: ${formatDateTime(state.agentLoop.updatedAt)}`
+        ].join("\n"),
+        summary: state.agentLoop.lastDecision
+          ? `${agentLoopStatusLabel(state.agentLoop)}; last decision: ${state.agentLoop.lastDecision}`
+          : agentLoopStatusLabel(state.agentLoop),
+        status: state.agentLoop.status === "running" || state.agentLoop.status === "stopping" ? "running" : "done"
+      });
+    }
   }
 
+  let currentGroup: ActivityGroup | null = null;
+  let detachedGroup: ActivityGroup | null = null;
+  const getDetachedGroup = () => {
+    if (!detachedGroup) {
+      detachedGroup = {
+        id: "activity-group-session",
+        userMessageIndex: null,
+        title: "Session activity",
+        detail: "Tool activity that was restored without a visible user query.",
+        items: [],
+        status: "done"
+      };
+      groups.push(detachedGroup);
+    }
+    return detachedGroup;
+  };
+  const activeGroup = () => currentGroup ?? getDetachedGroup();
+
   messages.forEach((message, index) => {
+    if (message.role === "user") {
+      const group: ActivityGroup = {
+        id: `activity-group-${index}`,
+        userMessageIndex: index,
+        title: queryActivityTitle(message.content),
+        detail: chatContentToText(message.content),
+        items: [],
+        status: "done"
+      };
+      currentGroup = group;
+      groups.push(group);
+      groupsByUserMessageIndex.set(index, group);
+      return;
+    }
+
     if (message.role === "assistant" && message.toolCalls?.length) {
+      const group = activeGroup();
       for (const call of message.toolCalls) {
-        activity.push({
+        const complete = completedToolCallIds.has(call.id);
+        group.items.push({
           id: `call-${index}-${call.id}`,
           kind: "call",
           title: call.name,
-          detail: safeJson(call.arguments)
+          detail: safeJson(call.arguments),
+          summary: summarizeToolCall(call),
+          status: complete ? "done" : currentSessionRunning ? "running" : "waiting"
         });
       }
     }
     if (message.role === "tool") {
-      activity.push({
+      const group = activeGroup();
+      const toolResult = buildToolResultActivity(message);
+      group.items.push({
         id: `tool-${index}-${message.toolCallId ?? message.name}`,
         kind: "result",
         title: message.name ?? "tool",
-        detail: chatContentToText(message.content)
+        detail: toolResult.detail,
+        summary: toolResult.summary,
+        imagePreview: toolResult.imagePreview
       });
     }
   });
 
-  return activity;
+  for (const group of groups) {
+    group.status = deriveActivityGroupStatus(group.items);
+  }
+
+  if (currentSessionRunning) {
+    const runningCallCount = groups.flatMap((group) => group.items).filter((item) => item.status === "running").length;
+    systemItems.push({
+      id: "agent-progress",
+      kind: "system",
+      title: runningCallCount > 0 ? "agent progress" : "agent working",
+      detail: "This panel shows visible progress from streamed messages and tool calls. Private model reasoning is not displayed.",
+      summary:
+        runningCallCount > 0
+          ? `${runningCallCount} tool ${runningCallCount === 1 ? "call is" : "calls are"} running.`
+          : "Waiting for the next streamed response or tool call."
+    });
+  }
+
+  const items = [...systemItems, ...groups.flatMap((group) => group.items)];
+  return {
+    items,
+    systemItems,
+    groups,
+    groupsByUserMessageIndex
+  };
+}
+
+function deriveActivityGroupStatus(items: ActivityItem[]): ActivityGroupStatus {
+  if (items.some((item) => item.status === "running")) {
+    return "running";
+  }
+  if (items.some((item) => item.status === "waiting")) {
+    return "waiting";
+  }
+  return "done";
+}
+
+function queryActivityTitle(content: ChatContent) {
+  const text = chatContentTextOnly(content).replace(/\s+/g, " ").trim();
+  return text ? truncateMiddle(text, 74) : "Image or attachment query";
+}
+
+function toolRunSummaryLabel(group: ActivityGroup) {
+  const count = group.items.filter((item) => item.kind !== "system").length;
+  if (group.status === "running") {
+    return `Running ${toolEventCountLabel(count)}`;
+  }
+  if (group.status === "waiting") {
+    return `Waiting on ${toolEventCountLabel(count)}`;
+  }
+  return `Ran ${toolEventCountLabel(count)}`;
+}
+
+function toolEventCountLabel(count: number) {
+  return `${count} tool ${count === 1 ? "event" : "events"}`;
+}
+
+function toolRunKindLabel(item: ActivityItem) {
+  if (item.kind === "call") {
+    return "Call";
+  }
+  if (item.kind === "result") {
+    return "Result";
+  }
+  return "Info";
+}
+
+function toolRunDetailPreview(item: ActivityItem) {
+  const detail = item.detail.trim();
+  if (!detail || item.imagePreview) {
+    return undefined;
+  }
+  if (item.summary && detail === item.summary) {
+    return undefined;
+  }
+  const maxLength = item.kind === "call" ? 360 : 260;
+  return detail.length > maxLength ? `${detail.slice(0, maxLength)}...` : detail;
+}
+
+function summarizeToolCall(call: ToolCall) {
+  const args = call.arguments;
+  if (call.name.startsWith("browser_") && isRecord(args)) {
+    return summarizeBrowserToolCall(call.name, args);
+  }
+
+  return undefined;
+}
+
+function summarizeBrowserToolCall(name: string, args: Record<string, unknown>) {
+  const mode = stringValue(args.mode) ?? "active";
+  const tabLabel = browserTabLabel(args);
+  if (name === "browser_open") {
+    if (args.newTab === true) {
+      return `Open ${stringValue(args.url) ?? "URL"} in a new ${mode} browser tab.`;
+    }
+    return `Open ${stringValue(args.url) ?? "URL"} in ${mode} browser${tabLabel}.`;
+  }
+  if (name === "browser_screenshot") {
+    return `Capture a screenshot from the ${mode} browser${tabLabel}.`;
+  }
+  if (name === "browser_snapshot") {
+    return `Read a page snapshot from the ${mode} browser${tabLabel}.`;
+  }
+  if (name === "browser_console") {
+    return `Read console output from the ${mode} browser${tabLabel}.`;
+  }
+  if (name === "browser_click") {
+    return `Click ${quoteActivityTarget(stringValue(args.target))} in the ${mode} browser${tabLabel}.`;
+  }
+  if (name === "browser_click_at") {
+    const x = numberValue(args.x);
+    const y = numberValue(args.y);
+    const coordinateSpace = stringValue(args.coordinateSpace) ?? "css";
+    const target = x !== undefined && y !== undefined ? `${Math.round(x)}, ${Math.round(y)} ${coordinateSpace}` : "coordinates";
+    return `Click ${target} in the ${mode} browser${tabLabel}.`;
+  }
+  if (name === "browser_type") {
+    const submit = args.submit === true ? " and submit" : "";
+    return `Type into ${quoteActivityTarget(stringValue(args.target))}${submit} in the ${mode} browser${tabLabel}.`;
+  }
+  return undefined;
+}
+
+function browserTabLabel(args: Record<string, unknown>) {
+  const tabId = stringValue(args.tabId);
+  return tabId ? ` tab ${tabId}` : "";
+}
+
+function buildToolResultActivity(message: ChatMessage): Pick<ActivityItem, "detail" | "summary" | "imagePreview"> {
+  const detail = chatContentToText(message.content);
+  const parsed = parseMaybeJson(detail);
+  if (!isRecord(parsed)) {
+    return { detail };
+  }
+
+  const action = stringValue(parsed.action);
+  const mode = stringValue(parsed.mode);
+  const tabId = stringValue(parsed.tabId);
+  const title = stringValue(parsed.title);
+  const url = stringValue(parsed.url);
+  const screenshotPath = stringValue(parsed.screenshotPath);
+  const size = isRecord(parsed.size) ? parsed.size : undefined;
+  const width = numberValue(size?.width);
+  const height = numberValue(size?.height);
+
+  const summaryParts: string[] = [];
+  if (action) {
+    summaryParts.push(browserActionLabel(action));
+  }
+  if (mode) {
+    summaryParts.push(`${mode} browser`);
+  }
+  if (tabId && tabId !== mode) {
+    summaryParts.push(`tab ${tabId}`);
+  }
+  if (title) {
+    summaryParts.push(title);
+  } else if (url) {
+    summaryParts.push(url);
+  }
+  const summary = summaryParts.length > 0 ? summaryParts.join(" - ") : undefined;
+
+  if (screenshotPath) {
+    const dimensions = width && height ? `${width} x ${height}` : "preview";
+    return {
+      detail,
+      summary: summary ?? "Browser screenshot captured.",
+      imagePreview: {
+        path: screenshotPath,
+        width,
+        height,
+        caption: `Browser screenshot - ${dimensions}`
+      }
+    };
+  }
+
+  return { detail, summary };
+}
+
+function browserActionLabel(action: string) {
+  switch (action) {
+    case "open":
+      return "Opened page";
+    case "screenshot":
+      return "Captured screenshot";
+    case "snapshot":
+      return "Read page snapshot";
+    case "console":
+      return "Read console";
+    case "click":
+      return "Clicked page";
+    case "click_at":
+      return "Clicked coordinates";
+    case "type":
+      return "Typed into page";
+    default:
+      return action;
+  }
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function quoteActivityTarget(value?: string) {
+  return value ? `"${truncateMiddle(value, 52)}"` : "target";
+}
+
+function truncateMiddle(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  const keep = Math.max(4, Math.floor((maxLength - 1) / 2));
+  return `${value.slice(0, keep)}...${value.slice(-keep)}`;
 }
 
 function isSessionRunning(state: DesktopState, sessionId?: string) {

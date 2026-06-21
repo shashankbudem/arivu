@@ -21,6 +21,15 @@ describe("session store", () => {
       id: "abc123",
       cwd: "/tmp/project",
       trustMode: "ask",
+      agentLoop: {
+        status: "completed",
+        goal: "fix the bug",
+        iteration: 2,
+        maxIterations: 5,
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:05:00.000Z",
+        lastDecision: "done"
+      },
       messages: [{ role: "user", content: "hello" }],
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z"
@@ -29,6 +38,15 @@ describe("session store", () => {
     await expect(store.load("abc123")).resolves.toMatchObject({
       id: "abc123",
       cwd: "/tmp/project",
+      agentLoop: {
+        status: "completed",
+        goal: "fix the bug",
+        iteration: 2,
+        maxIterations: 5,
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:05:00.000Z",
+        lastDecision: "done"
+      },
       messages: [{ role: "user", content: "hello" }]
     });
   });

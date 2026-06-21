@@ -242,6 +242,67 @@ describe("agent", () => {
     expect(session.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
   });
 
+  it("continues an existing transcript without adding a synthetic user message", async () => {
+    const session = createTestSession();
+    session.messages.push({ role: "system", content: "Agent loop continuation 2 of 5. Continue the same task." });
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "Continued work."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    const result = await agent.continue();
+
+    expect(result.output).toBe("Continued work.");
+    expect(session.messages.filter((message) => message.role === "user")).toHaveLength(1);
+    expect(session.messages.at(-1)).toEqual({ role: "assistant", content: "Continued work." });
+  });
+
+  it("keeps the base Arivu system prompt when loop instructions are already present", async () => {
+    const now = new Date().toISOString();
+    const session: AgentSession = {
+      id: "loop-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages: [
+        { role: "system", content: "Agent loop mode is active for the next user request." },
+        { role: "user", content: "fix this" }
+      ],
+      createdAt: now,
+      updatedAt: now
+    };
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "Done."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    await agent.run("fix this", { promptAlreadyInSession: true });
+
+    const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(requestText).toContain("You are Arivu");
+    expect(requestText).toContain("Agent loop mode is active");
+  });
+
   it("ignores tool calls that were not advertised for the current step", async () => {
     vi.stubGlobal(
       "fetch",

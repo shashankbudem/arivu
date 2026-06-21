@@ -33,9 +33,24 @@ export class Agent {
   }
 
   async run(prompt: ChatContent, runOptions: AgentRunOptions = {}): Promise<{ output: string; session: AgentSession }> {
+    return this.runWithPreparedSession(prompt, runOptions, "prompt");
+  }
+
+  async continue(runOptions: AgentRunOptions = {}): Promise<{ output: string; session: AgentSession }> {
+    return this.runWithPreparedSession("", runOptions, "continue");
+  }
+
+  private async runWithPreparedSession(
+    prompt: ChatContent,
+    runOptions: AgentRunOptions,
+    mode: "prompt" | "continue"
+  ): Promise<{ output: string; session: AgentSession }> {
     const rollbackMessages = cloneMessages(this.session.messages);
     const promptAlreadyInSession = runOptions.promptAlreadyInSession === true;
     const existingPromptMessage = promptAlreadyInSession ? this.session.messages.at(-1) : undefined;
+    if (promptAlreadyInSession && mode !== "prompt") {
+      throw new Error("A saved prompt can only be reused for prompt runs.");
+    }
     if (promptAlreadyInSession) {
       if (existingPromptMessage?.role !== "user") {
         throw new Error("The saved prompt must be the last user message.");
@@ -54,7 +69,9 @@ export class Agent {
       browser: this.options.browser
     });
 
-    const existingSystem = this.session.messages.find((message) => message.role === "system");
+    const existingSystem = this.session.messages.find(
+      (message) => message.role === "system" && chatContentToText(message.content).includes("You are Arivu")
+    );
     if (!existingSystem) {
       this.session.messages.unshift({
         role: "system",
@@ -75,6 +92,9 @@ export class Agent {
           : "",
         !existingSystemContent.includes("For screenshot or visual browser checks, prefer Chrome DevTools MCP")
           ? "For screenshot or visual browser checks, prefer Chrome DevTools MCP through mcp_list_tools and mcp_call_tool when it is configured; fall back to browser_screenshot only when Chrome tooling is unavailable."
+          : "",
+        !existingSystemContent.includes("If browser_snapshot is empty but browser_screenshot returns visual elements")
+          ? "If browser_snapshot is empty but browser_screenshot returns visual elements or a usable screenshot, continue with browser_click or browser_click_at; do not conclude the page is unloaded solely from an empty snapshot."
           : ""
       ].filter(Boolean);
       if (additions.length > 0) {
@@ -101,8 +121,9 @@ export class Agent {
       }
     }
 
-    const attachedSkillMessages = await skillMessagesForPrompt(prompt, availableSkillNames, loadedSkillNames);
-    if (!promptAlreadyInSession) {
+    const attachedSkillMessages =
+      mode === "prompt" ? await skillMessagesForPrompt(prompt, availableSkillNames, loadedSkillNames) : [];
+    if (mode === "prompt" && !promptAlreadyInSession) {
       this.session.messages.push({ role: "user", content: trimChatContent(prompt) });
     }
 
@@ -219,6 +240,7 @@ function systemPrompt(workspaceRoot: string) {
     "Run relevant tests or checks after edits when practical.",
     "Use Arivu browser tools as hidden/background tools by default. Use visible browser mode only when the user explicitly asks to see a separate browser window.",
     "For screenshot or visual browser checks, prefer Chrome DevTools MCP through mcp_list_tools and mcp_call_tool when it is configured; fall back to browser_screenshot only when Chrome tooling is unavailable.",
+    "If browser_snapshot is empty but browser_screenshot returns visual elements or a usable screenshot, continue with browser_click or browser_click_at; do not conclude the page is unloaded solely from an empty snapshot.",
     "Do not use emojis in assistant replies.",
     `The active workspace root is ${workspaceRoot}.`
   ].join("\n");

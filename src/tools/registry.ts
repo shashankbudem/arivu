@@ -127,17 +127,21 @@ export function createToolRegistry(context: ToolContext) {
       schema: {
         name: "browser_open",
         description:
-          "Open a URL in Arivu's isolated browser. Defaults to hidden background mode; use visible mode only when the user explicitly asks to see a separate browser window.",
+          "Open a URL in Arivu's isolated browser. Defaults to hidden background mode; use visible mode only when the user explicitly asks to see a separate browser window. In visible mode, pass newTab to create a new browser tab or tabId to target an existing tab.",
         parameters: objectSchema({
           url: { type: "string", description: "URL to open. localhost:5173 is accepted and normalized to http://localhost:5173." },
-          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to hidden background mode." }
+          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to hidden background mode." },
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
+          newTab: { type: "boolean", description: "Create and activate a new visible browser tab before opening the URL." }
         })
       },
       async execute(args) {
         const parsed = z
           .object({
             url: z.string().trim().min(1),
-            mode: z.enum(["visible", "background"]).optional()
+            mode: z.enum(["visible", "background"]).optional(),
+            tabId: z.string().trim().min(1).optional(),
+            newTab: z.boolean().default(false)
           })
           .parse(args);
         const url = normalizeBrowserUrl(parsed.url);
@@ -149,7 +153,7 @@ export function createToolRegistry(context: ToolContext) {
           mode,
           destructive: !isLocalBrowserUrl(url)
         });
-        return formatBrowserToolResult("open", await browser.open({ url, mode }));
+        return formatBrowserToolResult("open", await browser.open({ url, mode, tabId: parsed.tabId, newTab: parsed.newTab }));
       }
     });
 
@@ -157,18 +161,20 @@ export function createToolRegistry(context: ToolContext) {
       schema: {
         name: "browser_screenshot",
         description:
-          "Capture the current viewport of Arivu's isolated browser and save it to a temporary PNG file. Defaults to hidden background mode. For user-visible visual checks, prefer a configured Chrome DevTools MCP server when available.",
+          "Capture the current viewport of Arivu's isolated browser and save it to a PNG file. Also returns frame-aware visual metadata and CSS viewport coordinates that can be used with browser_click_at. Defaults to the active browser mode.",
         parameters: objectSchema({
-          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to hidden background mode." }
+          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to the active browser mode." },
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." }
         })
       },
       async execute(args) {
         const parsed = z
           .object({
-            mode: z.enum(["visible", "background"]).optional()
+            mode: z.enum(["visible", "background"]).optional(),
+            tabId: z.string().trim().min(1).optional()
           })
           .parse(args);
-        return formatBrowserToolResult("screenshot", await browser.screenshot({ mode: parsed.mode ?? hiddenAgentBrowserMode() }));
+        return formatBrowserToolResult("screenshot", await browser.screenshot({ mode: parsed.mode, tabId: parsed.tabId }));
       }
     });
 
@@ -176,9 +182,10 @@ export function createToolRegistry(context: ToolContext) {
       schema: {
         name: "browser_snapshot",
         description:
-          "Read a compact DOM and text snapshot from Arivu's isolated browser. Defaults to hidden background mode. Prefer this before clicking when inspecting page state.",
+          "Read a compact frame-aware DOM, shadow DOM, text, and clickable-element snapshot from Arivu's isolated browser. Defaults to the active browser mode. Prefer this before clicking when inspecting page state.",
         parameters: objectSchema({
-          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to hidden background mode." },
+          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to the active browser mode." },
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
           maxLength: { type: "number", description: "Maximum snapshot text length, from 1000 to 20000." }
         })
       },
@@ -186,19 +193,21 @@ export function createToolRegistry(context: ToolContext) {
         const parsed = z
           .object({
             mode: z.enum(["visible", "background"]).optional(),
+            tabId: z.string().trim().min(1).optional(),
             maxLength: z.number().int().min(1000).max(20_000).default(12_000)
           })
           .parse(args);
-        return formatBrowserToolResult("snapshot", await browser.snapshot({ ...parsed, mode: parsed.mode ?? hiddenAgentBrowserMode() }));
+        return formatBrowserToolResult("snapshot", await browser.snapshot(parsed));
       }
     });
 
     register({
       schema: {
         name: "browser_console",
-        description: "Read console logs and errors collected from Arivu's isolated browser. Defaults to hidden background mode.",
+        description: "Read console logs and errors collected from Arivu's isolated browser. Defaults to the active browser mode.",
         parameters: objectSchema({
-          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to hidden background mode." },
+          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to the active browser mode." },
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
           levels: { type: "array", items: { type: "string" }, description: "Optional log levels such as error, warning, info, or debug." },
           limit: { type: "number", description: "Maximum logs to return, from 1 to 100." }
         })
@@ -207,11 +216,12 @@ export function createToolRegistry(context: ToolContext) {
         const parsed = z
           .object({
             mode: z.enum(["visible", "background"]).optional(),
+            tabId: z.string().trim().min(1).optional(),
             levels: z.array(z.string()).optional(),
             limit: z.number().int().min(1).max(100).default(50)
           })
           .parse(args);
-        return formatBrowserToolResult("console", await browser.console({ ...parsed, mode: parsed.mode ?? hiddenAgentBrowserMode() }));
+        return formatBrowserToolResult("console", await browser.console(parsed));
       }
     });
 
@@ -219,20 +229,22 @@ export function createToolRegistry(context: ToolContext) {
       schema: {
         name: "browser_click",
         description:
-          "Click an element in Arivu's isolated browser by CSS selector, visible text, aria-label, title, or placeholder. Defaults to hidden background mode.",
+          "Click an element in Arivu's isolated browser by CSS selector, visible text, aria-label, title, or placeholder. Searches frames and open shadow roots. Defaults to the active browser mode.",
         parameters: objectSchema({
           target: { type: "string", description: "CSS selector or visible element text to click." },
-          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to hidden background mode." }
+          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to the active browser mode." },
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." }
         })
       },
       async execute(args) {
         const parsed = z
           .object({
             target: z.string().trim().min(1),
-            mode: z.enum(["visible", "background"]).optional()
+            mode: z.enum(["visible", "background"]).optional(),
+            tabId: z.string().trim().min(1).optional()
           })
           .parse(args);
-        const mode = parsed.mode ?? hiddenAgentBrowserMode();
+        const mode = browserActionMode(browser, parsed.mode);
         await context.approvals.require({
           type: "browser",
           action: "click",
@@ -246,13 +258,53 @@ export function createToolRegistry(context: ToolContext) {
 
     register({
       schema: {
+        name: "browser_click_at",
+        description:
+          "Click exact coordinates in Arivu's isolated browser when DOM selectors fail. Use CSS viewport coordinates from browser_snapshot/browser_screenshot visual elements, or image coordinates from the latest screenshot.",
+        parameters: objectSchema({
+          x: { type: "number", description: "X coordinate to click." },
+          y: { type: "number", description: "Y coordinate to click." },
+          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to the active browser mode." },
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
+          coordinateSpace: {
+            type: "string",
+            enum: ["css", "image"],
+            description: "Coordinate space. Use css for viewport coordinates, or image for pixels in the latest screenshot."
+          }
+        })
+      },
+      async execute(args) {
+        const parsed = z
+          .object({
+            x: z.number().finite(),
+            y: z.number().finite(),
+            mode: z.enum(["visible", "background"]).optional(),
+            tabId: z.string().trim().min(1).optional(),
+            coordinateSpace: z.enum(["css", "image"]).default("css")
+          })
+          .parse(args);
+        const mode = browserActionMode(browser, parsed.mode);
+        await context.approvals.require({
+          type: "browser",
+          action: "click coordinates",
+          target: `${parsed.coordinateSpace}:${parsed.x},${parsed.y}`,
+          mode,
+          destructive: false
+        });
+        return formatBrowserToolResult("click_at", await browser.clickAt({ ...parsed, mode }));
+      }
+    });
+
+    register({
+      schema: {
         name: "browser_type",
         description:
-          "Type text into an input, textarea, select, or editable element in Arivu's isolated browser by selector or label text. Defaults to hidden background mode.",
+          "Type text into an input, textarea, select, or editable element in Arivu's isolated browser by selector or label text. Searches frames and open shadow roots. Defaults to the active browser mode.",
         parameters: objectSchema({
           target: { type: "string", description: "CSS selector, label text, aria-label, title, or placeholder to type into." },
           text: { type: "string", description: "Text to enter." },
-          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to hidden background mode." },
+          mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to the active browser mode." },
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
           submit: { type: "boolean", description: "Press Enter after typing." }
         })
       },
@@ -262,10 +314,11 @@ export function createToolRegistry(context: ToolContext) {
             target: z.string().trim().min(1),
             text: z.string(),
             mode: z.enum(["visible", "background"]).optional(),
+            tabId: z.string().trim().min(1).optional(),
             submit: z.boolean().default(false)
           })
           .parse(args);
-        const mode = parsed.mode ?? hiddenAgentBrowserMode();
+        const mode = browserActionMode(browser, parsed.mode);
         await context.approvals.require({
           type: "browser",
           action: parsed.submit ? "type and submit" : "type",
@@ -511,6 +564,10 @@ function objectSchema(properties: Record<string, unknown>) {
 
 function hiddenAgentBrowserMode(): BrowserMode {
   return "background";
+}
+
+function browserActionMode(browser: BrowserToolController, requestedMode: BrowserMode | undefined): BrowserMode {
+  return requestedMode ?? browser.getState().activeMode ?? browser.getState().defaultMode ?? hiddenAgentBrowserMode();
 }
 
 async function exists(filePath: string) {

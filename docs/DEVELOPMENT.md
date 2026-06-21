@@ -78,6 +78,13 @@ Tool-calling check:
 arivu --trust readonly "Use the list tool to list top-level files, then summarize them."
 ```
 
+Desktop agent-loop check:
+
+1. Run `npm run desktop:dev`.
+2. Toggle `Loop` in the composer or run `/loop`.
+3. Send a bounded task such as "Inspect the repo and tell me one thing to improve."
+4. Confirm the working pill shows loop progress, Activity shows an agent-loop system item, and Stop Loop changes the status to stopping until the current iteration finishes.
+
 Current-news/web-search check:
 
 ```bash
@@ -138,6 +145,15 @@ ARIVU_DESKTOP_SMOKE=1 ./node_modules/.bin/electron dist-desktop/main/main.js
 
 Smoke mode loads the built renderer, captures a screenshot in the system temp directory, prints the path, and exits.
 
+Browser tab smoke check:
+
+```bash
+npm run desktop:build
+ARIVU_BROWSER_SMOKE=1 ./node_modules/.bin/electron dist-desktop/main/main.js
+```
+
+Browser smoke mode opens the visible browser window, creates two visible tabs, captures tab screenshots in the system temp directory, prints the tab ids and screenshot paths, and exits.
+
 Desktop workflows to check manually after UI changes:
 
 - Startup and `New chat` start with no project selected.
@@ -154,7 +170,9 @@ Desktop workflows to check manually after UI changes:
 - Model selection opens a dialog with search, loads options from the selected provider's `GET /models`, and keeps manual model id entry available when the provider has no list or no match.
 - Settings can save multiple OpenAI-compatible LLM providers, a Tavily key, and MCP server JSON. Confirm the model picker searches only the selected provider's models and does not combine lists across providers.
 - Header actions are icon-only and expose hover/focus tooltips.
-- The Browser header action opens or hides the separate browser window. Verify explicit visible URL opens target that window, default agent browser tools remain hidden/background, and the main workspace layout does not gain an embedded browser column.
+- The Browser header action opens or hides the separate maximized browser window. Verify explicit visible URL opens in that window, default agent browser tools remain hidden/background, and the main workspace layout does not gain an embedded browser column.
+- In the visible browser window, verify the tab strip can create a new tab, select between tabs, close a tab, keep each tab's URL/title/history separate, navigate with the address bar/back/forward/reload controls, and convert non-URL address text into a Google search.
+- For browser tool QA, verify `browser_open` with `mode: "visible"` opens the active visible tab, `browser_open` with `newTab: true` creates a visible tab, `tabId` targets a specific visible tab, and `browser_screenshot` produces a fresh Activity screenshot preview for the intended tab.
 - `Refresh state` reloads workspace, config, and active session state.
 - `Compact context` summarizes older saved messages locally, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.
@@ -169,7 +187,8 @@ Desktop workflows to check manually after UI changes:
 - Agent reply actions show icon-only Retry and Copy controls below the reply. Retry resubmits the related user prompt.
 - A failed send keeps the user bubble in the transcript, marks it retryable, and exposes icon-only Retry in the error strip.
 - Large pasted text opens the token-budget review dialog before insertion.
-- Sidebar sections, the left sidebar, the compact Activity rail/panel, and Activity rows collapse/expand.
+- Tool-call activity is grouped by the triggering user query. Verify a prompt that uses multiple tools shows one expandable tool-run marker in the chat transcript and one matching expandable query group in the Activity panel.
+- Sidebar sections, the left sidebar, the compact Activity rail/panel, Activity query groups, and Activity rows collapse/expand.
 - The left sidebar and expanded Activity panel resize by dragging their divider handles.
 - Assistant replies render as Markdown; fenced code blocks are syntax-highlighted and expose an icon-only copy button.
 - Light/dark mode and UI concept samples remain usable after layout changes.

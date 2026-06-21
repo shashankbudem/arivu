@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/arivu-logo.svg" alt="Arivu logo" width="96" height="96">
+</p>
+
 # Arivu
 
 Arivu (`arivu`) is a local coding agent with a desktop app, terminal TUI, and one-shot CLI mode. It can inspect a workspace, call an OpenAI-compatible model, send multimodal text+image prompts, run validated tools, search the web, control hidden and visible isolated browser targets, use globally installed local skills, call configured MCP tools, get local date/time context, edit files, execute approved shell commands, and save resumable sessions.
@@ -22,7 +26,7 @@ Run the TUI:
 npm run dev
 ```
 
-The desktop app includes a compact workspace sidebar, expandable project chat groups, standalone chats, new/open/create workspace controls, full chat history with delete controls, a prompt `+` menu, direct searchable model switching from the composer, browser-style chat search, a separate browser window with hidden agent browser tools by default, a token-aware multimodal composer with pasted-image attachments, inline available-tools drawer, local context compaction for long chats, Markdown-rendered replies with highlighted copyable code blocks, light/dark modes, UI concept samples, a slim collapsible Activity rail, settings view, and approval modal. The TUI remains available as a terminal fallback.
+The desktop app includes a compact workspace sidebar, expandable project chat groups, standalone chats, new/open/create workspace controls, full chat history with delete controls, a prompt `+` menu, direct searchable model switching from the composer, browser-style chat search, a separate tabbed browser window with hidden agent browser tools by default, a token-aware multimodal composer with pasted-image attachments, one-shot bounded agent loop mode, inline available-tools drawer, local context compaction for long chats, Markdown-rendered replies with highlighted copyable code blocks, light/dark modes, UI concept samples, a slim collapsible Activity rail grouped by user query, settings view, and approval modal. The TUI remains available as a terminal fallback.
 
 After building, the package exposes the `arivu` binary.
 
@@ -82,12 +86,16 @@ Web search uses Tavily when `ARIVU_TAVILY_API_KEY`, `TAVILY_API_KEY`, or saved `
 
 Browser control:
 
-- The desktop app has a hidden isolated browser target for agent-driven page inspection and a separate visible browser window for explicit visible browsing.
-- Browser tools are exposed to the agent as `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, and `browser_type`.
-- Agent browser tool calls run hidden/background by default. Explicit `mode: "visible"` opens or targets the separate browser window.
+- The desktop app has a hidden isolated browser target for agent-driven page inspection and a separate maximized visible browser window for explicit visible browsing.
+- The visible browser window has native tabs. Each visible tab keeps its own URL, title, loading state, navigation history, console log buffer, and latest screenshot metadata while sharing the same persistent Arivu browser profile for cookies/session state.
+- Browser tools are exposed to the agent as `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, and `browser_type`.
+- `browser_open` runs hidden/background by default. Follow-up browser actions without an explicit `mode` target the active browser, so a login completed in the visible browser is not accidentally ignored by later hidden-mode calls. In visible mode, `browser_open` can pass `newTab: true` to create a visible tab or `tabId` to target an existing tab; other browser tools also accept `tabId` and default to the active visible tab.
 - Browser tool calls do not ask for approval in any trust mode.
 - The prompt `+` menu and `/browser` command can open or focus the separate browser window for the user.
-- Hidden browser screenshots are saved to temporary PNG files. For visual screenshot work that needs a real Chrome surface, configure Chrome DevTools MCP and let the agent call it through `mcp_list_tools`/`mcp_call_tool`.
+- The visible browser address field accepts URLs, localhost targets, and plain search queries. Non-URL text opens a Google search.
+- Browser snapshots inspect the main page, child frames, open shadow roots, and a best-effort Chrome accessibility tree. Screenshot results include the saved PNG plus frame-aware visual metadata with CSS viewport coordinates for visible interactive elements.
+- `browser_click` searches frames and open shadow roots by selector/text/ARIA. `browser_click_at` is the fallback for pages where DOM selectors fail but a screenshot or visual metadata exposes a target coordinate.
+- Browser screenshots are saved under the app data directory in `browser-screenshots`. For visual screenshot work that needs a real Chrome surface, configure Chrome DevTools MCP and let the agent call it through `mcp_list_tools`/`mcp_call_tool`.
 - Chrome DevTools MCP is optional for the default hidden browser path, but recommended when deeper performance traces, network analysis, Lighthouse-style audits, screenshots, or real Chrome behavior are needed.
 
 Local context tools:
@@ -116,11 +124,13 @@ Local skills:
 - User messages expose icon-only Edit and Copy actions. Failed user messages also expose Retry without removing the original query. Agent replies expose icon-only Retry and Copy actions. Hover or focus shows each action label.
 - Failed prompts remain in the transcript and also show an icon-only Retry action in the error strip.
 - Large pasted text is checked against a local estimated token budget before it is inserted. Pasted PNG, JPEG, WebP, and GIF images are attached to the next prompt automatically.
-- The composer supports slash commands. Type `/` to open local commands: `/compact` compacts the current chat context, `/session` shows chat id, estimated context used/remaining, model/provider, and workspace details, `/tools` opens the available tools list, `/skills` opens the skills selector, and `/browser` opens the separate browser window.
+- The composer supports slash commands. Type `/` to open local commands: `/compact` compacts the current chat context, `/session` shows chat id, estimated context used/remaining, model/provider, agent loop state, and workspace details, `/tools` opens the available tools list, `/skills` opens the skills selector, `/browser` opens the separate browser window, and `/loop` toggles bounded loop mode for the next prompt.
+- Agent loop mode is off by default and one-shot when enabled from the composer. A looped prompt runs up to 5 high-level iterations, asks the model to continue/done/blocked at the end of each iteration, strips that control line from the transcript, and can be stopped cooperatively after the current iteration. Loop progress is saved on the session and appears in the Activity rail, sidebar/history rows, and `/session` output.
 - The prompt `+` menu contains project routing, image attachment, browser-window access, the tools drawer, skills list, add-skill access, and MCP settings access. Model switching is available directly from the composer model button.
 - Images are encoded as data URLs and sent through OpenAI-compatible `image_url` content parts.
 - Assistant responses are rendered as Markdown. Fenced code blocks use Shiki highlighting and include an icon-only copy button.
-- The left sidebar, sidebar sections, Activity rail, and Activity rows can collapse. The left sidebar and expanded Activity panel can also be resized by dragging their divider handles.
+- Tool calls and tool results are grouped under the user query that triggered them. The chat transcript shows a compact expandable tool-run marker, while the Activity rail keeps the full per-call details and latest screenshot preview.
+- The left sidebar, sidebar sections, Activity rail, Activity query groups, and Activity rows can collapse. The left sidebar and expanded Activity panel can also be resized by dragging their divider handles.
 
 ## Commands
 

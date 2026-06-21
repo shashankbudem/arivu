@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import type { WebContents } from "electron";
 import { execa } from "execa";
@@ -18,7 +18,9 @@ import { OpenAICompatibleChatClient } from "../../src/agent/OpenAICompatibleChat
 import {
   MAX_PROMPT_IMAGE_ATTACHMENTS as MAX_IMAGE_ATTACHMENTS,
   MAX_PROMPT_IMAGE_BYTES as MAX_IMAGE_BYTES,
+  normalizePromptLoopOptions,
   normalizePromptPayload,
+  normalizePromptReuseLastUserMessage,
   normalizePromptSkillNames,
   type PromptImageAttachment as ImageAttachment,
   type PromptPayload
@@ -31,7 +33,7 @@ import {
   type ModelProviderCandidate,
   type ModelSelection
 } from "../../src/agent/modelRouter.js";
-import type { AgentRunEvent, AgentSession, ChatMessage, ToolSchema } from "../../src/agent/types.js";
+import type { AgentLoopState, AgentRunEvent, AgentSession, ChatMessage, ToolSchema } from "../../src/agent/types.js";
 import { appDataDir, appEnv, loadConfig, saveConfig, type AppConfig, type LlmProviderProfile } from "../../src/config.js";
 import { runDoctor, type DoctorReport } from "../../src/diagnostics/doctor.js";
 import { ApprovalManager } from "../../src/permissions/ApprovalManager.js";
@@ -60,6 +62,7 @@ type DesktopState = {
   browser: BrowserState;
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
+  agentLoop?: AgentLoopState;
   sessionId?: string;
   messages: ChatMessage[];
 };
@@ -93,6 +96,7 @@ type SessionSummary = {
   selectedModel?: string;
   selectedProviderName?: string;
   modelSelectionReason?: string;
+  agentLoop?: AgentLoopState;
   trustMode: AppConfig["trustMode"];
   messageCount: number;
   running: boolean;
@@ -108,12 +112,13 @@ type PublicModelSelection = {
 };
 
 type SessionLifecycleEvent = {
-  type: "started" | "completed" | "failed";
+  type: "started" | "updated" | "completed" | "failed";
   sessionId: string;
   messages: ChatMessage[];
   sessions: SessionSummary[];
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
+  agentLoop?: AgentLoopState;
   output?: string;
   error?: string;
 };
@@ -141,6 +146,12 @@ type WorkspaceScaffoldOptions = {
   initGit?: boolean;
   npmPackage?: boolean;
   typescript?: boolean;
+};
+
+type LocalImageResult = {
+  mimeType: string;
+  size: number;
+  dataUrl: string;
 };
 
 type CompactContextResult = {
@@ -175,6 +186,7 @@ class DesktopController {
   private session: AgentSession | undefined;
   private readonly store = new SessionStore();
   private readonly runningSessionIds = new Set<string>();
+  private readonly loopStopRequests = new Set<string>();
   private readonly modelListCache = new Map<string, { models: string[]; fetchedAt: number }>();
   private activeViewRevision = 0;
   private cwd: string;
@@ -195,6 +207,7 @@ class DesktopController {
       browser: browserController.getState(),
       runningSessionIds: Array.from(this.runningSessionIds),
       modelSelection: publicModelSelectionForSession(this.session),
+      agentLoop: this.session?.agentLoop,
       sessionId: this.session?.id,
       messages: this.session?.messages ?? []
     };
@@ -234,6 +247,19 @@ class DesktopController {
     const selected = result.filePaths.slice(0, MAX_IMAGE_ATTACHMENTS);
     const images = await Promise.all(selected.map(readImageAttachment));
     return { images };
+  }
+
+  async readLocalImage(filePath: string): Promise<LocalImageResult> {
+    const target = path.resolve(filePath);
+    if (!isAllowedBrowserScreenshotPath(target)) {
+      throw new Error("This image path is not available for preview.");
+    }
+    const image = await readImageAttachment(target);
+    return {
+      mimeType: image.mimeType,
+      size: image.size,
+      dataUrl: image.dataUrl
+    };
   }
 
   async createWorkspace(options: WorkspaceScaffoldOptions = {}) {
@@ -342,6 +368,35 @@ class DesktopController {
       compactedMessageCount: result.compactedMessageCount,
       remainingMessageCount: result.remainingMessageCount
     };
+  }
+
+  async stopAgentLoop(sessionId = this.session?.id) {
+    if (!sessionId) {
+      throw new Error("No active loop to stop.");
+    }
+
+    this.loopStopRequests.add(sessionId);
+    let target = this.session?.id === sessionId ? this.session : undefined;
+    if (!target) {
+      target = await this.store.load(sessionId);
+    }
+    if (!target.agentLoop || !["running", "stopping"].includes(target.agentLoop.status)) {
+      return this.state();
+    }
+
+    target.agentLoop = {
+      ...target.agentLoop,
+      status: "stopping",
+      stopRequested: true,
+      updatedAt: new Date().toISOString()
+    };
+    target.updatedAt = target.agentLoop.updatedAt;
+    await this.store.save(target);
+    if (this.session?.id === target.id) {
+      this.session = target;
+    }
+    await this.sendSessionLifecycleEvent("updated", target);
+    return this.state();
   }
 
   async saveConfigPatch(patch: ConfigPatch) {
@@ -478,6 +533,8 @@ class DesktopController {
   async sendPrompt(prompt: PromptPayload, eventTarget?: WebContents) {
     const content = normalizePromptPayload(prompt);
     const skillNames = normalizePromptSkillNames(prompt);
+    const reuseLastUserMessage = normalizePromptReuseLastUserMessage(prompt);
+    const loopOptions = normalizePromptLoopOptions(prompt);
     if (!chatContentHasRenderableContent(content)) {
       throw new Error("Prompt is required.");
     }
@@ -511,7 +568,31 @@ class DesktopController {
       modelSelection
     );
     const before = session.messages.length;
-    session.messages.push({ role: "user", content: trimChatContent(content) });
+    const lastMessage = session.messages.at(-1);
+    const trimmedContent = trimChatContent(content);
+    const loopState = loopOptions.enabled ? createAgentLoopState(trimmedContent, loopOptions.maxIterations, now) : undefined;
+    const canReuseLastUserMessage =
+      reuseLastUserMessage &&
+      lastMessage?.role === "user" &&
+      JSON.stringify(trimChatContent(lastMessage.content)) === JSON.stringify(trimmedContent);
+    if (loopState) {
+      session.agentLoop = loopState;
+      this.loopStopRequests.delete(session.id);
+      const loopInstruction: ChatMessage = { role: "system", content: initialAgentLoopInstruction(loopState) };
+      if (canReuseLastUserMessage) {
+        session.messages.splice(Math.max(0, session.messages.length - 1), 0, loopInstruction);
+      } else {
+        session.messages.push(loopInstruction);
+      }
+    } else {
+      session.agentLoop = undefined;
+      this.loopStopRequests.delete(session.id);
+    }
+    if (canReuseLastUserMessage) {
+      lastMessage.content = trimmedContent;
+    } else {
+      session.messages.push({ role: "user", content: trimmedContent });
+    }
     session.updatedAt = now;
     if (this.activeViewRevision === originRevision) {
       this.session = session;
@@ -528,6 +609,7 @@ class DesktopController {
       content,
       skillNames,
       config,
+      loopEnabled: Boolean(loopState),
       eventTarget
     });
 
@@ -537,6 +619,7 @@ class DesktopController {
       messages: session.messages,
       newMessages: session.messages.slice(before),
       modelSelection: publicModelSelection(modelSelection),
+      agentLoop: session.agentLoop,
       running: true
     };
   }
@@ -546,12 +629,14 @@ class DesktopController {
     content,
     skillNames,
     config,
+    loopEnabled,
     eventTarget
   }: {
     session: AgentSession;
     content: ChatMessage["content"];
     skillNames: string[];
     config: AppConfig;
+    loopEnabled: boolean;
     eventTarget?: WebContents;
   }) {
     const approvals = new ApprovalManager(config.trustMode, (message) => requestApproval(message));
@@ -569,11 +654,19 @@ class DesktopController {
     });
 
     try {
-      const result = await agent.run(content, {
-        skillNames,
-        promptAlreadyInSession: true,
-        onEvent: (event) => sendAgentEvent(eventTarget, session.id, event)
-      });
+      const result = loopEnabled
+        ? await this.runAgentLoop({
+            agent,
+            session,
+            content,
+            skillNames,
+            eventTarget
+          })
+        : await agent.run(content, {
+            skillNames,
+            promptAlreadyInSession: true,
+            onEvent: (event) => sendAgentEvent(eventTarget, session.id, event)
+          });
       await this.store.save(result.session);
       if (this.session?.id === result.session.id) {
         this.session = result.session;
@@ -583,12 +676,124 @@ class DesktopController {
     } catch (error) {
       this.runningSessionIds.delete(session.id);
       session.updatedAt = new Date().toISOString();
+      if (session.agentLoop && ["running", "stopping"].includes(session.agentLoop.status)) {
+        session.agentLoop = {
+          ...session.agentLoop,
+          status: "failed",
+          updatedAt: session.updatedAt,
+          stopRequested: undefined
+        };
+        this.loopStopRequests.delete(session.id);
+      }
       await this.store.save(session);
       if (this.session?.id === session.id) {
         this.session = session;
       }
       await this.sendSessionLifecycleEvent("failed", session, { error: formatError(error) });
     }
+  }
+
+  private async runAgentLoop({
+    agent,
+    session,
+    content,
+    skillNames,
+    eventTarget
+  }: {
+    agent: Agent;
+    session: AgentSession;
+    content: ChatMessage["content"];
+    skillNames: string[];
+    eventTarget?: WebContents;
+  }): Promise<{ output: string; session: AgentSession }> {
+    let output = "";
+    let currentSession = session;
+    const onEvent = (event: AgentRunEvent) => sendAgentEvent(eventTarget, currentSession.id, event);
+
+    while (currentSession.agentLoop) {
+      const loop = currentSession.agentLoop;
+      const iterationStartedAt = new Date().toISOString();
+      currentSession.agentLoop = {
+        ...loop,
+        status: this.loopStopRequests.has(currentSession.id) || loop.stopRequested ? "stopping" : "running",
+        iteration: loop.iteration + 1,
+        updatedAt: iterationStartedAt
+      };
+      currentSession.updatedAt = iterationStartedAt;
+      await this.store.save(currentSession);
+      await this.sendSessionLifecycleEvent("updated", currentSession);
+
+      const result =
+        currentSession.agentLoop.iteration === 1
+          ? await agent.run(content, {
+              skillNames,
+              promptAlreadyInSession: true,
+              onEvent
+            })
+          : await agent.continue({ onEvent });
+
+      currentSession = result.session;
+      const decision = stripAgentLoopDecision(currentSession) ?? "done";
+      output = chatContentToText(lastAssistantMessage(currentSession)?.content ?? result.output);
+      currentSession.agentLoop = {
+        ...currentSession.agentLoop!,
+        lastDecision: decision,
+        updatedAt: new Date().toISOString()
+      };
+      currentSession.updatedAt = currentSession.agentLoop.updatedAt;
+      await this.store.save(currentSession);
+      await this.sendSessionLifecycleEvent("updated", currentSession);
+
+      if (this.loopStopRequests.has(currentSession.id) || currentSession.agentLoop.stopRequested) {
+        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop, "stopped");
+        currentSession.messages.push({ role: "assistant", content: "Loop stopped after the current iteration." });
+        output = "Loop stopped after the current iteration.";
+        break;
+      }
+
+      if (decision === "blocked") {
+        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop, "blocked");
+        break;
+      }
+
+      if (decision !== "continue") {
+        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop, "completed");
+        break;
+      }
+
+      if (currentSession.agentLoop.iteration >= currentSession.agentLoop.maxIterations) {
+        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop, "max_iterations");
+        currentSession.messages.push({
+          role: "assistant",
+          content: `Loop stopped after reaching ${currentSession.agentLoop.maxIterations} iterations. Review the latest result or continue manually.`
+        });
+        output = `Loop stopped after reaching ${currentSession.agentLoop.maxIterations} iterations.`;
+        break;
+      }
+
+      currentSession.messages.push({
+        role: "system",
+        content: continuationAgentLoopInstruction(currentSession.agentLoop)
+      });
+      currentSession.agentLoop = {
+        ...currentSession.agentLoop,
+        updatedAt: new Date().toISOString()
+      };
+      currentSession.updatedAt = currentSession.agentLoop.updatedAt;
+      await this.store.save(currentSession);
+      await this.sendSessionLifecycleEvent("updated", currentSession);
+    }
+
+    if (currentSession.agentLoop) {
+      currentSession.agentLoop = {
+        ...currentSession.agentLoop,
+        stopRequested: undefined,
+        updatedAt: new Date().toISOString()
+      };
+      currentSession.updatedAt = currentSession.agentLoop.updatedAt;
+    }
+    this.loopStopRequests.delete(currentSession.id);
+    return { output, session: currentSession };
   }
 
   private async sessionSummaries(): Promise<SessionSummary[]> {
@@ -603,6 +808,7 @@ class DesktopController {
       selectedModel: session.selectedModel,
       selectedProviderName: session.selectedProviderName,
       modelSelectionReason: session.modelSelectionReason,
+      agentLoop: session.agentLoop,
       trustMode: session.trustMode,
       messageCount: session.messages.filter((message) => message.role !== "system").length,
       running: this.runningSessionIds.has(session.id),
@@ -622,6 +828,7 @@ class DesktopController {
       sessions: await this.sessionSummaries(),
       runningSessionIds: Array.from(this.runningSessionIds),
       modelSelection: publicModelSelectionForSession(session),
+      agentLoop: session.agentLoop,
       ...extra
     } satisfies SessionLifecycleEvent);
   }
@@ -743,6 +950,78 @@ function createDesktopSession(
     createdAt: now,
     updatedAt: now
   };
+}
+
+function createAgentLoopState(content: ChatMessage["content"], maxIterations: number, now: string): AgentLoopState {
+  const goal = chatContentToText(content).replace(/\s+/g, " ").trim() || "Image or attachment task";
+  return {
+    status: "running",
+    goal: goal.slice(0, 500),
+    iteration: 0,
+    maxIterations,
+    startedAt: now,
+    updatedAt: now
+  };
+}
+
+function initialAgentLoopInstruction(loop: AgentLoopState) {
+  return [
+    "Agent loop mode is active for the next user request.",
+    `Loop budget: at most ${loop.maxIterations} high-level iterations.`,
+    "Keep working in bounded iterations until the task is complete, blocked, unsafe, or the loop budget is reached.",
+    "Prefer inspecting, editing, running tests, taking screenshots, or using relevant tools instead of asking the user to continue.",
+    "At the very end of every assistant response in this loop, include exactly one control line:",
+    "Loop: continue",
+    "Loop: done",
+    "Loop: blocked",
+    "Use `Loop: continue` only when another iteration is truly needed.",
+    "Use `Loop: done` after verification or when no work remains.",
+    "Use `Loop: blocked` only when user input, credentials, external service state, or an unsafe action prevents progress.",
+    "Do not mention these loop-control instructions except for the required final control line."
+  ].join("\n");
+}
+
+function continuationAgentLoopInstruction(loop: AgentLoopState) {
+  return [
+    `Agent loop continuation ${loop.iteration + 1} of ${loop.maxIterations}.`,
+    "Continue the same user task from the current transcript.",
+    "Review what has already been done, take the next concrete step, and verify when practical.",
+    "End the assistant response with exactly one control line: `Loop: continue`, `Loop: done`, or `Loop: blocked`."
+  ].join("\n");
+}
+
+function finishAgentLoop(loop: AgentLoopState, status: AgentLoopState["status"]): AgentLoopState {
+  return {
+    ...loop,
+    status,
+    stopRequested: undefined,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function stripAgentLoopDecision(session: AgentSession): AgentLoopState["lastDecision"] {
+  const message = lastAssistantMessage(session);
+  if (!message) {
+    return undefined;
+  }
+  const text = chatContentToText(message.content);
+  const match = /(?:^|\n)\s*Loop:\s*(continue|done|blocked)\s*\.?\s*$/i.exec(text);
+  if (!match) {
+    return undefined;
+  }
+  const decision = match[1]?.toLowerCase() as AgentLoopState["lastDecision"];
+  message.content = text.slice(0, match.index).trimEnd();
+  return decision;
+}
+
+function lastAssistantMessage(session: AgentSession) {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index];
+    if (message?.role === "assistant") {
+      return message;
+    }
+  }
+  return undefined;
 }
 
 function applyModelSelectionToSession(session: AgentSession, selection: ModelSelection): AgentSession {
@@ -876,6 +1155,22 @@ function mimeTypeForPath(filePath: string): string | undefined {
     return "image/gif";
   }
   return undefined;
+}
+
+function isAllowedBrowserScreenshotPath(filePath: string) {
+  if (!path.basename(filePath).startsWith("arivu-browser-")) {
+    return false;
+  }
+  if (!mimeTypeForPath(filePath)) {
+    return false;
+  }
+
+  return isInsideDirectory(path.join(appDataDir(), "browser-screenshots"), filePath) || path.dirname(filePath) === path.resolve(os.tmpdir());
+}
+
+function isInsideDirectory(parent: string, child: string) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function formatBytes(bytes: number) {
@@ -1162,11 +1457,12 @@ function createWindow() {
     void window.loadFile(rendererIndex);
   }
 
-  if (appEnv("DESKTOP_SMOKE") === "1") {
+  if (appEnv("DESKTOP_SMOKE") === "1" || appEnv("BROWSER_SMOKE") === "1") {
     window.webContents.once("did-finish-load", () => {
       console.log("desktop smoke: renderer loaded");
       setTimeout(() => {
-        void captureSmokeScreenshot(window).finally(() => app.quit());
+        const smoke = appEnv("BROWSER_SMOKE") === "1" ? captureBrowserSmoke(window) : captureSmokeScreenshot(window);
+        void smoke.finally(() => app.quit());
       }, 500);
     });
   }
@@ -1181,15 +1477,86 @@ async function captureSmokeScreenshot(window: BrowserWindow | undefined) {
   if (!window) {
     return;
   }
+  await waitForDesktopSmokeContent(window);
   const image = await window.webContents.capturePage();
   const screenshotPath = path.join(os.tmpdir(), "arivu-desktop-smoke.png");
   await writeFile(screenshotPath, image.toPNG());
   console.log(`desktop smoke screenshot: ${screenshotPath}`);
 }
 
+async function captureBrowserSmoke(window: BrowserWindow | undefined) {
+  if (!window) {
+    return;
+  }
+  await waitForDesktopSmokeContent(window);
+  const firstUrl = await writeBrowserSmokePage("one", "Arivu browser smoke tab one");
+  const secondUrl = await writeBrowserSmokePage("two", "Arivu browser smoke tab two");
+  const first = await browserController.open({ url: firstUrl, mode: "visible" });
+  const second = await browserController.open({ url: secondUrl, mode: "visible", newTab: true });
+  const firstTabId = typeof first.tabId === "string" ? first.tabId : undefined;
+  const secondTabId = typeof second.tabId === "string" ? second.tabId : undefined;
+  if (!firstTabId || !secondTabId) {
+    throw new Error("browser smoke: visible tab ids were not returned");
+  }
+  browserController.selectVisibleTab(firstTabId);
+  const firstScreenshot = await browserController.screenshot({ mode: "visible", tabId: firstTabId });
+  browserController.selectVisibleTab(secondTabId);
+  const secondScreenshot = await browserController.screenshot({ mode: "visible", tabId: secondTabId });
+  const browserWindow = BrowserWindow.getAllWindows().find((candidate) => candidate !== window && candidate.getTitle() === "Arivu Browser");
+  let chromeScreenshotPath: string | undefined;
+  if (browserWindow && !browserWindow.isDestroyed()) {
+    const image = await browserWindow.webContents.capturePage();
+    chromeScreenshotPath = path.join(os.tmpdir(), "arivu-browser-smoke-window.png");
+    await writeFile(chromeScreenshotPath, image.toPNG());
+  }
+  console.log(
+    JSON.stringify(
+      {
+        browserSmoke: true,
+        tabs: browserController.getState().visible.tabs?.map((tab) => ({ id: tab.id, title: tab.title, url: tab.url })),
+        activeTabId: browserController.getState().visible.activeTabId,
+        firstScreenshotPath: firstScreenshot.screenshotPath,
+        secondScreenshotPath: secondScreenshot.screenshotPath,
+        chromeScreenshotPath
+      },
+      null,
+      2
+    )
+  );
+  browserController.detach(window);
+}
+
+async function writeBrowserSmokePage(name: string, heading: string) {
+  const filePath = path.join(os.tmpdir(), `arivu-browser-smoke-${name}.html`);
+  await writeFile(
+    filePath,
+    `<!doctype html><html><head><meta charset="utf-8"><title>${heading}</title><style>body{margin:32px;background:#ffffff;color:#111111;font-family:system-ui,sans-serif}main{display:grid;gap:12px}</style></head><body><main><h1>${heading}</h1><p>${new Date().toISOString()}</p></main></body></html>`,
+    "utf8"
+  );
+  return pathToFileURL(filePath).toString();
+}
+
+async function waitForDesktopSmokeContent(window: BrowserWindow) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 5_000) {
+    const ready = await window.webContents
+      .executeJavaScript(
+        `Boolean(document.querySelector(".boot, .app-shell")) && document.body.innerText.trim().length > 0`,
+        true
+      )
+      .catch(() => false);
+    if (ready) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+}
+
 ipcMain.handle("app:getState", () => controller.state());
 ipcMain.handle("workspace:choose", () => controller.chooseWorkspace());
 ipcMain.handle("images:choose", () => controller.chooseImages());
+ipcMain.handle("images:readLocal", (_event, filePath: string) => controller.readLocalImage(filePath));
 ipcMain.handle("workspace:create", (_event, options: WorkspaceScaffoldOptions) => controller.createWorkspace(options));
 ipcMain.handle("project:justChats", () => controller.openJustChats());
 ipcMain.handle("project:selectForChat", (_event, projectRoot: string | null) => controller.selectChatProject(projectRoot));
@@ -1205,17 +1572,29 @@ ipcMain.handle("tools:list", () => controller.listTools());
 ipcMain.handle("skills:list", () => controller.listSkills());
 ipcMain.handle("skills:create", (_event, input: CreateSkillInput) => controller.createSkill(input));
 ipcMain.handle("agent:sendPrompt", (event, prompt: PromptPayload) => controller.sendPrompt(prompt, event.sender));
+ipcMain.handle("agent:stopLoop", (_event, sessionId?: string) => controller.stopAgentLoop(sessionId));
 ipcMain.handle("browser:getState", () => browserController.getState());
 ipcMain.handle("browser:setPaneOpen", (_event, open: boolean) => browserController.setPaneOpen(Boolean(open)));
 ipcMain.handle("browser:setDefaultMode", (_event, mode: BrowserMode) => browserController.setDefaultMode(mode));
 ipcMain.handle("browser:setBounds", (_event, bounds: BrowserBounds) => browserController.setVisibleBounds(bounds));
 ipcMain.handle("browser:setVisibleSuppressed", (_event, suppressed: boolean) => browserController.setVisibleSuppressed(Boolean(suppressed)));
-ipcMain.handle("browser:open", (_event, args: { url: string; mode?: BrowserMode }) => browserController.open(args));
-ipcMain.handle("browser:goBack", (_event, mode?: BrowserMode) => browserController.goBack(mode));
-ipcMain.handle("browser:goForward", (_event, mode?: BrowserMode) => browserController.goForward(mode));
-ipcMain.handle("browser:reload", (_event, mode?: BrowserMode) => browserController.reload(mode));
-ipcMain.handle("browser:stop", (_event, mode?: BrowserMode) => browserController.stop(mode));
-ipcMain.handle("browser:screenshot", (_event, args: { mode?: BrowserMode }) => browserController.screenshot(args ?? {}));
+ipcMain.handle("browser:open", (_event, args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }) => browserController.open(args));
+ipcMain.handle("browser:newTab", (_event, args?: { url?: string }) => browserController.newVisibleTab(args ?? {}));
+ipcMain.handle("browser:selectTab", (_event, tabId: string) => browserController.selectVisibleTab(tabId));
+ipcMain.handle("browser:closeTab", (_event, tabId: string) => browserController.closeVisibleTab(tabId));
+ipcMain.handle("browser:goBack", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
+  typeof args === "object" ? browserController.goBack(args.mode, args.tabId) : browserController.goBack(args)
+);
+ipcMain.handle("browser:goForward", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
+  typeof args === "object" ? browserController.goForward(args.mode, args.tabId) : browserController.goForward(args)
+);
+ipcMain.handle("browser:reload", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
+  typeof args === "object" ? browserController.reload(args.mode, args.tabId) : browserController.reload(args)
+);
+ipcMain.handle("browser:stop", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
+  typeof args === "object" ? browserController.stop(args.mode, args.tabId) : browserController.stop(args)
+);
+ipcMain.handle("browser:screenshot", (_event, args: { mode?: BrowserMode; tabId?: string }) => browserController.screenshot(args ?? {}));
 ipcMain.handle("approval:respond", (_event, response: { id: string; approved: boolean }) => {
   const resolve = pendingApprovals.get(response.id);
   if (!resolve) {

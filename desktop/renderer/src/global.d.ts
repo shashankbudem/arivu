@@ -67,6 +67,19 @@ type ChatMessage = {
   toolCalls?: ToolCall[];
 };
 
+type AgentLoopStatus = "running" | "stopping" | "completed" | "stopped" | "blocked" | "failed" | "max_iterations";
+
+type AgentLoopState = {
+  status: AgentLoopStatus;
+  goal: string;
+  iteration: number;
+  maxIterations: number;
+  startedAt: string;
+  updatedAt: string;
+  stopRequested?: boolean;
+  lastDecision?: "continue" | "done" | "blocked";
+};
+
 type WorkspaceInfo = {
   root: string;
   gitBranch?: string;
@@ -94,10 +107,11 @@ type DesktopState = {
   messages: ChatMessage[];
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
+  agentLoop?: AgentLoopState;
 };
 
 type BrowserTargetState = {
-  mode: BrowserMode;
+  id: string;
   url: string;
   title: string;
   loading: boolean;
@@ -107,11 +121,20 @@ type BrowserTargetState = {
   lastScreenshotPath?: string;
 };
 
+type BrowserTabState = BrowserTargetState;
+
+type BrowserModeTargetState = BrowserTargetState & {
+  mode: BrowserMode;
+  activeTabId?: string;
+  tabs?: BrowserTabState[];
+};
+
 type BrowserState = {
   paneOpen: boolean;
   defaultMode: BrowserMode;
-  visible: BrowserTargetState;
-  background: BrowserTargetState;
+  activeMode: BrowserMode;
+  visible: BrowserModeTargetState;
+  background: BrowserModeTargetState;
 };
 
 type SessionSummary = {
@@ -124,6 +147,7 @@ type SessionSummary = {
   selectedModel?: string;
   selectedProviderName?: string;
   modelSelectionReason?: string;
+  agentLoop?: AgentLoopState;
   trustMode: TrustMode;
   messageCount: number;
   running: boolean;
@@ -144,6 +168,7 @@ type AgentRunResult = {
   messages: ChatMessage[];
   newMessages: ChatMessage[];
   modelSelection?: PublicModelSelection;
+  agentLoop?: AgentLoopState;
   running?: boolean;
 };
 
@@ -176,12 +201,13 @@ type AgentStreamEvent =
     };
 
 type SessionLifecycleEvent = {
-  type: "started" | "completed" | "failed";
+  type: "started" | "updated" | "completed" | "failed";
   sessionId: string;
   messages: ChatMessage[];
   sessions: SessionSummary[];
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
+  agentLoop?: AgentLoopState;
   output?: string;
   error?: string;
 };
@@ -288,15 +314,27 @@ type ImagePickerResult = {
   images: ImageAttachment[];
 };
 
+type LocalImageResult = {
+  mimeType: string;
+  size: number;
+  dataUrl: string;
+};
+
 type PromptPayload = {
   content: ChatContent;
   skills?: string[];
+  reuseLastUserMessage?: boolean;
+  loop?: boolean | {
+    enabled?: boolean;
+    maxIterations?: number;
+  };
 };
 
 type DesktopApi = {
   getState(): Promise<DesktopState>;
   chooseWorkspace(): Promise<DesktopState>;
   chooseImages(): Promise<ImagePickerResult>;
+  readLocalImage(filePath: string): Promise<LocalImageResult>;
   createWorkspace(options?: WorkspaceScaffoldOptions): Promise<DesktopState>;
   openJustChats(): Promise<DesktopState>;
   selectChatProject(projectRoot: string | null): Promise<DesktopState>;
@@ -312,17 +350,21 @@ type DesktopApi = {
   listSkills(): Promise<SkillListResult>;
   createSkill(input: SkillCreateInput): Promise<SkillCreateResult>;
   sendPrompt(prompt: PromptPayload | string): Promise<AgentRunResult>;
+  stopAgentLoop(sessionId?: string): Promise<DesktopState>;
   getBrowserState(): Promise<BrowserState>;
   setBrowserPaneOpen(open: boolean): Promise<BrowserState>;
   setBrowserDefaultMode(mode: BrowserMode): Promise<BrowserState>;
   setBrowserBounds(bounds: BrowserBounds): Promise<BrowserState>;
   setBrowserVisibleSuppressed(suppressed: boolean): Promise<BrowserState>;
-  openBrowserUrl(args: { url: string; mode?: BrowserMode }): Promise<Record<string, unknown>>;
-  browserGoBack(mode?: BrowserMode): Promise<BrowserState>;
-  browserGoForward(mode?: BrowserMode): Promise<BrowserState>;
-  browserReload(mode?: BrowserMode): Promise<BrowserState>;
-  browserStop(mode?: BrowserMode): Promise<BrowserState>;
-  captureBrowserScreenshot(args?: { mode?: BrowserMode }): Promise<Record<string, unknown>>;
+  openBrowserUrl(args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }): Promise<Record<string, unknown>>;
+  browserNewTab(args?: { url?: string }): Promise<BrowserState>;
+  browserSelectTab(tabId: string): Promise<BrowserState>;
+  browserCloseTab(tabId: string): Promise<BrowserState>;
+  browserGoBack(args?: BrowserMode | { mode?: BrowserMode; tabId?: string }): Promise<BrowserState>;
+  browserGoForward(args?: BrowserMode | { mode?: BrowserMode; tabId?: string }): Promise<BrowserState>;
+  browserReload(args?: BrowserMode | { mode?: BrowserMode; tabId?: string }): Promise<BrowserState>;
+  browserStop(args?: BrowserMode | { mode?: BrowserMode; tabId?: string }): Promise<BrowserState>;
+  captureBrowserScreenshot(args?: { mode?: BrowserMode; tabId?: string }): Promise<Record<string, unknown>>;
   respondApproval(id: string, approved: boolean): Promise<void>;
   onApprovalRequest(callback: (payload: ApprovalRequest) => void): () => void;
   onAgentEvent(callback: (payload: AgentStreamEvent) => void): () => void;

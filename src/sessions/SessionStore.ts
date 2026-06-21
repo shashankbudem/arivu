@@ -38,6 +38,17 @@ const MessageSchema = z.object({
     .optional()
 });
 
+const AgentLoopSchema = z.object({
+  status: z.enum(["running", "stopping", "completed", "stopped", "blocked", "failed", "max_iterations"]),
+  goal: z.string(),
+  iteration: z.number().int().min(0),
+  maxIterations: z.number().int().min(1).max(10),
+  startedAt: z.string(),
+  updatedAt: z.string(),
+  stopRequested: z.boolean().optional(),
+  lastDecision: z.enum(["continue", "done", "blocked"]).optional()
+});
+
 const SessionSchema = z.object({
   id: z.string(),
   cwd: z.string(),
@@ -50,6 +61,7 @@ const SessionSchema = z.object({
   selectedProviderId: z.string().optional(),
   selectedProviderName: z.string().optional(),
   modelSelectionReason: z.string().optional(),
+  agentLoop: AgentLoopSchema.optional(),
   messages: z.array(MessageSchema),
   createdAt: z.string(),
   updatedAt: z.string()

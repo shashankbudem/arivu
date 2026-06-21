@@ -83,6 +83,19 @@ export type AgentRunOptions = {
   promptAlreadyInSession?: boolean;
 };
 
+export type AgentLoopStatus = "running" | "stopping" | "completed" | "stopped" | "blocked" | "failed" | "max_iterations";
+
+export type AgentLoopState = {
+  status: AgentLoopStatus;
+  goal: string;
+  iteration: number;
+  maxIterations: number;
+  startedAt: string;
+  updatedAt: string;
+  stopRequested?: boolean;
+  lastDecision?: "continue" | "done" | "blocked";
+};
+
 export type AgentSession = {
   id: string;
   cwd: string;
@@ -95,6 +108,7 @@ export type AgentSession = {
   selectedProviderId?: string;
   selectedProviderName?: string;
   modelSelectionReason?: string;
+  agentLoop?: AgentLoopState;
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;

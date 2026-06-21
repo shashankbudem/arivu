@@ -10,12 +10,13 @@ export type BrowserBounds = {
 export type BrowserState = {
   paneOpen: boolean;
   defaultMode: BrowserMode;
+  activeMode: BrowserMode;
   visible: BrowserTargetState;
   background: BrowserTargetState;
 };
 
-export type BrowserTargetState = {
-  mode: BrowserMode;
+export type BrowserTabState = {
+  id: string;
   url: string;
   title: string;
   loading: boolean;
@@ -23,6 +24,12 @@ export type BrowserTargetState = {
   canGoForward: boolean;
   lastError?: string;
   lastScreenshotPath?: string;
+};
+
+export type BrowserTargetState = BrowserTabState & {
+  mode: BrowserMode;
+  activeTabId?: string;
+  tabs?: BrowserTabState[];
 };
 
 export type BrowserConsoleEntry = {
@@ -37,12 +44,14 @@ export type BrowserConsoleEntry = {
 export type BrowserToolResult = Record<string, unknown>;
 
 export type BrowserToolController = {
-  open(args: { url: string; mode?: BrowserMode }): Promise<BrowserToolResult>;
-  screenshot(args: { mode?: BrowserMode }): Promise<BrowserToolResult>;
-  snapshot(args: { mode?: BrowserMode; maxLength?: number }): Promise<BrowserToolResult>;
-  console(args: { mode?: BrowserMode; levels?: string[]; limit?: number }): Promise<BrowserToolResult>;
-  click(args: { target: string; mode?: BrowserMode }): Promise<BrowserToolResult>;
-  type(args: { target: string; text: string; mode?: BrowserMode; submit?: boolean }): Promise<BrowserToolResult>;
+  getState(): BrowserState;
+  open(args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }): Promise<BrowserToolResult>;
+  screenshot(args: { mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
+  snapshot(args: { mode?: BrowserMode; tabId?: string; maxLength?: number }): Promise<BrowserToolResult>;
+  console(args: { mode?: BrowserMode; tabId?: string; levels?: string[]; limit?: number }): Promise<BrowserToolResult>;
+  click(args: { target: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
+  clickAt(args: { x: number; y: number; mode?: BrowserMode; tabId?: string; coordinateSpace?: "css" | "image" }): Promise<BrowserToolResult>;
+  type(args: { target: string; text: string; mode?: BrowserMode; tabId?: string; submit?: boolean }): Promise<BrowserToolResult>;
 };
 
 export function normalizeBrowserMode(value: unknown): BrowserMode | undefined {

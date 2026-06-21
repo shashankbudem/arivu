@@ -34,9 +34,10 @@ Implemented:
 - Desktop image attachments and pasted-image upload in the composer for PNG, JPEG, WebP, and GIF prompts.
 - Desktop compact header/sidebar chrome, icon-only header actions with tooltips, and light/dark mode.
 - Desktop prompt `+` menu for project/images/browser window/tools/skills/MCP options, plus a direct composer model switcher.
-- Desktop hidden agent browser target plus separate visible browser window, backed by isolated Electron browser targets.
+- Desktop hidden agent browser target plus separate tabbed visible browser window, backed by isolated Electron browser targets and a persistent Arivu browser profile.
 - Desktop skills list and add-skill form backed by the global skills directory.
-- Desktop composer slash commands for local actions: `/compact`, `/session`, `/tools`, `/skills`, and `/browser`.
+- Desktop composer slash commands for local actions: `/compact`, `/session`, `/tools`, `/skills`, `/browser`, and `/loop`.
+- Desktop one-shot bounded agent loop mode with a composer toggle, cooperative Stop Loop action, persisted loop metadata, Activity/sidebar/history status, and hidden loop-control markers stripped from visible assistant replies.
 - Desktop inline available-tools drawer, backed by the actual tool registry through IPC.
 - Desktop MCP server JSON config in Settings plus `mcp_list_tools` and `mcp_call_tool`.
 - Desktop browser-style chat search with match navigation.
@@ -57,8 +58,8 @@ Implemented:
 - One-shot mode via `arivu "task"`.
 - `resume <session-id>` and `config get|set`.
 - OpenAI-compatible `/chat/completions` client.
-- Agent loop with tool calls.
-- Tools: `list`, `read`, `search`, `web_search`, `current_datetime`, `current_location`, `list_skills`, `read_skill`, `mcp_list_tools`, `mcp_call_tool`, `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_type`, `apply_patch`, `write_file`, `run`, `git_status`.
+- Agent tool-call loop plus desktop bounded agent-loop mode for multi-iteration tasks.
+- Tools: `list`, `read`, `search`, `web_search`, `current_datetime`, `current_location`, `list_skills`, `read_skill`, `mcp_list_tools`, `mcp_call_tool`, `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, `browser_type`, `apply_patch`, `write_file`, `run`, `git_status`.
 - Trust modes: `readonly`, `ask`, `trusted`.
 - Session storage.
 - Unit/integration tests.
@@ -72,7 +73,7 @@ npm run desktop:build
 arivu --trust readonly "Reply with exactly OK."
 ```
 
-Tests currently pass: 75 tests.
+Tests currently pass: run `npm test` for the current count.
 
 ## Current local model setup
 
@@ -149,7 +150,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Web search uses local function tools, not MCP. Tavily is preferred when configured and uses `basic` depth by default to avoid casually spending extra credits. The no-key fallback uses Bing RSS, with Bing News RSS for news-like queries.
 - `current_datetime` and `current_location` are local read-only tools. `current_location` intentionally uses timezone context only and avoids GPS, IP lookup, browser geolocation, and network location.
 - The desktop Tools drawer lists registry schemas from the Electron main process instead of duplicating tool metadata in renderer state.
-- Browser tools are desktop-only and route through `desktop/main/browserController.ts`. Agent calls default to the hidden isolated Electron target, while explicit visible calls use a separate browser window. Chrome DevTools MCP is optional through normal MCP config and preferred for visual screenshot work or deeper diagnostics when configured.
+- Browser tools are desktop-only and route through `desktop/main/browserController.ts`. Agent calls default to the hidden isolated Electron target, while explicit visible calls use a separate maximized tabbed browser window. Visible tabs are individual `BrowserView`s, share Arivu's persistent browser partition, and can be targeted by `tabId`; `browser_open` can also create a visible tab with `newTab: true`. Chrome DevTools MCP is optional through normal MCP config and preferred for visual screenshot work or deeper diagnostics when configured.
 - The desktop image picker is owned by the Electron main process. The renderer receives data URLs plus display metadata and never gets direct Node filesystem access.
 - Skills live globally under the app data directory's `skills/` folder, or `ARIVU_SKILLS_HOME` when set. The agent advertises discovered skills, exposes `list_skills` and `read_skill`, persists composer-loaded skills as hidden chat context, and attaches explicitly requested `$skill-name` content before that model turn.
 - MCP servers live in saved config as `mcpServers`. The desktop Settings UI edits the JSON object, and MCP tool calls use short-lived official SDK stdio clients.

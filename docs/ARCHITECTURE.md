@@ -46,7 +46,7 @@ arivu "task"
 - `src/cli.ts`: command parsing, config resolution, TUI vs one-shot dispatch.
 - `src/tui/TuiApp.ts`: blessed-based terminal UI, slash commands, approval modal, status rendering.
 - `desktop/main/main.ts`: Electron lifecycle, IPC handlers, workspace open/create, session history, model listing, desktop agent controller.
-- `desktop/main/browserController.ts`: hidden/background and separate visible-window isolated Electron browser targets, browser state broadcast, screenshot capture, DOM snapshot, console collection, and browser action helpers.
+- `desktop/main/browserController.ts`: hidden/background and separate tabbed visible-window isolated Electron browser targets, browser state broadcast, screenshot capture, DOM snapshot, console collection, and browser action helpers.
 - `desktop/main/preload.ts`: context-isolated renderer API.
 - `desktop/renderer/src/App.tsx`: React desktop workspace UI, compact header/sidebar chrome, resizable/collapsible side panels, expandable project chat groups, standalone chats, history browser, prompt `+` menu, browser-window launcher, direct composer model switcher, composer slash-command menu, searchable model dialog, chat search, inline tools drawer, token-aware multimodal composer, compact-context control, failed-prompt retry/edit/copy state, theme/UI concept controls, settings, approvals, Markdown/Shiki code rendering.
 - `desktop/renderer/src/tokenBudget.ts`: local token estimate and truncation helper for pasted composer text.
@@ -91,7 +91,7 @@ The desktop `context:compact` IPC action compacts the active saved session witho
 
 Desktop composer slash commands are handled in the renderer before a prompt is sent to the model. `/compact` calls the existing compact-context IPC flow when the active chat is eligible, `/session` renders local chat/provider/context details without creating a model turn, `/tools` opens the same tool drawer used by the prompt `+` menu, `/skills` opens the skill loader, and `/browser` opens or focuses the separate browser window. Unknown slash commands are kept in the composer and surfaced as local UI errors instead of being sent as prompts.
 
-The desktop browser has two isolated Electron targets. The visible target is a separate `BrowserWindow` that opens only when the user asks for a browser window or a browser tool explicitly passes `mode: "visible"`. The background target is a hidden `BrowserWindow` used by default for browser tool calls. Both targets use isolated sessions separate from the app renderer and from the user's Chrome profile. Chrome DevTools MCP remains optional through normal MCP configuration and is preferred for visual screenshot work, performance traces, network analysis, or real Chrome behavior when configured.
+The desktop browser has two isolated Electron targets. The visible target is a separate maximized `BrowserWindow` with a native tab shell; each visible tab is backed by its own `BrowserView` and keeps independent URL/title/loading/history/log/screenshot state. The background target is a hidden `BrowserWindow` used by default for browser tool calls. Visible and background targets share Arivu's persistent isolated browser partition so cookies and login state can carry across Arivu tabs and browser sessions without using the user's Chrome profile. Chrome DevTools MCP remains optional through normal MCP configuration and is preferred for visual screenshot work, performance traces, network analysis, or real Chrome behavior when configured.
 
 ## Tool model
 
@@ -139,7 +139,7 @@ The `run` tool executes commands with `execa` using `shell: true`, with `cwd` se
 
 `mcp_list_tools` and `mcp_call_tool` connect to configured MCP servers using the official TypeScript SDK's stdio client transport. Each call opens a short-lived client, connects, performs the list/call request with a timeout, formats MCP content blocks into text, and closes the client.
 
-Browser tools are registered only when the desktop main process provides a `BrowserToolController`. `browser_open` normalizes localhost-style URLs and opens the hidden isolated browser target by default, or the separate visible window when `mode: "visible"` is supplied. `browser_snapshot` returns compact page text and key interactable elements, `browser_console` returns collected console entries, `browser_screenshot` writes a temporary PNG, and `browser_click`/`browser_type` operate by selector or visible label text. Browser tool calls bypass approval prompts in all trust modes.
+Browser tools are registered only when the desktop main process provides a `BrowserToolController`. `browser_open` normalizes localhost-style URLs and opens the hidden isolated browser target by default, or the separate visible window when `mode: "visible"` is supplied. In visible mode, `browser_open` can create a new tab with `newTab: true` or target a known tab with `tabId`; follow-up screenshot/snapshot/console/click/type tools also accept `tabId` and otherwise use the active visible tab. `browser_snapshot` returns compact page text and key interactable elements, `browser_console` returns collected console entries, `browser_screenshot` writes a temporary PNG, `browser_click`/`browser_type` operate by selector or visible label text, and `browser_click_at` clicks exact screenshot/CSS coordinates when selectors fail. Browser tool calls bypass approval prompts in all trust modes.
 
 ## Desktop IPC
 
@@ -154,7 +154,7 @@ The preload bridge exposes a small `window.arivu` API instead of giving the rend
 - config save
 - model list through a selected provider's OpenAI-compatible `GET /models`
 - tools list from the local registry for the composer drawer
-- browser window state, legacy bounds no-op, navigation, URL open, default hidden mode, and screenshot capture
+- browser window state, visible tab create/select/close, legacy bounds no-op, navigation, URL open, default hidden mode, and screenshot capture
 - prompt send
 - approval request/response
 

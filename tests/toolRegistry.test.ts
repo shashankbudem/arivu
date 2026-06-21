@@ -33,6 +33,7 @@ describe("createToolRegistry", () => {
     expect(names).toContain("browser_open");
     expect(names).toContain("browser_snapshot");
     expect(names).toContain("browser_click");
+    expect(names).toContain("browser_click_at");
 
     const result = JSON.parse(await withBrowser.execute("browser_open", { url: "localhost:5173" })) as Record<string, unknown>;
     expect(result.action).toBe("open");
@@ -44,6 +45,13 @@ describe("createToolRegistry", () => {
       unknown
     >;
     expect(visibleResult.mode).toBe("visible");
+
+    const followUpResult = JSON.parse(await withBrowser.execute("browser_snapshot", {})) as Record<string, unknown>;
+    expect(followUpResult.mode).toBe("visible");
+
+    const coordinateResult = JSON.parse(await withBrowser.execute("browser_click_at", { x: 24, y: 48 })) as Record<string, unknown>;
+    expect(coordinateResult.action).toBe("click_at");
+    expect(coordinateResult.mode).toBe("visible");
   });
 
   it("runs browser actions in readonly mode without approval prompts", async () => {
@@ -172,42 +180,95 @@ function createRegistry(workspaceRoot = process.cwd()) {
 }
 
 function createFakeBrowser(): BrowserToolController {
+  let activeMode: "visible" | "background" = "background";
+  const state = () => ({
+    paneOpen: activeMode === "visible",
+    defaultMode: "background" as const,
+    activeMode,
+    visible: {
+      id: "visible-tab-1",
+      mode: "visible" as const,
+      url: activeMode === "visible" ? "http://localhost:5173/" : "",
+      title: "Fake visible browser",
+      loading: false,
+      canGoBack: false,
+      canGoForward: false,
+      activeTabId: "visible-tab-1",
+      tabs: [
+        {
+          id: "visible-tab-1",
+          url: activeMode === "visible" ? "http://localhost:5173/" : "",
+          title: "Fake visible browser",
+          loading: false,
+          canGoBack: false,
+          canGoForward: false
+        }
+      ]
+    },
+    background: {
+      id: "background",
+      mode: "background" as const,
+      url: activeMode === "background" ? "http://localhost:5173/" : "",
+      title: "Fake background browser",
+      loading: false,
+      canGoBack: false,
+      canGoForward: false
+    }
+  });
   return {
+    getState() {
+      return state();
+    },
     async open(args) {
+      activeMode = args.mode ?? activeMode;
       return {
-        mode: args.mode ?? "visible",
+        mode: activeMode,
         url: new URL(args.url).toString(),
         title: "Fake browser"
       };
     },
     async screenshot(args) {
+      activeMode = args.mode ?? activeMode;
       return {
-        mode: args.mode ?? "visible",
+        mode: activeMode,
         screenshotPath: "/tmp/fake-browser.png"
       };
     },
     async snapshot(args) {
+      activeMode = args.mode ?? activeMode;
       return {
-        mode: args.mode ?? "visible",
+        mode: activeMode,
         snapshot: { text: "Fake snapshot" }
       };
     },
     async console(args) {
+      activeMode = args.mode ?? activeMode;
       return {
-        mode: args.mode ?? "visible",
+        mode: activeMode,
         logs: []
       };
     },
     async click(args) {
+      activeMode = args.mode ?? activeMode;
       return {
-        mode: args.mode ?? "visible",
+        mode: activeMode,
         ok: true,
         target: args.target
       };
     },
-    async type(args) {
+    async clickAt(args) {
+      activeMode = args.mode ?? activeMode;
       return {
-        mode: args.mode ?? "visible",
+        mode: activeMode,
+        ok: true,
+        x: args.x,
+        y: args.y
+      };
+    },
+    async type(args) {
+      activeMode = args.mode ?? activeMode;
+      return {
+        mode: activeMode,
         ok: true,
         target: args.target,
         text: args.text

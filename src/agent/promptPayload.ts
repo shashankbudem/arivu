@@ -15,6 +15,11 @@ export type PromptImageAttachment = {
 
 export type PromptPayload = unknown;
 
+export type PromptLoopOptions = {
+  enabled: boolean;
+  maxIterations: number;
+};
+
 export function normalizePromptPayload(payload: PromptPayload): ChatContent {
   if (typeof payload === "string") {
     return payload.trim();
@@ -58,6 +63,31 @@ export function normalizePromptSkillNames(payload: PromptPayload): string[] {
     }
   }
   return Array.from(names);
+}
+
+export function normalizePromptReuseLastUserMessage(payload: PromptPayload): boolean {
+  return isRecord(payload) && payload.reuseLastUserMessage === true;
+}
+
+export function normalizePromptLoopOptions(payload: PromptPayload): PromptLoopOptions {
+  if (!isRecord(payload)) {
+    return { enabled: false, maxIterations: 5 };
+  }
+
+  const loop = payload.loop;
+  if (loop === true) {
+    return { enabled: true, maxIterations: 5 };
+  }
+  if (!isRecord(loop)) {
+    return { enabled: false, maxIterations: 5 };
+  }
+
+  const enabled = loop.enabled === true;
+  const rawMaxIterations = typeof loop.maxIterations === "number" ? loop.maxIterations : 5;
+  return {
+    enabled,
+    maxIterations: clampInteger(rawMaxIterations, 1, 10)
+  };
 }
 
 function normalizeChatContent(content: unknown): ChatContent {
@@ -174,6 +204,13 @@ function imageByteLength(dataUrl: string) {
 
 function normalizeImageDetail(value: unknown): ImageDetail {
   return value === "auto" || value === "low" || value === "high" ? value : "auto";
+}
+
+function clampInteger(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

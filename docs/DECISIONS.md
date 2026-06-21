@@ -60,6 +60,12 @@ Decision: browser tool calls run on the hidden/background Electron target by def
 
 Reason: embedded visible browser panes can cover approvals and interrupt chat UX. Hidden browser tools keep routine agent inspection quiet, while a separate visible browser window gives the user an explicit viewing surface. When a task needs real Chrome screenshots or Chrome-specific behavior, Chrome DevTools MCP should be configured and used through MCP tools.
 
+## 2026-06-22: Visible browser tabs
+
+Decision: the visible Electron browser window has a native tab shell. Each visible tab owns a separate `BrowserView`, while browser tools keep backward-compatible active-tab defaults and can optionally pass `tabId` or `newTab`.
+
+Reason: multi-page browser tasks should not overwrite the user's current visible page. Tabs preserve normal browser expectations, keep per-page navigation/screenshot/console state separate, and still let simple tool calls work without requiring a tab id.
+
 ## 2026-06-04: Conservative write safety
 
 Decision: require path containment, read-before-replace, patch mismatch checks, and approval routing for writes.
