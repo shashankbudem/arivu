@@ -423,6 +423,8 @@ export type AgentTaskRun = {
 
 export type AgentSession = {
   id: string;
+  title?: string;
+  pinnedAt?: string;
   cwd: string;
   projectRoot?: string | null;
   trustMode: TrustMode;

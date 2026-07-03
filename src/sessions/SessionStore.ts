@@ -357,6 +357,8 @@ const AgentTaskRunSchema = z.object({
 
 const SessionSchema = z.object({
   id: z.string(),
+  title: z.string().optional(),
+  pinnedAt: z.string().optional(),
   cwd: z.string(),
   projectRoot: z.string().nullable().optional(),
   trustMode: z.enum(["ask", "readonly", "trusted"]),
@@ -414,7 +416,7 @@ export class SessionStore {
       }
     }
 
-    return sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return sessions.sort(compareSessionsForList);
   }
 
   private async readSessionForList(entry: string): Promise<AgentSession | undefined> {
@@ -437,4 +439,17 @@ export class SessionStore {
     }
     return path.join(this.root, `${id}.json`);
   }
+}
+
+function compareSessionsForList(left: AgentSession, right: AgentSession) {
+  if (left.pinnedAt || right.pinnedAt) {
+    if (!left.pinnedAt) {
+      return 1;
+    }
+    if (!right.pinnedAt) {
+      return -1;
+    }
+    return right.pinnedAt.localeCompare(left.pinnedAt);
+  }
+  return right.updatedAt.localeCompare(left.updatedAt);
 }

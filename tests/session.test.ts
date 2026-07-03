@@ -19,6 +19,8 @@ describe("session store", () => {
     const store = new SessionStore(tempDir);
     await store.save({
       id: "abc123",
+      title: "Named harness task",
+      pinnedAt: "2026-01-01T00:06:00.000Z",
       cwd: "/tmp/project",
       trustMode: "ask",
       agentLoop: {
@@ -174,6 +176,8 @@ describe("session store", () => {
 
     await expect(store.load("abc123")).resolves.toMatchObject({
       id: "abc123",
+      title: "Named harness task",
+      pinnedAt: "2026-01-01T00:06:00.000Z",
       cwd: "/tmp/project",
       agentLoop: {
         status: "completed",
@@ -296,6 +300,30 @@ describe("session store", () => {
     });
 
     await expect(store.list()).resolves.toMatchObject([{ id: "newer" }, { id: "older" }]);
+  });
+
+  it("lists pinned sessions before newer unpinned sessions", async () => {
+    const store = new SessionStore(tempDir);
+    await store.save({
+      id: "newer",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "new work" }],
+      createdAt: "2026-01-03T00:00:00.000Z",
+      updatedAt: "2026-01-03T00:00:00.000Z"
+    });
+    await store.save({
+      id: "pinned",
+      title: "Pinned task",
+      pinnedAt: "2026-01-02T00:00:00.000Z",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "important work" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    await expect(store.list()).resolves.toMatchObject([{ id: "pinned", title: "Pinned task" }, { id: "newer" }]);
   });
 
   it("loads legacy task runs without approval records", async () => {

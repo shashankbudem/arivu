@@ -486,6 +486,7 @@ type BrowserState = {
 type SessionSummary = {
   id: string;
   title: string;
+  pinnedAt?: string;
   cwd: string;
   projectRoot: string | null;
   model?: string;
@@ -730,6 +731,7 @@ type DesktopApi = {
   listSessions(): Promise<SessionListResult>;
   openSession(id: string): Promise<DesktopState>;
   newChat(): Promise<DesktopState>;
+  updateSession(input: { id: string; title?: string; pinned?: boolean }): Promise<DesktopState>;
   deleteSession(id: string): Promise<DesktopState>;
   compactContext(): Promise<CompactContextResult>;
   saveConfig(patch: ConfigPatch): Promise<DesktopState>;

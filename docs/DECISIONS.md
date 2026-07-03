@@ -72,6 +72,12 @@ Decision: desktop prompts create persisted `taskRuns` entries on the saved sessi
 
 Reason: Arivu needs a control-plane record that is more durable and structured than the chat transcript alone. Task runs make Activity grouping, retries, compaction, future worktree isolation, and capability policy easier to reason about without introducing a heavy workflow engine yet.
 
+## 2026-07-03: Saved chats have user-owned names and pins
+
+Decision: saved sessions can store optional `title` and `pinnedAt` metadata. Desktop history and sidebar chat menus expose Rename plus Pin/Unpin, and pinned chats sort above normal recency order without changing the chat `updatedAt` activity timestamp.
+
+Reason: a harness-style coding agent needs named, durable work items that can survive handoff and later review. Keeping labels and pins as metadata avoids rewriting transcript content or misrepresenting when model/tool activity last happened.
+
 ## 2026-06-23: One-shot task worktrees
 
 Decision: add opt-in desktop task worktree mode. When armed for a prompt, Arivu creates a git branch/worktree under app data, runs tools against that isolated checkout, and records the worktree metadata on the task run while keeping the saved chat attached to the original project.

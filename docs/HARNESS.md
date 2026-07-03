@@ -12,6 +12,7 @@ The important boundary is that the model proposes actions, but Arivu-owned code 
 Current sessions persist three layers of state:
 
 - `messages`: the user/assistant/tool transcript used for model context and visible chat.
+- session metadata such as user-owned `title` and `pinnedAt` for durable handoff and review organization.
 - `agentLoop`: optional high-level loop state for one-shot bounded continuation.
 - `taskRuns`: durable per-prompt run records that tie a user query to status, selected model/provider, captured plan state, capabilities used, tool calls, and artifacts.
 

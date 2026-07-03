@@ -156,6 +156,7 @@ type SkillCreateResult = SkillListResult & {
 type SessionSummary = {
   id: string;
   title: string;
+  pinnedAt?: string;
   cwd: string;
   projectRoot: string | null;
   model?: string;
@@ -190,6 +191,12 @@ type TaskWorktreeActionInput = {
     | "abort_conflict"
     | "open_conflict_file";
   conflictPath?: string;
+};
+
+type SessionUpdateInput = {
+  id?: string;
+  title?: string;
+  pinned?: boolean;
 };
 
 type TaskRunPlanActionInput = {
@@ -493,6 +500,35 @@ class DesktopController {
     if (this.session?.id === id) {
       this.session = undefined;
       this.markActiveViewChanged();
+    }
+    return this.state();
+  }
+
+  async updateSession(input: SessionUpdateInput) {
+    const id = typeof input.id === "string" ? input.id : "";
+    if (!id) {
+      throw new Error("Session id is required.");
+    }
+    if (this.runningSessionIds.has(id)) {
+      throw new Error("Wait for this chat to finish before changing it.");
+    }
+
+    const current = await this.store.load(id);
+    const next: AgentSession = { ...current };
+    if (input.title !== undefined) {
+      next.title = normalizeSessionTitle(input.title);
+    }
+    if (input.pinned !== undefined) {
+      if (input.pinned) {
+        next.pinnedAt = new Date().toISOString();
+      } else {
+        delete next.pinnedAt;
+      }
+    }
+
+    await this.store.save(next);
+    if (this.session?.id === id) {
+      this.session = next;
     }
     return this.state();
   }
@@ -1575,6 +1611,7 @@ class DesktopController {
     return sessions.map((session) => ({
       id: session.id,
       title: sessionTitle(session),
+      pinnedAt: session.pinnedAt,
       cwd: session.cwd,
       projectRoot: session.projectRoot === undefined ? session.cwd : session.projectRoot,
       model: session.model,
@@ -2048,8 +2085,19 @@ function formatError(error: unknown) {
 }
 
 function sessionTitle(session: AgentSession) {
+  if (session.title?.trim()) {
+    return session.title.trim();
+  }
   const content = session.messages.find((message) => message.role === "user")?.content;
   return content ? chatContentToText(content).trim().split(/\s+/).slice(0, 12).join(" ") || "Untitled session" : "Untitled session";
+}
+
+function normalizeSessionTitle(title: string) {
+  const normalized = title.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    throw new Error("Chat name cannot be empty.");
+  }
+  return normalized.slice(0, 120);
 }
 
 function toolParameterNames(schema: ToolSchema) {
@@ -2566,6 +2614,7 @@ handleFromMain("project:selectForChat", (_event, projectRoot: string | null) => 
 handleFromMain("sessions:list", () => controller.listSessions());
 handleFromMain("sessions:open", (_event, id: string) => controller.openSession(id));
 handleFromMain("sessions:new", () => controller.newChat());
+handleFromMain("sessions:update", (_event, input: SessionUpdateInput) => controller.updateSession(input));
 handleFromMain("sessions:delete", (_event, id: string) => controller.deleteSession(id));
 handleFromMain("context:compact", () => controller.compactContext());
 handleFromMain("config:save", (_event, patch: ConfigPatch) => controller.saveConfigPatch(patch));

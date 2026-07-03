@@ -26,7 +26,7 @@ Run the TUI:
 npm run dev
 ```
 
-The desktop app includes a compact workspace sidebar with recent workspace rows, expandable project chat groups, standalone chats, new/open/create workspace controls, full chat history with delete controls, a prompt `+` menu, direct searchable model switching from the composer, browser-style chat search, a separate tabbed browser window with hidden agent browser tools by default, a token-aware multimodal composer with pasted and dropped image attachments, one-shot read-only plan approval mode, one-shot bounded agent loop mode, one-shot task worktree mode, inline available-tools drawer, local context compaction for long chats, Markdown-rendered replies with highlighted copyable code blocks, light/dark modes, UI concept samples, a slim collapsible Activity rail grouped by durable per-query task runs, settings view, and approval modal. The TUI remains available as a terminal fallback.
+The desktop app includes a compact workspace sidebar with recent workspace rows, expandable project chat groups, standalone chats, pinned and renamed chat metadata, new/open/create workspace controls, full chat history with delete controls, a prompt `+` menu, direct searchable model switching from the composer, browser-style chat search, a separate tabbed browser window with hidden agent browser tools by default, a token-aware multimodal composer with pasted and dropped image attachments, one-shot read-only plan approval mode, one-shot bounded agent loop mode, one-shot task worktree mode, inline available-tools drawer, local context compaction for long chats, Markdown-rendered replies with highlighted copyable code blocks, light/dark modes, UI concept samples, a slim collapsible Activity rail grouped by durable per-query task runs, settings view, and approval modal. The TUI remains available as a terminal fallback.
 
 After building, the package exposes the `arivu` binary.
 
@@ -129,7 +129,7 @@ Local skills:
 - `Open` switches to an existing workspace folder.
 - `New workspace` creates a folder and switches the app into it.
 - The Workspaces section shows recent workspaces from saved project chats. Click the folder/name area to reopen that workspace, or use the chevron to expand its chats. Chats with `No project` appear in the top-level Chats section.
-- `History` shows saved chats across workspaces, can reopen them, and can delete saved sessions.
+- `History` shows saved chats across workspaces, can reopen them, rename them, pin or unpin them, and delete saved sessions. Pinned chats sort above normal recency order in history, workspace chat groups, and standalone chat previews.
 - Header actions are icon-only with hover/focus tooltips. `Search chat` opens a browser-style find bar with match navigation. `Browser window` opens, focuses, or hides the separate browser window. `Refresh state` reloads workspace, config, and active session state from the Electron main process. `Compact context` summarizes older saved messages locally and keeps the most recent messages for future model requests.
 - Press `Enter` to send a message, or `Shift+Enter` for a newline.
 - User messages expose icon-only Edit and Copy actions. Failed user messages also expose Retry without removing the original query. Agent replies expose icon-only Retry and Copy actions. Hover or focus shows each action label.

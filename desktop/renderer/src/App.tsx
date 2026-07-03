@@ -38,6 +38,8 @@ import {
   Moon,
   Palette,
   Pencil,
+  Pin,
+  PinOff,
   Play,
   Plus,
   RefreshCw,
@@ -127,7 +129,7 @@ const ACTIVITY_DEFAULT_WIDTH = 300;
 const ACTIVITY_MIN_WIDTH = 232;
 const ACTIVITY_MAX_WIDTH = 340;
 const MAX_ACTIVITY_EVIDENCE_LINKS = 8;
-const CHAT_OPTIONS_MENU_WIDTH = 132;
+const CHAT_OPTIONS_MENU_WIDTH = 150;
 const PR_BACKGROUND_REFRESH_INTERVAL_MS = 90_000;
 const TRUST_MODE_ORDER: TrustMode[] = ["readonly", "ask", "trusted"];
 const WORKSPACE_POLICY_CAPABILITIES: WorkspacePolicyCapability[] = [
@@ -139,7 +141,7 @@ const WORKSPACE_POLICY_CAPABILITIES: WorkspacePolicyCapability[] = [
   "mcp_call",
   "unknown"
 ];
-const CHAT_OPTIONS_MENU_HEIGHT = 40;
+const CHAT_OPTIONS_MENU_HEIGHT = 106;
 const CHAT_OPTIONS_MENU_MARGIN = 8;
 const CHAT_OPTIONS_MENU_GAP = 2;
 const CONTEXT_COMPACT_RECENT_MESSAGE_COUNT = 8;
@@ -290,6 +292,7 @@ type ProjectSummary = {
   name: string;
   latestSessionId?: string;
   updatedAt?: string;
+  pinnedAt?: string;
   chatCount: number;
   sessions: SessionSummary[];
 };
@@ -1046,6 +1049,50 @@ export function App() {
       } else {
         setStatus("Deleted chat");
       }
+      setError(null);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
+  }
+
+  async function renameSession(session: SessionSummary) {
+    setOpenChatMenuId(null);
+    setOpenHistoryMenuId(null);
+    const nextTitle = window.prompt("Rename chat", session.title);
+    if (nextTitle === null) {
+      return;
+    }
+    const trimmed = nextTitle.trim();
+    if (!trimmed) {
+      setError("Chat name cannot be empty.");
+      setStatus("Rename cancelled");
+      return;
+    }
+    if (trimmed === session.title) {
+      return;
+    }
+
+    try {
+      const next = await window.arivu.updateSession({ id: session.id, title: trimmed });
+      applyDesktopState(next);
+      await loadSessions();
+      setStatus("Renamed chat");
+      setError(null);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
+  }
+
+  async function toggleSessionPin(session: SessionSummary) {
+    setOpenChatMenuId(null);
+    setOpenHistoryMenuId(null);
+    try {
+      const next = await window.arivu.updateSession({ id: session.id, pinned: !session.pinnedAt });
+      applyDesktopState(next);
+      await loadSessions();
+      setStatus(session.pinnedAt ? "Unpinned chat" : "Pinned chat");
       setError(null);
     } catch (err) {
       setError(formatError(err));
@@ -2113,7 +2160,7 @@ export function App() {
   const workspaceDetail = state.projectRoot === null ? "Standalone chats" : state.workspace.root;
   const gitValue = state.projectRoot === null ? "none" : `${state.workspace.gitBranch ?? "none"}${state.workspace.dirty ? " *" : ""}`;
   const recentProjects = projects.slice(0, 5);
-  const standaloneSessions = sessions.filter((session) => session.projectRoot === null).slice(0, 5);
+  const standaloneSessions = sessions.filter((session) => session.projectRoot === null).sort(compareSessionsForDisplay).slice(0, 5);
   const chatStarted = Boolean(state.sessionId) || messages.some((message) => message.role !== "system");
   const canSelectChatProject = !chatStarted && !busy;
   const canCompactContext =
@@ -2237,6 +2284,8 @@ export function App() {
                           className="project-chat-item"
                           onOpen={() => void openSession(session.id)}
                           onToggleMenu={() => setOpenChatMenuId((current) => current === session.id ? null : session.id)}
+                          onRename={() => void renameSession(session)}
+                          onTogglePin={() => void toggleSessionPin(session)}
                           onDelete={() => void deleteSession(session)}
                         />
                       ))}
@@ -2280,6 +2329,8 @@ export function App() {
                     menuOpen={openChatMenuId === session.id}
                     onOpen={() => void openSession(session.id)}
                     onToggleMenu={() => setOpenChatMenuId((current) => current === session.id ? null : session.id)}
+                    onRename={() => void renameSession(session)}
+                    onTogglePin={() => void toggleSessionPin(session)}
                     onDelete={() => void deleteSession(session)}
                   />
                 ))
@@ -2826,6 +2877,8 @@ export function App() {
             openMenuId={openHistoryMenuId}
             onReload={() => void loadSessions()}
             onOpen={openSession}
+            onRename={renameSession}
+            onTogglePin={toggleSessionPin}
             onDelete={deleteSession}
             onToggleMenu={(id) => setOpenHistoryMenuId((current) => current === id ? null : id)}
             onError={(message) => {
@@ -3735,6 +3788,8 @@ function HistoryView({
   openMenuId,
   onReload,
   onOpen,
+  onRename,
+  onTogglePin,
   onDelete,
   onToggleMenu,
   onError
@@ -3745,6 +3800,8 @@ function HistoryView({
   openMenuId: string | null;
   onReload: () => void;
   onOpen: (id: string) => Promise<void>;
+  onRename: (session: SessionSummary) => Promise<void>;
+  onTogglePin: (session: SessionSummary) => Promise<void>;
   onDelete: (session: SessionSummary) => Promise<void>;
   onToggleMenu: (id: string) => void;
   onError: (message: string) => void;
@@ -3804,10 +3861,12 @@ function HistoryView({
             >
               <div className="history-main">
                 <strong>{session.title}</strong>
+                {session.pinnedAt ? <Pin className="chat-pin-indicator" size={12} aria-label="Pinned chat" /> : null}
                 {session.running ? <span className="chat-loading-dot" title="Response loading" aria-label="Response loading" /> : null}
               </div>
               <div className="history-details">
                 <span>{formatDateTime(session.updatedAt)}</span>
+                {session.pinnedAt ? <span title={`Pinned ${formatDateTime(session.pinnedAt)}`}>Pinned</span> : null}
                 <span title={session.cwd}>{basename(session.cwd)}</span>
                 <span title={sessionModelTitle(session)}>{sessionModelLabel(session)}</span>
                 {session.agentLoop ? <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span> : null}
@@ -3817,8 +3876,11 @@ function HistoryView({
             <ChatOptionsMenu
               open={openMenuId === session.id}
               title={session.title}
+              pinned={Boolean(session.pinnedAt)}
               disabled={deletingId === session.id}
               onToggle={() => onToggleMenu(session.id)}
+              onRename={() => void onRename(session)}
+              onTogglePin={() => void onTogglePin(session)}
               onDelete={() => void deleteSession(session)}
             />
           </div>
@@ -3835,6 +3897,8 @@ function SidebarChatItem({
   className,
   onOpen,
   onToggleMenu,
+  onRename,
+  onTogglePin,
   onDelete
 }: {
   session: SessionSummary;
@@ -3843,6 +3907,8 @@ function SidebarChatItem({
   className?: string;
   onOpen: () => void;
   onToggleMenu: () => void;
+  onRename: () => void;
+  onTogglePin: () => void;
   onDelete: () => void;
 }) {
   const classes = ["recent-chat-item", active ? "active" : "", className ?? ""].filter(Boolean).join(" ");
@@ -3852,10 +3918,12 @@ function SidebarChatItem({
       <button className="recent-chat-row" type="button" onClick={onOpen}>
         <div className="recent-chat-main">
           <strong>{session.title}</strong>
+          {session.pinnedAt ? <Pin className="chat-pin-indicator" size={11} aria-label="Pinned chat" /> : null}
           {session.running ? <span className="chat-loading-dot" title="Response loading" aria-label="Response loading" /> : null}
         </div>
         <div className="recent-chat-details">
           <span>{formatDateTime(session.updatedAt)}</span>
+          {session.pinnedAt ? <span title={`Pinned ${formatDateTime(session.pinnedAt)}`}>Pinned</span> : null}
           <span title={sessionModelTitle(session)}>{sessionModelLabel(session)}</span>
           {session.agentLoop ? <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span> : null}
           <span>{session.messageCount} messages</span>
@@ -3864,7 +3932,10 @@ function SidebarChatItem({
       <ChatOptionsMenu
         open={menuOpen}
         title={session.title}
+        pinned={Boolean(session.pinnedAt)}
         onToggle={onToggleMenu}
+        onRename={onRename}
+        onTogglePin={onTogglePin}
         onDelete={onDelete}
       />
     </div>
@@ -3874,14 +3945,20 @@ function SidebarChatItem({
 function ChatOptionsMenu({
   open,
   title,
+  pinned,
   disabled,
   onToggle,
+  onRename,
+  onTogglePin,
   onDelete
 }: {
   open: boolean;
   title: string;
+  pinned: boolean;
   disabled?: boolean;
   onToggle: () => void;
+  onRename: () => void;
+  onTogglePin: () => void;
   onDelete: () => void;
 }) {
   const buttonRef = useRef<HTMLButtonElement | null>(null);
@@ -3931,6 +4008,14 @@ function ChatOptionsMenu({
       }}
       onClick={(event) => event.stopPropagation()}
     >
+      <button className="chat-menu-item" type="button" onClick={onRename} role="menuitem">
+        <Pencil size={14} />
+        Rename
+      </button>
+      <button className="chat-menu-item" type="button" onClick={onTogglePin} role="menuitem">
+        {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+        {pinned ? "Unpin" : "Pin"}
+      </button>
       <button className="chat-menu-item danger" type="button" onClick={onDelete} role="menuitem">
         <Trash2 size={14} />
         Delete
@@ -7218,6 +7303,7 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
         name: basename(session.projectRoot),
         latestSessionId: session.id,
         updatedAt: session.updatedAt,
+        pinnedAt: session.pinnedAt,
         chatCount: 1,
         sessions: [session]
       });
@@ -7226,15 +7312,18 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
 
     existing.chatCount += 1;
     existing.sessions.push(session);
+    if (session.pinnedAt && (!existing.pinnedAt || session.pinnedAt > existing.pinnedAt)) {
+      existing.pinnedAt = session.pinnedAt;
+    }
     if (!existing.updatedAt || session.updatedAt > existing.updatedAt) {
       existing.latestSessionId = session.id;
       existing.updatedAt = session.updatedAt;
     }
   }
 
-  const projects = Array.from(projectsByRoot.values()).sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
+  const projects = Array.from(projectsByRoot.values()).sort(compareProjectsForDisplay);
   for (const project of projects) {
-    project.sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    project.sessions.sort(compareSessionsForDisplay);
   }
 
   if (!state || state.projectRoot === null) {
@@ -7253,6 +7342,32 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
     activeProject,
     ...projects.filter((project) => project.projectRoot !== activeProject.projectRoot)
   ];
+}
+
+function compareProjectsForDisplay(left: ProjectSummary, right: ProjectSummary) {
+  if (left.pinnedAt || right.pinnedAt) {
+    if (!left.pinnedAt) {
+      return 1;
+    }
+    if (!right.pinnedAt) {
+      return -1;
+    }
+    return right.pinnedAt.localeCompare(left.pinnedAt);
+  }
+  return (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "");
+}
+
+function compareSessionsForDisplay(left: SessionSummary, right: SessionSummary) {
+  if (left.pinnedAt || right.pinnedAt) {
+    if (!left.pinnedAt) {
+      return 1;
+    }
+    if (!right.pinnedAt) {
+      return -1;
+    }
+    return right.pinnedAt.localeCompare(left.pinnedAt);
+  }
+  return right.updatedAt.localeCompare(left.updatedAt);
 }
 
 function createPromptContent(text: string, images: ImageAttachment[]): ChatContent {

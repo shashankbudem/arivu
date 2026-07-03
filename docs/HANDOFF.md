@@ -26,7 +26,7 @@ Implemented:
 - TypeScript/npm CLI package with global binary `arivu`.
 - Electron + React desktop app scaffold.
 - Desktop new chat, recent chats, full history browser, and session reopening.
-- Desktop chat deletion from recent chats and History.
+- Desktop chat deletion, rename, and pin/unpin from recent chats and History.
 - Desktop workspace open and create flows.
 - Desktop expandable project chat groups, standalone Chats section, and draft-chat project selector in the prompt `+` menu.
 - Desktop searchable model switching dialog, backed by the active OpenAI-compatible provider's `GET /models`.

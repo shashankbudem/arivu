@@ -12,6 +12,7 @@ const desktopApi = {
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   openSession: (id: string) => ipcRenderer.invoke("sessions:open", id),
   newChat: () => ipcRenderer.invoke("sessions:new"),
+  updateSession: (input: unknown) => ipcRenderer.invoke("sessions:update", input),
   deleteSession: (id: string) => ipcRenderer.invoke("sessions:delete", id),
   compactContext: () => ipcRenderer.invoke("context:compact"),
   saveConfig: (patch: unknown) => ipcRenderer.invoke("config:save", patch),
