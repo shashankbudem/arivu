@@ -156,6 +156,44 @@ describe("createToolRegistry", () => {
     }
   });
 
+  it("enforces workspace scope rules for paths, patch targets, and network destinations", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-scope-policy-"));
+    try {
+      await mkdir(path.join(tempDir, "secrets"));
+      await writeFile(path.join(tempDir, "secrets", "token.txt"), "secret\n", "utf8");
+      let prompted = false;
+      const registry = createToolRegistry({
+        workspaceRoot: tempDir,
+        approvals: new ApprovalManager(
+          "trusted",
+          async () => {
+            prompted = true;
+            return true;
+          },
+          {},
+          undefined,
+          {
+            blockedPathPrefixes: ["secrets"],
+            allowedNetworkDomains: ["api.tavily.com"]
+          }
+        )
+      });
+
+      await expect(registry.execute("read", { path: "secrets/token.txt" })).resolves.toMatch(/workspace scope rule blocks path/);
+      await expect(
+        registry.execute("apply_patch", {
+          diff: ["--- a/secrets/token.txt", "+++ b/secrets/token.txt", "@@ -1 +1 @@", "-secret", "+updated"].join("\n")
+        })
+      ).resolves.toMatch(/workspace scope rule blocks path/);
+      await expect(registry.execute("web_search", { query: "current docs" })).resolves.toMatch(
+        /workspace network allowlist blocks www\.bing\.com/
+      );
+      expect(prompted).toBe(false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("can prompt before repo reads when workspace policy requires it", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-read-prompt-"));
     try {

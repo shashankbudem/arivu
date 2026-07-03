@@ -198,6 +198,12 @@ Decision: `ApprovalManager` now attaches a compact scope to approval audit event
 
 Reason: coarse capabilities explain the category of risk, but users also need to know the exact thing the agent acted on. Recording scope as audit metadata gives Arivu a durable explanation layer today and a stable input for future scope-specific policy without prematurely adding a full path/domain policy editor.
 
+## 2026-07-03: Workspace scope rules enforce path and network targets
+
+Decision: workspace policies now include `scopeRules` beside capability overrides. `blockedPathPrefixes` deny matching repo reads, direct writes, and unified-patch targets before execution. `allowedNetworkDomains` denies network actions whose destination host is outside the allowlist. Settings exposes both as line-based workspace controls, and CLI/TUI/desktop runtimes pass the same rules to `ApprovalManager`.
+
+Reason: the harness needs parameter-level policy, not just coarse capability gates. Starting with path prefixes and network domains gives users immediate control over high-risk target classes while keeping the policy editor understandable. MCP server identity rules and browser target classes can build on the same scope-rule path.
+
 ## 2026-06-25: Durable approval audit on task runs
 
 Decision: `ApprovalManager` emits audit events for automatic allows, policy blocks, approval requests, approvals, and denials. Desktop runs persist those events on the active task run and render them in Activity.

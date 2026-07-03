@@ -4,6 +4,7 @@ import chalk from "chalk";
 import { scopeForApprovalAction } from "./approvalScope.js";
 import { evaluateApprovalPolicy, type CapabilityPolicyOverrides } from "./capabilityPolicy.js";
 import { isDestructiveCommand } from "./destructive.js";
+import { evaluateScopePolicy, type WorkspaceScopePolicyRules } from "./scopePolicy.js";
 import type { ApprovalAction, TrustMode } from "./types.js";
 import type { AgentTaskRunApprovalEvent } from "../agent/types.js";
 
@@ -16,12 +17,23 @@ export class ApprovalManager {
     readonly mode: TrustMode,
     private readonly prompt: (message: string) => Promise<boolean> = defaultPrompt,
     private readonly policyOverrides: CapabilityPolicyOverrides = {},
-    private readonly audit?: ApprovalAuditSink
+    private readonly audit?: ApprovalAuditSink,
+    private readonly scopePolicyRules: WorkspaceScopePolicyRules = {}
   ) {}
 
   async require(action: ApprovalAction): Promise<void> {
     const destructive = action.destructive ?? (action.type === "shell" ? isDestructiveCommand(action.command) : action.type === "network");
-    const decision = evaluateApprovalPolicy(this.mode, action, { risky: destructive, overrides: this.policyOverrides });
+    const baseDecision = evaluateApprovalPolicy(this.mode, action, { risky: destructive, overrides: this.policyOverrides });
+    const scopeDecision = baseDecision.effect === "deny" ? undefined : evaluateScopePolicy(action, this.scopePolicyRules);
+    const decision = scopeDecision
+      ? {
+          ...baseDecision,
+          effect: scopeDecision.effect,
+          label: scopeDecision.label,
+          reason: scopeDecision.reason,
+          override: "deny" as const
+        }
+      : baseDecision;
     const approvalId = randomUUID();
     const baseAuditEvent = {
       id: approvalId,
@@ -100,6 +112,9 @@ function formatWriteApproval(action: Extract<ApprovalAction, { type: "write" }>,
   const lines = [`${destructive ? "Destructive write" : "Write"}: ${action.summary}`];
   if (action.path) {
     lines.push(`Path: ${action.path}`);
+  }
+  if (action.paths?.length) {
+    lines.push(`Paths: ${action.paths.join(", ")}`);
   }
   if (action.mode) {
     lines.push(`Mode: ${action.mode}`);

@@ -83,6 +83,7 @@ import {
   redactMcpServers,
   saveConfig,
   workspacePolicyOverridesForRoot,
+  workspaceScopeRulesForRoot,
   type AppConfig,
   type LlmProviderProfile
 } from "../../src/config.js";
@@ -144,6 +145,7 @@ type CapabilityPolicyResult = {
   source: "built-in" | "workspace";
   workspaceRoot: string;
   workspaceOverrides: CapabilityPolicyOverrides;
+  workspaceScopeRules: AppConfig["workspacePolicies"][string]["scopeRules"];
   policies: ReturnType<typeof describeCapabilityPolicies>;
 };
 
@@ -1117,11 +1119,17 @@ class DesktopController {
     const config = await this.effectiveConfig();
     const workspace = await detectWorkspace(this.cwd);
     const workspaceOverrides = workspacePolicyOverridesForRoot(config, workspace.root);
+    const workspaceScopeRules = workspaceScopeRulesForRoot(config, workspace.root);
     return {
       currentTrustMode: config.trustMode,
-      source: Object.keys(workspaceOverrides).length > 0 ? "workspace" : "built-in",
+      source:
+        Object.keys(workspaceOverrides).length > 0 ||
+        Boolean(workspaceScopeRules.blockedPathPrefixes?.length || workspaceScopeRules.allowedNetworkDomains?.length)
+          ? "workspace"
+          : "built-in",
       workspaceRoot: workspace.root,
       workspaceOverrides,
+      workspaceScopeRules,
       policies: describeCapabilityPolicies(workspaceOverrides)
     };
   }
@@ -1385,11 +1393,14 @@ class DesktopController {
     eventTarget?: WebContents;
   }) {
     const policyWorkspace = await detectWorkspace(session.cwd);
+    const policyOverrides = workspacePolicyOverridesForRoot(config, policyWorkspace.root);
+    const scopeRules = workspaceScopeRulesForRoot(config, policyWorkspace.root);
     const approvals = new ApprovalManager(
       config.trustMode,
       (message) => requestApproval(message),
-      workspacePolicyOverridesForRoot(config, policyWorkspace.root),
-      (event) => this.recordApprovalEvent(session, taskRunId, event)
+      policyOverrides,
+      (event) => this.recordApprovalEvent(session, taskRunId, event),
+      scopeRules
     );
     const agent = new Agent({
       client: new OpenAICompatibleChatClient(config),

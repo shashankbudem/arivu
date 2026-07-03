@@ -14,10 +14,11 @@ export function scopeForApprovalAction(action: ApprovalAction): AgentTaskRunAppr
         detail: action.path && action.query ? truncateScopeText(`query: ${action.query}`, MAX_SCOPE_DETAIL) : undefined
       };
     case "write":
+      const writePaths = action.paths?.length ? action.paths : action.path ? [action.path] : [];
       return {
-        kind: action.path ? "path" : "unknown",
-        label: action.path ? "Write path" : "Write target",
-        value: truncateScopeText(action.path ?? action.summary),
+        kind: writePaths.length > 0 ? "path" : "unknown",
+        label: writePaths.length > 1 ? "Write paths" : writePaths.length === 1 ? "Write path" : "Write target",
+        value: truncateScopeText(writePaths.length > 0 ? summarizeScopeValues(writePaths) : action.summary),
         detail: action.mode ? truncateScopeText(`mode: ${action.mode}`, MAX_SCOPE_DETAIL) : undefined
       };
     case "shell":
@@ -86,4 +87,10 @@ function truncateScopeText(value: string, maxLength = MAX_SCOPE_VALUE) {
     return value;
   }
   return `${value.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function summarizeScopeValues(values: string[]) {
+  const firstValues = values.slice(0, 3);
+  const suffix = values.length > firstValues.length ? ` +${values.length - firstValues.length} more` : "";
+  return `${firstValues.join(", ")}${suffix}`;
 }

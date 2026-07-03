@@ -13,7 +13,8 @@ import {
   redactConfigForDisplay,
   saveConfig,
   updateWorkspacePolicy,
-  workspacePolicyOverridesForRoot
+  workspacePolicyOverridesForRoot,
+  workspaceScopeRulesForRoot
 } from "../src/config.js";
 
 let tempDir: string;
@@ -180,6 +181,9 @@ describe("config", () => {
         read_repo: "prompt",
         write_workspace: "prompt",
         browser_control: "deny"
+      }, {
+        blockedPathPrefixes: [".env", "secrets", ".env"],
+        allowedNetworkDomains: ["https://api.tavily.com/search", "BING.com"]
       })
     });
 
@@ -189,7 +193,12 @@ describe("config", () => {
       write_workspace: "prompt",
       browser_control: "deny"
     });
+    expect(workspaceScopeRulesForRoot(loaded, workspaceRoot)).toEqual({
+      blockedPathPrefixes: [".env", "secrets"],
+      allowedNetworkDomains: ["api.tavily.com", "bing.com"]
+    });
     expect(workspacePolicyOverridesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
+    expect(workspaceScopeRulesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
   });
 
   it("normalizes workspace capability policy overrides", () => {
@@ -205,6 +214,14 @@ describe("config", () => {
       "browser_control",
       "read_repo"
     ]);
+    expect(
+      updateWorkspacePolicy(policies, workspaceRoot, {}, { blockedPathPrefixes: ["private", "private"], allowedNetworkDomains: ["Example.com"] })[
+        path.resolve(workspaceRoot)
+      ]?.scopeRules
+    ).toEqual({
+      blockedPathPrefixes: ["private"],
+      allowedNetworkDomains: ["example.com"]
+    });
     expect(updateWorkspacePolicy(policies, workspaceRoot, {})).toEqual({});
   });
 

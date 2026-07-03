@@ -10,6 +10,7 @@ import {
   redactConfigForDisplay,
   saveConfig,
   workspacePolicyOverridesForRoot,
+  workspaceScopeRulesForRoot,
   type AppConfig,
   type ConfigKey
 } from "./config.js";
@@ -162,7 +163,13 @@ async function runOneShot(task: string, config: AppConfig) {
   const cwd = process.cwd();
   const workspace = await detectWorkspace(cwd);
   const client = new OpenAICompatibleChatClient(config);
-  const approvals = new ApprovalManager(config.trustMode, undefined, workspacePolicyOverridesForRoot(config, workspace.root));
+  const approvals = new ApprovalManager(
+    config.trustMode,
+    undefined,
+    workspacePolicyOverridesForRoot(config, workspace.root),
+    undefined,
+    workspaceScopeRulesForRoot(config, workspace.root)
+  );
   const agent = new Agent({
     client,
     approvals,

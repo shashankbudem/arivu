@@ -5,7 +5,7 @@ import { Agent } from "../agent/Agent.js";
 import { chatContentToText } from "../agent/content.js";
 import { OpenAICompatibleChatClient } from "../agent/OpenAICompatibleChatClient.js";
 import type { AgentRunEvent, AgentSession, ChatMessage } from "../agent/types.js";
-import { workspacePolicyOverridesForRoot, type AppConfig } from "../config.js";
+import { workspacePolicyOverridesForRoot, workspaceScopeRulesForRoot, type AppConfig } from "../config.js";
 import { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { SessionStore } from "../sessions/SessionStore.js";
 import { detectWorkspace, type WorkspaceInfo } from "../workspace.js";
@@ -241,7 +241,9 @@ export class TuiApp {
       approvals: new ApprovalManager(
         this.config.trustMode,
         (message) => this.confirm(message),
-        workspacePolicyOverridesForRoot(this.config, this.workspace.root)
+        workspacePolicyOverridesForRoot(this.config, this.workspace.root),
+        undefined,
+        workspaceScopeRulesForRoot(this.config, this.workspace.root)
       ),
       cwd: this.cwd,
       model: this.config.model,

@@ -4998,6 +4998,48 @@ body.is-resizing .panel-resize-handle::after {
   font-size: 12px;
 }
 
+.workspace-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.workspace-scope-field {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.workspace-scope-field span {
+  color: #d8d2c8;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.workspace-scope-field textarea {
+  min-height: 86px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid #34302a;
+  border-radius: 6px;
+  background: #0b0e0f;
+  color: #efede8;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  outline: none;
+}
+
+.workspace-scope-field textarea:focus {
+  border-color: #2bbf9f;
+}
+
+.workspace-scope-field small {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .policy-table-wrap {
   min-width: 0;
   overflow-x: auto;

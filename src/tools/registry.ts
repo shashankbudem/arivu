@@ -11,7 +11,7 @@ import { discoverSkills, formatSkillList, readSkill } from "../agent/skills.js";
 import type { ToolSchema } from "../agent/types.js";
 import { FileStateTracker } from "./fileState.js";
 import { callMcpTool, listMcpTools } from "./mcp.js";
-import { applyUnifiedDiff, summarizePatch } from "./patch.js";
+import { applyUnifiedDiff, changedPathsFromDiff, summarizePatch } from "./patch.js";
 import { assertRealPathInsideWorkspace, resolveSafeWorkspacePath } from "./pathSafety.js";
 import { formatWebSearchResults, searchWeb } from "./webSearch.js";
 import {
@@ -130,7 +130,7 @@ export function createToolRegistry(context: ToolContext) {
       await context.approvals.require({
         type: "network",
         summary: "web_search",
-        destination: context.tavilyApiKey ? "Tavily" : "Bing RSS",
+        destination: context.tavilyApiKey ? "https://api.tavily.com/search" : "https://www.bing.com/search",
         query: parsed.query,
         destructive: true
       });
@@ -461,7 +461,7 @@ export function createToolRegistry(context: ToolContext) {
     async execute(args) {
       const parsed = z.object({ diff: z.string() }).parse(args);
       const summary = summarizePatch(parsed.diff);
-      await context.approvals.require({ type: "write", summary, diff: parsed.diff });
+      await context.approvals.require({ type: "write", summary, paths: changedPathsFromDiff(parsed.diff), diff: parsed.diff });
       await applyUnifiedDiff(
         parsed.diff,
         (requestedPath) => resolveSafeWorkspacePath(context.workspaceRoot, requestedPath),

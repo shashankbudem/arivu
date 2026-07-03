@@ -6132,6 +6132,9 @@ function SettingsView({
   const [workspacePolicyOverrides, setWorkspacePolicyOverrides] = useState<WorkspaceCapabilityPolicyOverrides>(() =>
     workspacePolicyOverridesFromConfig(state.config.workspacePolicies, state.workspace.root)
   );
+  const [workspaceScopeRules, setWorkspaceScopeRules] = useState<WorkspaceScopePolicyRules>(() =>
+    workspaceScopeRulesFromConfig(state.config.workspacePolicies, state.workspace.root)
+  );
   const skillsSectionRef = useRef<HTMLElement | null>(null);
   const selectedProvider = providers.find((provider) => provider.id === activeProviderId) ?? providers[0];
   const baseUrl = selectedProvider?.baseUrl ?? state.config.baseUrl;
@@ -6193,7 +6196,12 @@ function SettingsView({
         model: providerPatch.activeProvider.model,
         trustMode,
         mcpServers,
-        workspacePolicies: updateWorkspacePoliciesForRoot(state.config.workspacePolicies, state.workspace.root, workspacePolicyOverrides)
+        workspacePolicies: updateWorkspacePoliciesForRoot(
+          state.config.workspacePolicies,
+          state.workspace.root,
+          workspacePolicyOverrides,
+          workspaceScopeRules
+        )
       };
       if (providerPatch.activeProvider.apiKey?.trim()) {
         patch.apiKey = providerPatch.activeProvider.apiKey.trim();
@@ -6207,6 +6215,7 @@ function SettingsView({
       setCapabilityPolicies(policyResult.policies);
       setCapabilityPolicySource(policyResult.source);
       setWorkspacePolicyOverrides(policyResult.workspaceOverrides);
+      setWorkspaceScopeRules(policyResult.workspaceScopeRules);
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -6296,6 +6305,7 @@ function SettingsView({
       setCapabilityPolicies(result.policies);
       setCapabilityPolicySource(result.source);
       setWorkspacePolicyOverrides(result.workspaceOverrides);
+      setWorkspaceScopeRules(result.workspaceScopeRules);
     } catch (err) {
       setCapabilityPolicyError(formatError(err));
     } finally {
@@ -6413,9 +6423,11 @@ function SettingsView({
         source={capabilityPolicySource}
         workspaceRoot={state.workspace.root}
         workspaceOverrides={workspacePolicyOverrides}
+        workspaceScopeRules={workspaceScopeRules}
         onWorkspaceOverrideChange={(capability, override) =>
           setWorkspacePolicyOverrides((current) => updateWorkspacePolicyOverride(current, capability, override))
         }
+        onWorkspaceScopeRulesChange={setWorkspaceScopeRules}
         loading={capabilityPolicyLoading}
         error={capabilityPolicyError}
         onRefresh={() => void refreshCapabilityPolicies()}
@@ -6636,7 +6648,9 @@ function CapabilityPolicyPanel({
   source,
   workspaceRoot,
   workspaceOverrides,
+  workspaceScopeRules,
   onWorkspaceOverrideChange,
+  onWorkspaceScopeRulesChange,
   loading,
   error,
   onRefresh
@@ -6646,7 +6660,9 @@ function CapabilityPolicyPanel({
   source: CapabilityPolicyResult["source"];
   workspaceRoot: string;
   workspaceOverrides: WorkspaceCapabilityPolicyOverrides;
+  workspaceScopeRules: WorkspaceScopePolicyRules;
   onWorkspaceOverrideChange: (capability: WorkspacePolicyCapability, override: CapabilityPolicyOverrideEffect | "inherit") => void;
+  onWorkspaceScopeRulesChange: (rules: WorkspaceScopePolicyRules) => void;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
@@ -6699,6 +6715,38 @@ function CapabilityPolicyPanel({
           })}
         </div>
         <small>Overrides only make this workspace stricter: they cannot turn a built-in approval or block into allow.</small>
+        <div className="workspace-scope-grid">
+          <label className="workspace-scope-field">
+            <span>Blocked path prefixes</span>
+            <textarea
+              value={scopeListToText(workspaceScopeRules.blockedPathPrefixes)}
+              onChange={(event) =>
+                onWorkspaceScopeRulesChange({
+                  ...workspaceScopeRules,
+                  blockedPathPrefixes: scopeTextToList(event.target.value)
+                })
+              }
+              placeholder={[".env", "secrets", "private"].join("\n")}
+              rows={4}
+            />
+            <small>One workspace-relative prefix per line. Matching reads, writes, and patches are blocked.</small>
+          </label>
+          <label className="workspace-scope-field">
+            <span>Allowed network domains</span>
+            <textarea
+              value={scopeListToText(workspaceScopeRules.allowedNetworkDomains)}
+              onChange={(event) =>
+                onWorkspaceScopeRulesChange({
+                  ...workspaceScopeRules,
+                  allowedNetworkDomains: scopeTextToList(event.target.value)
+                })
+              }
+              placeholder={["api.tavily.com", "www.bing.com"].join("\n")}
+              rows={4}
+            />
+            <small>Optional allowlist. When set, network tools are denied unless the destination host matches.</small>
+          </label>
+        </div>
       </div>
 
       <div className="policy-table-wrap">
@@ -6781,6 +6829,10 @@ function workspacePolicyOverridesFromConfig(policies: WorkspaceCapabilityPolicie
   return policies[workspaceRoot]?.overrides ?? {};
 }
 
+function workspaceScopeRulesFromConfig(policies: WorkspaceCapabilityPolicies, workspaceRoot: string): WorkspaceScopePolicyRules {
+  return normalizeWorkspaceScopeRules(policies[workspaceRoot]?.scopeRules);
+}
+
 function updateWorkspacePolicyOverride(
   overrides: WorkspaceCapabilityPolicyOverrides,
   capability: WorkspacePolicyCapability,
@@ -6798,7 +6850,8 @@ function updateWorkspacePolicyOverride(
 function updateWorkspacePoliciesForRoot(
   policies: WorkspaceCapabilityPolicies,
   workspaceRoot: string,
-  overrides: WorkspaceCapabilityPolicyOverrides
+  overrides: WorkspaceCapabilityPolicyOverrides,
+  scopeRules: WorkspaceScopePolicyRules
 ): WorkspaceCapabilityPolicies {
   const next = { ...policies };
   const normalized = Object.fromEntries(
@@ -6806,12 +6859,36 @@ function updateWorkspacePoliciesForRoot(
       WORKSPACE_POLICY_CAPABILITIES.includes(entry[0] as WorkspacePolicyCapability) && (entry[1] === "prompt" || entry[1] === "deny")
     )
   );
-  if (Object.keys(normalized).length === 0) {
+  const normalizedScopeRules = normalizeWorkspaceScopeRules(scopeRules);
+  if (Object.keys(normalized).length === 0 && !workspaceScopeRulesHaveEntries(normalizedScopeRules)) {
     delete next[workspaceRoot];
   } else {
-    next[workspaceRoot] = { overrides: normalized };
+    next[workspaceRoot] = { overrides: normalized, scopeRules: normalizedScopeRules };
   }
   return next;
+}
+
+function normalizeWorkspaceScopeRules(rules: WorkspaceScopePolicyRules | undefined): WorkspaceScopePolicyRules {
+  return {
+    blockedPathPrefixes: normalizeScopeList(rules?.blockedPathPrefixes),
+    allowedNetworkDomains: normalizeScopeList(rules?.allowedNetworkDomains)
+  };
+}
+
+function workspaceScopeRulesHaveEntries(rules: WorkspaceScopePolicyRules) {
+  return Boolean(rules.blockedPathPrefixes?.length || rules.allowedNetworkDomains?.length);
+}
+
+function scopeListToText(values: string[] | undefined) {
+  return (values ?? []).join("\n");
+}
+
+function scopeTextToList(value: string) {
+  return normalizeScopeList(value.split(/\r?\n/g));
+}
+
+function normalizeScopeList(values: string[] | undefined) {
+  return Array.from(new Set((values ?? []).map((entry) => entry.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right));
 }
 
 function capabilityPolicySummary(

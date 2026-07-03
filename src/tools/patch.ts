@@ -20,6 +20,10 @@ export function summarizePatch(diff: string): string {
   return patches.map((patch) => `${cleanPatchPath(patch.newPath)} (${patch.hunks.length} hunks)`).join(", ");
 }
 
+export function changedPathsFromDiff(diff: string): string[] {
+  return parseUnifiedDiff(diff).map((patch) => cleanPatchPath(patch.newPath));
+}
+
 export async function applyUnifiedDiff(
   diff: string,
   resolvePath: (path: string) => string | Promise<string>,

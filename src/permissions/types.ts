@@ -13,6 +13,7 @@ export type ApprovalAction =
       summary: string;
       path?: string;
       mode?: "create" | "replace";
+      paths?: string[];
       diff?: string;
       original?: string;
       content?: string;

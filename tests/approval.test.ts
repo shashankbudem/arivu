@@ -151,6 +151,60 @@ describe("approval manager", () => {
     );
   });
 
+  it("denies blocked path and network scopes before prompting", async () => {
+    const events: AgentTaskRunApprovalEvent[] = [];
+    let prompted = false;
+    const approvals = new ApprovalManager(
+      "trusted",
+      async () => {
+        prompted = true;
+        return true;
+      },
+      {},
+      (event) => {
+        events.push(event);
+      },
+      {
+        blockedPathPrefixes: ["secrets"],
+        allowedNetworkDomains: ["api.tavily.com"]
+      }
+    );
+
+    await expect(approvals.require({ type: "read", summary: "read file", path: "secrets/token.txt" })).rejects.toThrow(
+      /workspace scope rule blocks path/
+    );
+    await expect(
+      approvals.require({
+        type: "network",
+        summary: "web_search",
+        destination: "https://www.bing.com/search",
+        query: "news"
+      })
+    ).rejects.toThrow(/workspace network allowlist blocks www\.bing\.com/);
+
+    expect(prompted).toBe(false);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          actionType: "read",
+          status: "blocked",
+          effect: "deny",
+          label: "Blocked by workspace scope",
+          override: "deny",
+          scope: expect.objectContaining({ kind: "path", value: "secrets/token.txt" })
+        }),
+        expect.objectContaining({
+          actionType: "network",
+          status: "blocked",
+          effect: "deny",
+          label: "Blocked by workspace scope",
+          override: "deny",
+          scope: expect.objectContaining({ kind: "network", value: "www.bing.com" })
+        })
+      ])
+    );
+  });
+
   it("can block trusted browser actions with a workspace override", async () => {
     let prompted = false;
     const approvals = new ApprovalManager(

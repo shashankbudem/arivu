@@ -103,8 +103,13 @@ type WorkspacePolicyCapability =
   | "mcp_call"
   | "unknown";
 type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapability, CapabilityPolicyOverrideEffect>>;
+type WorkspaceScopePolicyRules = {
+  blockedPathPrefixes?: string[];
+  allowedNetworkDomains?: string[];
+};
 type WorkspaceCapabilityPolicy = {
   overrides: WorkspaceCapabilityPolicyOverrides;
+  scopeRules: WorkspaceScopePolicyRules;
 };
 type WorkspaceCapabilityPolicies = Record<string, WorkspaceCapabilityPolicy>;
 
@@ -658,6 +663,7 @@ type CapabilityPolicyResult = {
   source: "built-in" | "workspace";
   workspaceRoot: string;
   workspaceOverrides: WorkspaceCapabilityPolicyOverrides;
+  workspaceScopeRules: WorkspaceScopePolicyRules;
   policies: CapabilityPolicySummary[];
 };
 

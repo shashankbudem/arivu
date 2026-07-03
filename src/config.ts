@@ -4,6 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { CapabilityPolicyOverrideEffect } from "./permissions/capabilityPolicy.js";
+import {
+  normalizeWorkspaceScopePolicyRules,
+  scopePolicyHasRules,
+  type WorkspaceScopePolicyRules
+} from "./permissions/scopePolicy.js";
 
 const APP_SLUG = "arivu";
 const LEGACY_APP_SLUG = "shankinster";
@@ -19,6 +24,10 @@ const WorkspacePolicyCapabilitySchema = z.enum([
   "unknown"
 ]);
 const CapabilityPolicyOverrideSchema = z.enum(["prompt", "deny"]);
+const WorkspaceScopePolicyRulesSchema = z.object({
+  blockedPathPrefixes: z.array(z.string()).optional(),
+  allowedNetworkDomains: z.array(z.string()).optional()
+});
 
 const McpServerSchema = z.object({
   command: z.string().min(1),
@@ -36,7 +45,8 @@ const LlmProviderSchema = z.object({
 });
 
 const WorkspaceCapabilityPolicySchema = z.object({
-  overrides: z.record(WorkspacePolicyCapabilitySchema, CapabilityPolicyOverrideSchema).default({})
+  overrides: z.record(WorkspacePolicyCapabilitySchema, CapabilityPolicyOverrideSchema).default({}),
+  scopeRules: WorkspaceScopePolicyRulesSchema.default({})
 });
 
 const ConfigSchema = z.object({
@@ -55,6 +65,7 @@ export type AppConfig = z.infer<typeof ConfigSchema>;
 export type LlmProviderProfile = z.infer<typeof LlmProviderSchema>;
 export type WorkspacePolicyCapability = z.infer<typeof WorkspacePolicyCapabilitySchema>;
 export type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapability, CapabilityPolicyOverrideEffect>>;
+export type WorkspaceCapabilityPolicyScopeRules = WorkspaceScopePolicyRules;
 export type ConfigKey = Exclude<keyof AppConfig, "mcpServers" | "providers" | "activeProviderId">;
 export const REDACTED_SECRET_VALUE = "********";
 
@@ -176,18 +187,28 @@ export function workspacePolicyOverridesForRoot(config: AppConfig, workspaceRoot
   return policy?.overrides ?? {};
 }
 
+export function workspaceScopeRulesForRoot(config: AppConfig, workspaceRoot: string | undefined): WorkspaceCapabilityPolicyScopeRules {
+  if (!workspaceRoot) {
+    return {};
+  }
+  const policy = config.workspacePolicies[path.resolve(workspaceRoot)];
+  return normalizeWorkspaceScopePolicyRules(policy?.scopeRules);
+}
+
 export function updateWorkspacePolicy(
   policies: AppConfig["workspacePolicies"],
   workspaceRoot: string,
-  overrides: WorkspaceCapabilityPolicyOverrides
+  overrides: WorkspaceCapabilityPolicyOverrides,
+  scopeRules: WorkspaceCapabilityPolicyScopeRules = {}
 ): AppConfig["workspacePolicies"] {
   const root = path.resolve(workspaceRoot);
   const normalized = normalizeWorkspacePolicyOverrides(overrides);
+  const normalizedScopeRules = normalizeWorkspaceScopePolicyRules(scopeRules);
   const next = { ...policies };
-  if (Object.keys(normalized).length === 0) {
+  if (Object.keys(normalized).length === 0 && !scopePolicyHasRules(normalizedScopeRules)) {
     delete next[root];
   } else {
-    next[root] = { overrides: normalized };
+    next[root] = { overrides: normalized, scopeRules: normalizedScopeRules };
   }
   return next;
 }
