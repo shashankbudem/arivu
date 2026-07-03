@@ -630,6 +630,7 @@ type ToolSummary = {
   parameters: string[];
   status: ToolStatus;
   statusLabel: string;
+  scopeLabels: string[];
 };
 
 type ToolListResult = {

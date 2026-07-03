@@ -81,6 +81,7 @@ import {
 } from "../../../src/agent/taskHistory";
 import { buildTaskRunAuditMarkdown } from "../../../src/agent/taskRunAudit";
 import { capabilityForToolName } from "../../../src/agent/toolCapabilities";
+import { scopePolicySummaryItems } from "../../../src/permissions/scopePolicy";
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
 
 type ViewMode = "chat" | "history" | "settings" | "ui";
@@ -3558,6 +3559,13 @@ function ToolPanel({ tools }: { tools: ToolSummary[] }) {
                 <span className={`tool-status ${tool.status}`}>{tool.statusLabel}</span>
               </div>
               <p>{tool.description}</p>
+              {tool.scopeLabels.length > 0 ? (
+                <div className="tool-scope-list" aria-label={`${tool.name} workspace scope rules`}>
+                  {tool.scopeLabels.map((label) => (
+                    <span key={label}>{label}</span>
+                  ))}
+                </div>
+              ) : null}
               {tool.parameters.length > 0 ? <span className="tool-params">{tool.parameters.join(", ")}</span> : null}
             </article>
           ))
@@ -6667,6 +6675,7 @@ function CapabilityPolicyPanel({
   error: string | null;
   onRefresh: () => void;
 }) {
+  const activeScopeItems = scopePolicySummaryItems(workspaceScopeRules);
   return (
     <section className="skills-settings-section policy-settings-section" aria-label="Capability policy">
       <div className="settings-section-heading">
@@ -6715,6 +6724,16 @@ function CapabilityPolicyPanel({
           })}
         </div>
         <small>Overrides only make this workspace stricter: they cannot turn a built-in approval or block into allow.</small>
+        {activeScopeItems.length > 0 ? (
+          <div className="workspace-scope-summary" aria-label="Active workspace scope rules">
+            {activeScopeItems.map((item) => (
+              <span key={item.label}>
+                <strong>{item.label}</strong>
+                {item.value}
+              </span>
+            ))}
+          </div>
+        ) : null}
         <div className="workspace-scope-grid">
           <label className="workspace-scope-field">
             <span>Blocked path prefixes</span>

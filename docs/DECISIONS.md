@@ -210,6 +210,12 @@ Decision: workspace `scopeRules` now include `allowedMcpServers` and `allowedBro
 
 Reason: MCP servers and browser pages are privileged tool targets, not generic capabilities. Adding identity/class checks on top of the existing capability table lets sensitive workspaces constrain which local integrations and browser surfaces the agent may use without changing the global trust-mode posture.
 
+## 2026-07-03: Scope rules are summarized in policy UI and tools
+
+Decision: the scope-policy module now exposes compact summary helpers. Desktop Settings renders active workspace scope rules as summary chips above the editable fields, and the Tools popover shows matching path/domain/MCP/browser scope chips on affected tool rows. The main process also builds the Tools popover from the scoped registry so MCP discovery visibility matches execution-time enforcement.
+
+Reason: parameter-level policy should not feel invisible. Users need to see the target restrictions before a tool call runs, and the Tools popover is where they already inspect available capabilities.
+
 ## 2026-06-25: Durable approval audit on task runs
 
 Decision: `ApprovalManager` emits audit events for automatic allows, policy blocks, approval requests, approvals, and denials. Desktop runs persist those events on the active task run and render them in Activity.

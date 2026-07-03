@@ -1340,6 +1340,27 @@ body.is-resizing .panel-resize-handle::after {
   font-size: 11px;
 }
 
+.tool-scope-list {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tool-scope-list span {
+  max-width: 100%;
+  padding: 2px 6px;
+  overflow: hidden;
+  border: 1px solid rgb(43 191 159 / 0.25);
+  border-radius: 999px;
+  background: rgb(43 191 159 / 0.08);
+  color: #a8efe0;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ghost-button {
   border: 1px solid #34302a;
   background: var(--control-gradient);
@@ -5002,6 +5023,34 @@ body.is-resizing .panel-resize-handle::after {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 10px;
+}
+
+.workspace-scope-summary {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workspace-scope-summary span {
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  overflow: hidden;
+  border: 1px solid rgb(43 191 159 / 0.24);
+  border-radius: 999px;
+  background: rgb(43 191 159 / 0.08);
+  color: #a8efe0;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-scope-summary strong {
+  color: #d8fff7;
 }
 
 .workspace-scope-field {

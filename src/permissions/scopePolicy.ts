@@ -13,6 +13,11 @@ export type ScopePolicyDecision = {
   reason: string;
 };
 
+export type ScopePolicySummaryItem = {
+  label: string;
+  value: string;
+};
+
 export function evaluateScopePolicy(action: ApprovalAction, rules: WorkspaceScopePolicyRules = {}): ScopePolicyDecision | undefined {
   const normalized = normalizeWorkspaceScopePolicyRules(rules);
   const blockedPath = blockedPathMatch(action, normalized.blockedPathPrefixes ?? []);
@@ -122,12 +127,64 @@ export function scopePolicyHasRules(rules: WorkspaceScopePolicyRules | undefined
   );
 }
 
+export function scopePolicySummaryItems(rules: WorkspaceScopePolicyRules | undefined): ScopePolicySummaryItem[] {
+  const normalized = normalizeWorkspaceScopePolicyRules(rules);
+  return [
+    normalized.blockedPathPrefixes?.length
+      ? {
+          label: "Blocked paths",
+          value: summarizeRuleValues(normalized.blockedPathPrefixes)
+        }
+      : undefined,
+    normalized.allowedNetworkDomains?.length
+      ? {
+          label: "Network domains",
+          value: summarizeRuleValues(normalized.allowedNetworkDomains)
+        }
+      : undefined,
+    normalized.allowedMcpServers?.length
+      ? {
+          label: "MCP servers",
+          value: summarizeRuleValues(normalized.allowedMcpServers)
+        }
+      : undefined,
+    normalized.allowedBrowserTargetClasses?.length
+      ? {
+          label: "Browser classes",
+          value: summarizeRuleValues(normalized.allowedBrowserTargetClasses)
+        }
+      : undefined
+  ].filter((item): item is ScopePolicySummaryItem => Boolean(item));
+}
+
+export function scopePolicySummariesForTool(toolName: string, rules: WorkspaceScopePolicyRules | undefined): string[] {
+  const normalized = normalizeWorkspaceScopePolicyRules(rules);
+  const summaries: string[] = [];
+  if (normalized.blockedPathPrefixes?.length && pathScopedTool(toolName)) {
+    summaries.push(`Blocked paths: ${summarizeRuleValues(normalized.blockedPathPrefixes)}`);
+  }
+  if (normalized.allowedNetworkDomains?.length && toolName === "web_search") {
+    summaries.push(`Allowed domains: ${summarizeRuleValues(normalized.allowedNetworkDomains)}`);
+  }
+  if (normalized.allowedMcpServers?.length && toolName.startsWith("mcp_")) {
+    summaries.push(`Allowed MCP: ${summarizeRuleValues(normalized.allowedMcpServers)}`);
+  }
+  if (normalized.allowedBrowserTargetClasses?.length && toolName.startsWith("browser_")) {
+    summaries.push(`Allowed browser: ${summarizeRuleValues(normalized.allowedBrowserTargetClasses)}`);
+  }
+  return summaries;
+}
+
 function blockedPathMatch(action: ApprovalAction, blockedPrefixes: string[]) {
   if (blockedPrefixes.length === 0) {
     return undefined;
   }
   const paths = approvalActionPaths(action);
   return paths.find((candidate) => blockedPrefixes.some((prefix) => pathMatchesPrefix(candidate, prefix)));
+}
+
+function pathScopedTool(toolName: string) {
+  return ["list", "read", "search", "git_status", "apply_patch", "write_file"].includes(toolName);
 }
 
 function approvalActionPaths(action: ApprovalAction) {
@@ -263,4 +320,10 @@ function uniqueSorted(values: string[]) {
 
 function uniqueSortedBrowserTargetClasses(values: BrowserTargetClass[]) {
   return Array.from(new Set(values)).sort((left, right) => left.localeCompare(right)) as BrowserTargetClass[];
+}
+
+function summarizeRuleValues(values: string[]) {
+  const head = values.slice(0, 3);
+  const suffix = values.length > head.length ? ` +${values.length - head.length} more` : "";
+  return `${head.join(", ")}${suffix}`;
 }

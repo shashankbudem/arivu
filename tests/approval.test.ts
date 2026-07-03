@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApprovalManager } from "../src/permissions/ApprovalManager.js";
+import { scopePolicySummariesForTool, scopePolicySummaryItems } from "../src/permissions/scopePolicy.js";
 import type { AgentTaskRunApprovalEvent } from "../src/agent/types.js";
 
 describe("approval manager", () => {
@@ -250,6 +251,27 @@ describe("approval manager", () => {
         })
       ])
     );
+  });
+
+  it("summarizes workspace scope rules for settings and tool rows", () => {
+    const rules = {
+      blockedPathPrefixes: [".env", "private", "secrets", "tmp"],
+      allowedNetworkDomains: ["api.tavily.com"],
+      allowedMcpServers: ["chrome-devtools", "github"],
+      allowedBrowserTargetClasses: ["background" as const, "local" as const]
+    };
+
+    expect(scopePolicySummaryItems(rules)).toEqual([
+      { label: "Blocked paths", value: ".env, private, secrets +1 more" },
+      { label: "Network domains", value: "api.tavily.com" },
+      { label: "MCP servers", value: "chrome-devtools, github" },
+      { label: "Browser classes", value: "background, local" }
+    ]);
+    expect(scopePolicySummariesForTool("read", rules)).toEqual(["Blocked paths: .env, private, secrets +1 more"]);
+    expect(scopePolicySummariesForTool("web_search", rules)).toEqual(["Allowed domains: api.tavily.com"]);
+    expect(scopePolicySummariesForTool("mcp_call_tool", rules)).toEqual(["Allowed MCP: chrome-devtools, github"]);
+    expect(scopePolicySummariesForTool("browser_open", rules)).toEqual(["Allowed browser: background, local"]);
+    expect(scopePolicySummariesForTool("current_datetime", rules)).toEqual([]);
   });
 
   it("can block trusted browser actions with a workspace override", async () => {

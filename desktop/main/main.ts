@@ -91,7 +91,7 @@ import { runDoctor, type DoctorReport } from "../../src/diagnostics/doctor.js";
 import { ApprovalManager } from "../../src/permissions/ApprovalManager.js";
 import { describeCapabilityPolicies, evaluateCapabilityPolicy } from "../../src/permissions/capabilityPolicy.js";
 import type { CapabilityPolicyOverrides } from "../../src/permissions/capabilityPolicy.js";
-import { scopePolicyHasRules } from "../../src/permissions/scopePolicy.js";
+import { scopePolicyHasRules, scopePolicySummariesForTool } from "../../src/permissions/scopePolicy.js";
 import { SessionStore } from "../../src/sessions/SessionStore.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
@@ -139,6 +139,7 @@ type ToolSummary = {
   parameters: string[];
   status: ToolStatus;
   statusLabel: string;
+  scopeLabels: string[];
 };
 
 type CapabilityPolicyResult = {
@@ -1098,11 +1099,13 @@ class DesktopController {
     const config = await this.effectiveConfig();
     const workspace = await detectWorkspace(this.cwd);
     const policyOverrides = workspacePolicyOverridesForRoot(config, workspace.root);
+    const scopePolicyRules = workspaceScopeRulesForRoot(config, workspace.root);
     const registry = createToolRegistry({
       workspaceRoot: workspace.root,
-      approvals: new ApprovalManager(config.trustMode, async () => false, policyOverrides),
+      approvals: new ApprovalManager(config.trustMode, async () => false, policyOverrides, undefined, scopePolicyRules),
       tavilyApiKey: config.tavilyApiKey,
       mcpServers: config.mcpServers,
+      scopePolicyRules,
       browser: browserController
     });
 
@@ -1111,7 +1114,7 @@ class DesktopController {
         name: schema.name,
         description: schema.description,
         parameters: toolParameterNames(schema),
-        ...toolStatus(schema.name, config, policyOverrides)
+        ...toolStatus(schema.name, config, policyOverrides, scopePolicyRules)
       }))
     };
   }
@@ -2224,25 +2227,34 @@ function toolParameterNames(schema: ToolSchema) {
   return Object.keys(properties).sort((left, right) => left.localeCompare(right));
 }
 
-function toolStatus(name: string, config: AppConfig, policyOverrides: CapabilityPolicyOverrides = {}): Pick<ToolSummary, "status" | "statusLabel"> {
+function toolStatus(
+  name: string,
+  config: AppConfig,
+  policyOverrides: CapabilityPolicyOverrides = {},
+  scopePolicyRules: AppConfig["workspacePolicies"][string]["scopeRules"] = {}
+): Pick<ToolSummary, "status" | "statusLabel" | "scopeLabels"> {
+  const scopeLabels = scopePolicySummariesForTool(name, scopePolicyRules);
   if (name === "current_location") {
     return {
       status: "privacy",
-      statusLabel: "Timezone only"
+      statusLabel: "Timezone only",
+      scopeLabels
     };
   }
   if (name.startsWith("mcp_")) {
     if (name === "mcp_list_tools" && Object.keys(config.mcpServers).length === 0) {
       return {
         status: "network",
-        statusLabel: "No servers"
+        statusLabel: "No servers",
+        scopeLabels
       };
     }
   }
   if (name.startsWith("browser_") && !["browser_open", "browser_click", "browser_click_at", "browser_type"].includes(name)) {
     return {
       status: "privacy",
-      statusLabel: "Hidden browser"
+      statusLabel: "Hidden browser",
+      scopeLabels
     };
   }
 
@@ -2253,12 +2265,14 @@ function toolStatus(name: string, config: AppConfig, policyOverrides: Capability
   if (name === "web_search") {
     return {
       status: decision.effect === "deny" ? "blocked" : "approval",
-      statusLabel: config.tavilyApiKey ? "Network approval" : "Network fallback approval"
+      statusLabel: config.tavilyApiKey ? "Network approval" : "Network fallback approval",
+      scopeLabels
     };
   }
   return {
     status: decision.effect === "deny" ? "blocked" : decision.effect === "prompt" ? "approval" : "enabled",
-    statusLabel: decision.label
+    statusLabel: decision.label,
+    scopeLabels
   };
 }
 
