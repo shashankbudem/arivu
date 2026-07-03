@@ -136,7 +136,8 @@ function toolPolicyLine(run: AgentTaskRun, tool: AgentTaskRun["tools"][number]) 
     approval.effect,
     approval.trustMode,
     approval.override ? `workspace override ${approval.override}` : undefined,
-    approval.risky ? "risky" : undefined
+    approval.risky ? "risky" : undefined,
+    approvalScopeSummary(approval.scope)
   ].filter((item): item is string => Boolean(item));
   return `${details.join(" - ")}: ${inlineText(approval.reason)}`;
 }
@@ -183,11 +184,19 @@ function approvalLines(run: AgentTaskRun) {
         approval.trustMode,
         approval.effect,
         approval.override ? `override ${approval.override}` : undefined,
-        approval.risky ? "risky" : undefined
+        approval.risky ? "risky" : undefined,
+        approvalScopeSummary(approval.scope)
       ].filter((item): item is string => Boolean(item));
       return `- ${details.join(" - ")}: ${inlineText(approval.summary)} (${inlineText(approval.reason)})`;
     })
   );
+}
+
+function approvalScopeSummary(scope: AgentTaskRun["approvals"][number]["scope"]) {
+  if (!scope) {
+    return undefined;
+  }
+  return ["scope", scope.label, scope.value].filter(Boolean).join(" ");
 }
 
 function artifactLines(run: AgentTaskRun) {

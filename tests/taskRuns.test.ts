@@ -109,6 +109,11 @@ describe("agent task runs", () => {
         label: "Requires approval",
         reason: "shell commands require approval",
         risky: false,
+        scope: {
+          kind: "command",
+          label: "Command",
+          value: "npm test"
+        },
         summary: "npm test",
         message: "Shell command: npm test"
       },
@@ -126,6 +131,11 @@ describe("agent task runs", () => {
         label: "Requires approval",
         reason: "shell commands require approval",
         risky: false,
+        scope: {
+          kind: "command",
+          label: "Command",
+          value: "npm test"
+        },
         summary: "npm test",
         message: "Shell command: npm test"
       },
@@ -145,6 +155,11 @@ describe("agent task runs", () => {
         label: "Requires approval",
         reason: "shell commands require approval",
         risky: false,
+        scope: {
+          kind: "command",
+          label: "Command",
+          value: "npm test"
+        },
         summary: "npm test",
         message: "Shell command: npm test",
         createdAt: "2026-01-01T00:00:01.000Z",

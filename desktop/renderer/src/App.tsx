@@ -251,6 +251,7 @@ type ActivityPolicyDetail = {
   trustMode?: TrustMode;
   risky?: boolean;
   override?: AgentTaskRunApprovalOverride;
+  scope?: AgentTaskRunApprovalScope;
   summary?: string;
 };
 
@@ -5800,7 +5801,8 @@ function ActivityPolicyDetails({ policy }: { policy: ActivityPolicyDetail }) {
     policy.status ? `Audit: ${approvalStatusLabel(policy.status)}` : undefined,
     policy.effect ? `Effect: ${policyEffectLabel(policy.effect)}` : undefined,
     policy.override ? `Override: ${policy.override}` : undefined,
-    policy.risky !== undefined ? `Risk: ${policy.risky ? "risky action" : "standard action"}` : undefined
+    policy.risky !== undefined ? `Risk: ${policy.risky ? "risky action" : "standard action"}` : undefined,
+    policy.scope ? `Scope: ${approvalScopeLabel(policy.scope)}` : undefined
   ].filter((item): item is string => Boolean(item));
   return (
     <div className={`activity-policy-detail ${policy.effect ?? "inferred"}`}>
@@ -5849,9 +5851,14 @@ function activityPolicyTitle(policy: ActivityPolicyDetail) {
     policy.status ? `Audit: ${approvalStatusLabel(policy.status)}` : undefined,
     policy.trustMode ? `Trust mode: ${trustModeLabel(policy.trustMode)}` : undefined,
     policy.override ? `Workspace override: ${policy.override}` : undefined,
+    policy.scope ? `Scope: ${approvalScopeLabel(policy.scope)}` : undefined,
     policy.reason
   ].filter((line): line is string => Boolean(line));
   return lines.join("\n");
+}
+
+function approvalScopeLabel(scope: AgentTaskRunApprovalScope) {
+  return [scope.label, scope.value].filter(Boolean).join(": ");
 }
 
 function activityPolicyFallbackReason(policy: ActivityPolicyDetail) {
@@ -8295,6 +8302,7 @@ function activityPolicyFromApproval(approval: AgentTaskRunApproval): ActivityPol
     trustMode: approval.trustMode,
     risky: approval.risky,
     override: approval.override,
+    scope: approval.scope,
     summary: approval.summary
   };
 }
@@ -8327,6 +8335,7 @@ function approvalDetail(approval: AgentTaskRunApproval) {
     `trust mode: ${trustModeLabel(approval.trustMode)}`,
     `policy: ${approval.effect}${approval.override ? ` (workspace override: ${approval.override})` : ""}`,
     `risk: ${approval.risky ? "risky" : "standard"}`,
+    approval.scope ? `scope: ${approvalScopeDetail(approval.scope)}` : undefined,
     `reason: ${approval.reason}`,
     approval.requestedAt ? `requested: ${formatDateTime(approval.requestedAt)}` : undefined,
     approval.decidedAt ? `decided: ${formatDateTime(approval.decidedAt)}` : undefined,
@@ -8334,6 +8343,14 @@ function approvalDetail(approval: AgentTaskRunApproval) {
     approval.message ? `prompt:\n${approval.message}` : undefined
   ].filter((line): line is string => Boolean(line));
   return lines.join("\n");
+}
+
+function approvalScopeDetail(scope: AgentTaskRunApprovalScope) {
+  const pieces = [scope.label, scope.value].filter(Boolean);
+  if (scope.detail) {
+    pieces.push(scope.detail);
+  }
+  return pieces.join(" - ");
 }
 
 function approvalActivityStatus(status: AgentTaskRunApprovalStatus): ActivityItem["status"] {

@@ -125,6 +125,13 @@ type AgentTaskRunToolCall = {
 type AgentTaskRunApprovalStatus = "allowed" | "requested" | "approved" | "denied" | "blocked";
 type AgentTaskRunApprovalEffect = "allow" | "prompt" | "deny";
 type AgentTaskRunApprovalOverride = "prompt" | "deny";
+type AgentTaskRunApprovalScopeKind = "path" | "query" | "command" | "network" | "browser" | "mcp" | "unknown";
+type AgentTaskRunApprovalScope = {
+  kind: AgentTaskRunApprovalScopeKind;
+  label: string;
+  value?: string;
+  detail?: string;
+};
 type AgentTaskRunApproval = {
   id: string;
   actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
@@ -136,6 +143,7 @@ type AgentTaskRunApproval = {
   reason: string;
   risky: boolean;
   override?: AgentTaskRunApprovalOverride;
+  scope?: AgentTaskRunApprovalScope;
   summary: string;
   message?: string;
   createdAt: string;

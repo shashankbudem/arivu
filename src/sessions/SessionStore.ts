@@ -73,6 +73,13 @@ const AgentTaskRunToolSchema = z.object({
   artifactIds: z.array(z.string()).optional()
 });
 
+const AgentTaskRunApprovalScopeSchema = z.object({
+  kind: z.enum(["path", "query", "command", "network", "browser", "mcp", "unknown"]),
+  label: z.string(),
+  value: z.string().optional(),
+  detail: z.string().optional()
+});
+
 const AgentTaskRunApprovalSchema = z.object({
   id: z.string(),
   actionType: z.enum(["read", "write", "shell", "mcp", "network", "browser"]),
@@ -84,6 +91,7 @@ const AgentTaskRunApprovalSchema = z.object({
   reason: z.string(),
   risky: z.boolean(),
   override: z.enum(["prompt", "deny"]).optional(),
+  scope: AgentTaskRunApprovalScopeSchema.optional(),
   summary: z.string(),
   message: z.string().optional(),
   createdAt: z.string(),

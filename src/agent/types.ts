@@ -130,6 +130,13 @@ export type AgentTaskRunToolCall = {
 export type AgentTaskRunApprovalStatus = "allowed" | "requested" | "approved" | "denied" | "blocked";
 export type AgentTaskRunApprovalEffect = "allow" | "prompt" | "deny";
 export type AgentTaskRunApprovalOverride = "prompt" | "deny";
+export type AgentTaskRunApprovalScopeKind = "path" | "query" | "command" | "network" | "browser" | "mcp" | "unknown";
+export type AgentTaskRunApprovalScope = {
+  kind: AgentTaskRunApprovalScopeKind;
+  label: string;
+  value?: string;
+  detail?: string;
+};
 
 export type AgentTaskRunApproval = {
   id: string;
@@ -142,6 +149,7 @@ export type AgentTaskRunApproval = {
   reason: string;
   risky: boolean;
   override?: AgentTaskRunApprovalOverride;
+  scope?: AgentTaskRunApprovalScope;
   summary: string;
   message?: string;
   createdAt: string;

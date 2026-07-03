@@ -8,7 +8,7 @@ Trust modes are enforced through the capability policy table in `src/permissions
 
 Desktop Settings can save stricter capability overrides for the current workspace root. Overrides can require approval or block enforceable capabilities such as repo reads, writes, shell commands, network fetches, browser control, MCP calls, and unknown tool activity. Overrides cannot grant `allow` or weaken a built-in `prompt`/`deny` decision.
 
-Desktop task runs persist approval audit records for automatic allows, policy blocks, requested approvals, approvals, and denials. The Activity rail renders those records beside tool calls so restored sessions keep the control-plane decision history.
+Desktop task runs persist approval audit records for automatic allows, policy blocks, requested approvals, approvals, and denials. Each approval audit can include a compact action scope, such as the path being read or written, shell command, network host, browser target, or MCP server/tool. The Activity rail renders those records beside tool calls so restored sessions keep the control-plane decision history and the relevant target. Today those scopes are explanatory audit metadata; future scope-specific policy can enforce path classes, network domains, MCP identities, and browser target classes.
 
 Shell commands currently run only through the explicit `host` execution profile, which means a local host process in the active workspace or task worktree. The `run` tool accepts future `container` and `sandbox` profile names, but those profiles fail closed before approval or execution until a real isolated backend is configured.
 

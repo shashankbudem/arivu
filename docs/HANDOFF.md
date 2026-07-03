@@ -193,7 +193,7 @@ High-value tasks:
 - Add an interactive TUI session picker and richer `arivu sessions` filters.
 - Add richer PR review handoff controls such as review-state notifications and deeper PR-check evidence handoffs.
 - Add stronger semantic plan matching from richer artifacts such as parsed reports, LSP diagnostics, PR checks, and model-authored evidence labels beyond the current completion-note checklist.
-- Deepen policy scopes beyond coarse capabilities with parameter-level constraints such as path classes, network domains, MCP server identities, and browser target classes.
+- Turn recorded approval scopes into enforceable parameter-level policy constraints such as path classes, network domains, MCP server identities, and browser target classes.
 - Polish stale-path recovery and cleanup for recent workspace rows.
 - Add richer remediation and provider capability persistence from doctor/fallback outcomes.
 - Add provider capability flags for tool-calling vs plain chat, using observed fallback outcomes.

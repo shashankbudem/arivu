@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { confirm } from "@inquirer/prompts";
 import chalk from "chalk";
+import { scopeForApprovalAction } from "./approvalScope.js";
 import { evaluateApprovalPolicy, type CapabilityPolicyOverrides } from "./capabilityPolicy.js";
 import { isDestructiveCommand } from "./destructive.js";
 import type { ApprovalAction, TrustMode } from "./types.js";
@@ -22,35 +23,30 @@ export class ApprovalManager {
     const destructive = action.destructive ?? (action.type === "shell" ? isDestructiveCommand(action.command) : action.type === "network");
     const decision = evaluateApprovalPolicy(this.mode, action, { risky: destructive, overrides: this.policyOverrides });
     const approvalId = randomUUID();
+    const baseAuditEvent = {
+      id: approvalId,
+      actionType: action.type,
+      capability: decision.capability,
+      trustMode: this.mode,
+      effect: decision.effect,
+      label: decision.label,
+      reason: decision.reason,
+      risky: destructive,
+      override: decision.override,
+      scope: scopeForApprovalAction(action),
+      summary: summarizeApprovalAction(action)
+    };
     if (decision.effect === "deny") {
       await this.emitAudit({
-        id: approvalId,
-        actionType: action.type,
-        capability: decision.capability,
+        ...baseAuditEvent,
         status: "blocked",
-        trustMode: this.mode,
-        effect: decision.effect,
-        label: decision.label,
-        reason: decision.reason,
-        risky: destructive,
-        override: decision.override,
-        summary: summarizeApprovalAction(action)
       });
       throw new Error(`Refused ${action.type}: ${decision.reason}.`);
     }
     if (decision.effect === "allow") {
       await this.emitAudit({
-        id: approvalId,
-        actionType: action.type,
-        capability: decision.capability,
+        ...baseAuditEvent,
         status: "allowed",
-        trustMode: this.mode,
-        effect: decision.effect,
-        label: decision.label,
-        reason: decision.reason,
-        risky: destructive,
-        override: decision.override,
-        summary: summarizeApprovalAction(action)
       });
       return;
     }
@@ -69,49 +65,22 @@ export class ApprovalManager {
                 : formatWriteApproval(action, destructive);
 
     await this.emitAudit({
-      id: approvalId,
-      actionType: action.type,
-      capability: decision.capability,
+      ...baseAuditEvent,
       status: "requested",
-      trustMode: this.mode,
-      effect: decision.effect,
-      label: decision.label,
-      reason: decision.reason,
-      risky: destructive,
-      override: decision.override,
-      summary: summarizeApprovalAction(action),
       message: truncateApprovalAuditText(label)
     });
     const approved = await this.prompt(label);
     if (!approved) {
       await this.emitAudit({
-        id: approvalId,
-        actionType: action.type,
-        capability: decision.capability,
+        ...baseAuditEvent,
         status: "denied",
-        trustMode: this.mode,
-        effect: decision.effect,
-        label: decision.label,
-        reason: decision.reason,
-        risky: destructive,
-        override: decision.override,
-        summary: summarizeApprovalAction(action),
         message: truncateApprovalAuditText(label)
       });
       throw new Error(`User denied ${action.type}.`);
     }
     await this.emitAudit({
-      id: approvalId,
-      actionType: action.type,
-      capability: decision.capability,
+      ...baseAuditEvent,
       status: "approved",
-      trustMode: this.mode,
-      effect: decision.effect,
-      label: decision.label,
-      reason: decision.reason,
-      risky: destructive,
-      override: decision.override,
-      summary: summarizeApprovalAction(action),
       message: truncateApprovalAuditText(label)
     });
   }

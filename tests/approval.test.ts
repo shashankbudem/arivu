@@ -77,6 +77,11 @@ describe("approval manager", () => {
       trustMode: "ask",
       effect: "prompt",
       summary: "npm test",
+      scope: {
+        kind: "command",
+        label: "Command",
+        value: "npm test"
+      },
       message: "Shell command: npm test"
     });
     expect(events[1]).toMatchObject({
@@ -85,8 +90,65 @@ describe("approval manager", () => {
       capability: "run_command",
       status: "denied",
       effect: "prompt",
-      summary: "npm test"
+      summary: "npm test",
+      scope: {
+        kind: "command",
+        label: "Command",
+        value: "npm test"
+      }
     });
+  });
+
+  it("emits compact approval scopes for each action type", async () => {
+    const events: AgentTaskRunApprovalEvent[] = [];
+    const approvals = new ApprovalManager(
+      "trusted",
+      async () => true,
+      {},
+      (event) => {
+        events.push(event);
+      }
+    );
+
+    await expect(approvals.require({ type: "read", summary: "read file", path: "README.md" })).resolves.toBeUndefined();
+    await expect(approvals.require({ type: "write", summary: "create note", path: "notes.md", mode: "create" })).resolves.toBeUndefined();
+    await expect(approvals.require({ type: "shell", command: "npm test", cwd: "/workspace" })).resolves.toBeUndefined();
+    await expect(
+      approvals.require({ type: "network", summary: "fetch docs", destination: "https://example.com/docs", query: "sdk" })
+    ).resolves.toBeUndefined();
+    await expect(approvals.require({ type: "mcp", server: "github", tool: "list_pull_requests" })).resolves.toBeUndefined();
+    await expect(
+      approvals.require({ type: "browser", action: "open", target: "https://developer.example.com/start", mode: "visible" })
+    ).resolves.toBeUndefined();
+
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          actionType: "read",
+          scope: expect.objectContaining({ kind: "path", label: "Read path", value: "README.md" })
+        }),
+        expect.objectContaining({
+          actionType: "write",
+          scope: expect.objectContaining({ kind: "path", label: "Write path", value: "notes.md", detail: "mode: create" })
+        }),
+        expect.objectContaining({
+          actionType: "shell",
+          scope: expect.objectContaining({ kind: "command", label: "Command", value: "npm test", detail: "cwd: /workspace" })
+        }),
+        expect.objectContaining({
+          actionType: "network",
+          scope: expect.objectContaining({ kind: "network", label: "Network target", value: "example.com", detail: "query: sdk" })
+        }),
+        expect.objectContaining({
+          actionType: "mcp",
+          scope: expect.objectContaining({ kind: "mcp", label: "MCP tool", value: "github/list_pull_requests" })
+        }),
+        expect.objectContaining({
+          actionType: "browser",
+          scope: expect.objectContaining({ kind: "browser", label: "Browser target", value: "developer.example.com", detail: "open - visible" })
+        })
+      ])
+    );
   });
 
   it("can block trusted browser actions with a workspace override", async () => {

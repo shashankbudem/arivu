@@ -66,7 +66,7 @@ arivu "task"
 - `src/tools/fileState.ts`: read-before-write state tracking.
 - `src/tools/patch.ts`: unified diff parsing/application.
 - `src/tools/webSearch.ts`: Tavily-first web search helper with Bing/Bing News RSS fallback.
-- `src/permissions/capabilityPolicy.ts` and `src/permissions/ApprovalManager.ts`: capability-to-policy mapping, trust-mode allow/prompt/deny decisions, and approval prompts.
+- `src/permissions/capabilityPolicy.ts`, `src/permissions/approvalScope.ts`, and `src/permissions/ApprovalManager.ts`: capability-to-policy mapping, compact target-scope extraction, trust-mode allow/prompt/deny decisions, and approval prompts.
 - `src/sessions/SessionStore.ts`: JSON session persistence.
 - `src/config.ts`: saved config, env overrides, config/data paths.
 - `src/workspace.ts`: git/package workspace detection.

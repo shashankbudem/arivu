@@ -192,6 +192,12 @@ Decision: Activity tool rows now carry policy detail alongside the tool summary.
 
 Reason: users need to understand not just what the agent did, but why that action was allowed, approval-gated, blocked, or merely inferred from old transcript protocol. Keeping the classifier shared between task-run recording and renderer recovery avoids drift between saved run data and restored UI explanations.
 
+## 2026-07-03: Approval audits keep compact target scopes
+
+Decision: `ApprovalManager` now attaches a compact scope to approval audit events when an action has an obvious target: read/write paths, shell commands and cwd, network host/query, browser target/action/mode, or MCP server/tool identity. Task runs persist that scope, Activity policy details render it, and copied audit summaries include it beside the policy effect and reason.
+
+Reason: coarse capabilities explain the category of risk, but users also need to know the exact thing the agent acted on. Recording scope as audit metadata gives Arivu a durable explanation layer today and a stable input for future scope-specific policy without prematurely adding a full path/domain policy editor.
+
 ## 2026-06-25: Durable approval audit on task runs
 
 Decision: `ApprovalManager` emits audit events for automatic allows, policy blocks, approval requests, approvals, and denials. Desktop runs persist those events on the active task run and render them in Activity.
