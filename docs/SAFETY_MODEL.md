@@ -25,7 +25,7 @@ Allowed:
 - `current_location`
 - `list_skills`
 - `read_skill`
-- browser read tools: `browser_screenshot`, `browser_snapshot`, `browser_console`
+- browser tools against isolated Arivu browser targets: `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, `browser_type`
 - `git_status`
 
 Requires approval:
@@ -38,7 +38,6 @@ Denied:
 - patch application
 - shell commands
 - MCP tool listing/calls when they would start or use configured MCP servers
-- browser open/click/type actions
 
 ### `ask`
 
@@ -48,7 +47,7 @@ Allowed automatically:
 
 - reads
 - searches
-- browser screenshot/snapshot/console reads against isolated browser pages
+- browser open/click/type/screenshot/snapshot/console actions against isolated browser pages
 - local skill listing
 - local skill reads
 - directory listing
@@ -61,7 +60,6 @@ Requires approval:
 - `run`
 - `web_search`
 - MCP tool listing/calls
-- browser open/click/type actions
 
 MCP tools:
 
@@ -150,7 +148,7 @@ Browser targets:
 - `visible`: a separate visible `BrowserWindow` for explicit browser-window requests.
 - `background`: a hidden `BrowserWindow` for non-visible browser tasks.
 
-The agent browser target uses an isolated hidden Electron session. The visible browser window also uses an isolated Electron session. Neither target shares the user's Chrome profile, cookies, extensions, or existing tabs.
+The background browser target and visible tabbed browser window share Arivu's persistent isolated Electron browser partition. Cookies and login state can carry across Arivu browser sessions, but neither target shares the user's Chrome profile, extensions, or existing tabs.
 
 Browser control policy:
 

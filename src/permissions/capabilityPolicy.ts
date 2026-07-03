@@ -29,7 +29,18 @@ export type CapabilityPolicySummary = {
   capability: AgentTaskRunCapability;
   label: string;
   description: string;
+  examples: string[];
+  risk: string;
+  defaultPosture: string;
   modes: CapabilityPolicyModeSummary[];
+};
+
+type CapabilityDetails = {
+  label: string;
+  description: string;
+  examples: string[];
+  risk: string;
+  defaultPosture: string;
 };
 
 type CapabilityRule = {
@@ -48,42 +59,69 @@ const EFFECT_RANK: Record<CapabilityPolicyEffect, number> = {
   deny: 2
 };
 
-const CAPABILITY_DETAILS: Record<AgentTaskRunCapability, { label: string; description: string }> = {
+const CAPABILITY_DETAILS: Record<AgentTaskRunCapability, CapabilityDetails> = {
   read_repo: {
     label: "Repo reads",
-    description: "Read and search workspace files."
+    description: "Read and search workspace files.",
+    examples: ["list", "read", "search", "git_status"],
+    risk: "Local source, filenames, and git state can be sent to the configured model.",
+    defaultPosture: "Allowed in every trust mode unless this workspace tightens repo reads."
   },
   write_workspace: {
     label: "Workspace writes",
-    description: "Create, edit, or delete workspace files."
+    description: "Create, edit, or delete workspace files.",
+    examples: ["apply_patch", "write_file", "task worktree edits"],
+    risk: "Can mutate project files, generated assets, or managed task worktrees.",
+    defaultPosture: "Blocked in readonly, approval in ask, allowed in trusted except risky writes."
   },
   run_command: {
     label: "Shell commands",
-    description: "Run commands, tests, installs, and builds."
+    description: "Run commands, tests, installs, and builds.",
+    examples: ["npm test", "npm install", "git commands"],
+    risk: "Runs host processes that can change files, use secrets, or call external services.",
+    defaultPosture: "Blocked in readonly and approval-gated in ask/trusted."
   },
   network_fetch: {
     label: "Network fetches",
-    description: "Send outbound requests from tools."
+    description: "Send outbound requests from tools.",
+    examples: ["web_search", "external fetch tools", "news lookups"],
+    risk: "Queries and requested URLs leave the machine.",
+    defaultPosture: "Approval-gated in every trust mode."
   },
   browser_control: {
     label: "Browser control",
-    description: "Open, click, type, inspect, or screenshot pages."
+    description: "Open, click, type, inspect, or screenshot pages.",
+    examples: ["browser_open", "browser_click", "browser_type"],
+    risk: "Web pages are untrusted and can observe navigation, clicks, and typed data.",
+    defaultPosture: "Allowed by default for the isolated Arivu browser; workspace policy can prompt or block."
   },
   mcp_call: {
     label: "MCP tools",
-    description: "List or call configured MCP server tools."
+    description: "List or call configured MCP server tools.",
+    examples: ["mcp_list_tools", "mcp_call_tool", "server startup"],
+    risk: "Configured MCP servers are local processes whose side effects depend on the server.",
+    defaultPosture: "Blocked in readonly and approval-gated in ask/trusted."
   },
   skill_context: {
     label: "Skill context",
-    description: "Read installed skill instructions."
+    description: "Read installed skill instructions.",
+    examples: ["list_skills", "read_skill", "SKILL.md context"],
+    risk: "Skill instructions can steer model behavior and may include local workflow details.",
+    defaultPosture: "Allowed in every trust mode."
   },
   local_context: {
     label: "Local context",
-    description: "Read local app and session context."
+    description: "Read local app and session context.",
+    examples: ["current_datetime", "current_location", "session metadata"],
+    risk: "Exposes limited local metadata such as time, timezone, and app state.",
+    defaultPosture: "Allowed in every trust mode."
   },
   unknown: {
     label: "Unknown",
-    description: "Fallback for unclassified tool activity."
+    description: "Fallback for unclassified tool activity.",
+    examples: ["unmapped tool call", "future harness action"],
+    risk: "The action has not been mapped to a precise capability yet.",
+    defaultPosture: "Blocked in readonly and approval-gated in ask/trusted."
   }
 };
 
@@ -183,6 +221,9 @@ export function describeCapabilityPolicies(overrides: CapabilityPolicyOverrides 
       capability,
       label: details.label,
       description: details.description,
+      examples: details.examples,
+      risk: details.risk,
+      defaultPosture: details.defaultPosture,
       modes: TRUST_MODES.map((trustMode) => describeCapabilityPolicyMode(trustMode, capability, overrides))
     };
   });

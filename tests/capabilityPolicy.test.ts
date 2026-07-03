@@ -61,6 +61,9 @@ describe("capability policy", () => {
     const writePolicy = matrix.find((policy) => policy.capability === "write_workspace");
     expect(matrix.map((policy) => policy.capability)).toContain("unknown");
     expect(writePolicy?.label).toBe("Workspace writes");
+    expect(writePolicy?.examples).toContain("apply_patch");
+    expect(writePolicy?.risk).toContain("mutate project files");
+    expect(writePolicy?.defaultPosture).toContain("Blocked in readonly");
     expect(writePolicy?.modes.map((mode) => mode.trustMode)).toEqual(["readonly", "ask", "trusted"]);
     expect(writePolicy?.modes.find((mode) => mode.trustMode === "readonly")?.effect).toBe("deny");
     expect(writePolicy?.modes.find((mode) => mode.trustMode === "trusted")?.effect).toBe("allow");

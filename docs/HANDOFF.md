@@ -193,7 +193,7 @@ High-value tasks:
 - Add an interactive TUI session picker and richer `arivu sessions` filters.
 - Add richer PR review handoff controls such as review-state notifications and deeper PR-check evidence handoffs.
 - Add stronger semantic plan matching from richer artifacts such as parsed reports, LSP diagnostics, PR checks, and model-authored evidence labels beyond the current completion-note checklist.
-- Make the capability policy explainable/configurable in the UI without weakening the default local safety posture.
+- Add deeper per-tool policy drill-downs from Activity rows back to the capability decision that governed each tool call.
 - Polish stale-path recovery and cleanup for recent workspace rows.
 - Add richer remediation and provider capability persistence from doctor/fallback outcomes.
 - Add provider capability flags for tool-calling vs plain chat, using observed fallback outcomes.

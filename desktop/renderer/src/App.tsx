@@ -6561,28 +6561,38 @@ function CapabilityPolicyPanel({
       {error ? <div className="error-strip">{error}</div> : null}
 
       <div className="workspace-policy-box">
-        <div>
-          <strong>Workspace overrides</strong>
-          <span title={workspaceRoot}>{workspaceRoot}</span>
+        <div className="workspace-policy-heading">
+          <div>
+            <strong>Workspace overrides</strong>
+            <span title={workspaceRoot}>{workspaceRoot}</span>
+          </div>
+          <p>
+            Tighten this workspace without changing the built-in {trustModeLabel(activeTrustMode)} posture.
+          </p>
         </div>
         <div className="workspace-policy-grid">
-          {WORKSPACE_POLICY_CAPABILITIES.map((capability) => (
-            <label key={capability} className="workspace-policy-row">
-              <span>{capabilityLabel(capability)}</span>
-              <select
-                value={workspaceOverrides[capability] ?? "inherit"}
-                onChange={(event) =>
-                  onWorkspaceOverrideChange(capability, event.target.value as CapabilityPolicyOverrideEffect | "inherit")
-                }
-              >
-                <option value="inherit">Inherit</option>
-                <option value="prompt">Require approval</option>
-                <option value="deny">Block</option>
-              </select>
-            </label>
-          ))}
+          {WORKSPACE_POLICY_CAPABILITIES.map((capability) => {
+            const override = workspaceOverrides[capability] ?? "inherit";
+            const policy = policies.find((entry) => entry.capability === capability);
+            return (
+              <label key={capability} className="workspace-policy-row">
+                <span>{capabilityLabel(capability)}</span>
+                <select
+                  value={override}
+                  onChange={(event) =>
+                    onWorkspaceOverrideChange(capability, event.target.value as CapabilityPolicyOverrideEffect | "inherit")
+                  }
+                >
+                  <option value="inherit">Inherit</option>
+                  <option value="prompt">Require approval</option>
+                  <option value="deny">Block</option>
+                </select>
+                <small>{workspaceOverrideNote(policy, activeTrustMode, override)}</small>
+              </label>
+            );
+          })}
         </div>
-        <small>Overrides only make this workspace stricter than the selected trust mode.</small>
+        <small>Overrides only make this workspace stricter: they cannot turn a built-in approval or block into allow.</small>
       </div>
 
       <div className="policy-table-wrap">
@@ -6610,6 +6620,13 @@ function CapabilityPolicyPanel({
                   <th scope="row">
                     <strong>{policy.label}</strong>
                     <span>{policy.description}</span>
+                    <p className="policy-capability-risk">{policy.risk}</p>
+                    <ul className="policy-example-list" aria-label={`${policy.label} examples`}>
+                      {policy.examples.map((example) => (
+                        <li key={example}>{example}</li>
+                      ))}
+                    </ul>
+                    <small className="policy-default-posture">{policy.defaultPosture}</small>
                   </th>
                   {TRUST_MODE_ORDER.map((mode) => (
                     <PolicyModeCell key={`${policy.capability}:${mode}`} policy={policy} mode={mode} active={mode === activeTrustMode} />
@@ -6634,11 +6651,15 @@ function PolicyModeCell({ policy, mode, active }: { policy: CapabilityPolicySumm
       <div className="policy-cell">
         <PolicyEffectBadge effect={summary.effect} />
         <span>{summary.label}</span>
-        <small title={summary.reason}>{summary.reason}</small>
-        {summary.override ? <small className="policy-override-note">Workspace override</small> : null}
+        <small title={summary.reason}>Why: {summary.reason}</small>
+        {summary.override ? (
+          <small className="policy-override-note">
+            Workspace override: {summary.override === "deny" ? "blocked" : "approval required"}
+          </small>
+        ) : null}
         {summary.riskyEffect ? (
           <small className="policy-risk-note" title={summary.riskyReason}>
-            Risky: {policyEffectLabel(summary.riskyEffect)}
+            Risky action: {policyEffectLabel(summary.riskyEffect)}
           </small>
         ) : null}
       </div>
@@ -6705,6 +6726,24 @@ function capabilityPolicySummary(
   }
   const sourceLabel = source === "built-in" ? "built-in" : "workspace overrides";
   return `${trustModeLabel(activeTrustMode)} · ${counts.allow} allowed · ${counts.prompt} approval · ${counts.deny} blocked · ${sourceLabel}`;
+}
+
+function workspaceOverrideNote(
+  policy: CapabilityPolicySummary | undefined,
+  activeTrustMode: TrustMode,
+  override: CapabilityPolicyOverrideEffect | "inherit"
+) {
+  if (override === "deny") {
+    return "Blocked for this workspace.";
+  }
+  if (override === "prompt") {
+    return "Requires approval for this workspace.";
+  }
+  const mode = policy?.modes.find((entry) => entry.trustMode === activeTrustMode);
+  if (!mode) {
+    return "Follows the selected trust mode.";
+  }
+  return `Inherits ${policyEffectLabel(mode.effect).toLowerCase()} from ${trustModeLabel(activeTrustMode)}.`;
 }
 
 function trustModeLabel(mode: TrustMode) {

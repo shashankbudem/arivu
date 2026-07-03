@@ -637,6 +637,9 @@ type CapabilityPolicySummary = {
   capability: AgentTaskRunCapability;
   label: string;
   description: string;
+  examples: string[];
+  risk: string;
+  defaultPosture: string;
   modes: CapabilityPolicyModeSummary[];
 };
 

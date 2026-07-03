@@ -4795,7 +4795,13 @@ body.is-resizing .panel-resize-handle::after {
   background: linear-gradient(180deg, rgb(17 24 24 / 0.72), rgb(8 12 12 / 0.84));
 }
 
-.workspace-policy-box > div:first-child {
+.workspace-policy-heading {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.workspace-policy-heading > div {
   min-width: 0;
   display: grid;
   gap: 3px;
@@ -4806,7 +4812,7 @@ body.is-resizing .panel-resize-handle::after {
   font-size: 12px;
 }
 
-.workspace-policy-box > div:first-child span,
+.workspace-policy-heading span,
 .workspace-policy-box small {
   min-width: 0;
   overflow: hidden;
@@ -4815,6 +4821,13 @@ body.is-resizing .panel-resize-handle::after {
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workspace-policy-heading p {
+  margin: 0;
+  color: #bdb5aa;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .workspace-policy-grid {
@@ -4842,6 +4855,12 @@ body.is-resizing .panel-resize-handle::after {
   white-space: nowrap;
 }
 
+.workspace-policy-row small {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .workspace-policy-row select {
   width: 100%;
   min-width: 0;
@@ -4864,7 +4883,7 @@ body.is-resizing .panel-resize-handle::after {
 
 .policy-table {
   width: 100%;
-  min-width: 940px;
+  min-width: 1100px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -4891,7 +4910,7 @@ body.is-resizing .panel-resize-handle::after {
 
 .policy-table thead th:first-child,
 .policy-table tbody th {
-  width: 24%;
+  width: 31%;
 }
 
 .policy-table tbody th strong {
@@ -4911,6 +4930,43 @@ body.is-resizing .panel-resize-handle::after {
 .policy-table tbody th span {
   display: block;
   margin-top: 4px;
+}
+
+.policy-capability-risk,
+.policy-default-posture {
+  display: block;
+  margin: 8px 0 0;
+  color: #bdb5aa;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.policy-default-posture {
+  color: #9c968d;
+}
+
+.policy-example-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0;
+  margin: 8px 0 0;
+  list-style: none;
+}
+
+.policy-example-list li {
+  max-width: 100%;
+  padding: 3px 6px;
+  overflow-wrap: anywhere;
+  border: 1px solid rgb(67 61 52 / 0.86);
+  border-radius: 999px;
+  background: rgb(3 6 7 / 0.28);
+  color: #d8d2c8;
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.25;
 }
 
 .policy-cell {
@@ -5746,10 +5802,11 @@ html[data-theme="light"] .settings-worktree-main span,
 html[data-theme="light"] .settings-worktree-meta span,
 html[data-theme="light"] .file-context-chip small,
 html[data-theme="light"] .settings-skill-empty,
-html[data-theme="light"] .workspace-policy-box > div:first-child span,
+html[data-theme="light"] .workspace-policy-heading span,
 html[data-theme="light"] .workspace-policy-box small,
 html[data-theme="light"] .policy-table thead th,
 html[data-theme="light"] .policy-table tbody th span,
+html[data-theme="light"] .policy-default-posture,
 html[data-theme="light"] .policy-cell small,
 html[data-theme="light"] .policy-empty,
 html[data-theme="light"] .skill-row p,
@@ -5839,6 +5896,17 @@ html[data-theme="light"] .workspace-policy-row span {
 html[data-theme="light"] .workspace-policy-box,
 html[data-theme="light"] .workspace-policy-row {
   background: #fffbf5;
+}
+
+html[data-theme="light"] .workspace-policy-heading p,
+html[data-theme="light"] .policy-capability-risk {
+  color: #52483c;
+}
+
+html[data-theme="light"] .policy-example-list li {
+  border-color: #d9d0c3;
+  background: #fff7ec;
+  color: #3b332a;
 }
 
 html[data-theme="light"] .active-policy-column {

@@ -180,6 +180,12 @@ Decision: `list`, `read`, `search`, and `git_status` now call `ApprovalManager` 
 
 Reason: the harness policy model should govern both execution-changing actions and read scope. Routing repo reads through the same policy boundary makes workspace hardening enforceable instead of only descriptive, while preserving the normal low-friction read-only workflow unless the user tightens policy.
 
+## 2026-07-03: Capability policy explanations come from the policy descriptor
+
+Decision: `describeCapabilityPolicies()` now returns examples, risk notes, and default posture text alongside the same allow/approval/block decisions used by `ApprovalManager`. Desktop Settings renders that shared descriptor in the capability policy matrix and shows workspace override rows with their inherited or stricter effect.
+
+Reason: policy explanation should not become a separate UI copy layer that can drift from enforcement. Keeping examples and risk notes beside the table makes Settings more understandable while preserving the rule that workspace overrides can only tighten decisions to `prompt` or `deny`.
+
 ## 2026-06-25: Durable approval audit on task runs
 
 Decision: `ApprovalManager` emits audit events for automatic allows, policy blocks, approval requests, approvals, and denials. Desktop runs persist those events on the active task run and render them in Activity.
