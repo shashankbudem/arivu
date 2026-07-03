@@ -1,5 +1,5 @@
 const destructivePatterns = [
-  /\brm\s+(-[^\s]*r[^\s]*|-rf|-fr)\b/,
+  /\brm\s+(-[^\s]*[rR][^\s]*|-rf|-fr)\b/,
   /\bgit\s+reset\b/,
   /\bgit\s+clean\b/,
   /\bgit\s+checkout\s+(-f|--force)\b/,
@@ -14,4 +14,3 @@ const destructivePatterns = [
 export function isDestructiveCommand(command: string) {
   return destructivePatterns.some((pattern) => pattern.test(command));
 }
-

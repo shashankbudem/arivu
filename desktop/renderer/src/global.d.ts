@@ -80,6 +80,350 @@ type AgentLoopState = {
   lastDecision?: "continue" | "done" | "blocked";
 };
 
+type AgentTaskRunStatus = "queued" | "running" | "completed" | "failed" | "stopped" | "blocked" | "max_iterations";
+
+type AgentTaskRunCapability =
+  | "read_repo"
+  | "write_workspace"
+  | "run_command"
+  | "network_fetch"
+  | "browser_control"
+  | "mcp_call"
+  | "skill_context"
+  | "local_context"
+  | "unknown";
+
+type CapabilityPolicyOverrideEffect = "prompt" | "deny";
+type WorkspacePolicyCapability =
+  | "read_repo"
+  | "write_workspace"
+  | "run_command"
+  | "network_fetch"
+  | "browser_control"
+  | "mcp_call"
+  | "unknown";
+type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapability, CapabilityPolicyOverrideEffect>>;
+type WorkspaceCapabilityPolicy = {
+  overrides: WorkspaceCapabilityPolicyOverrides;
+};
+type WorkspaceCapabilityPolicies = Record<string, WorkspaceCapabilityPolicy>;
+
+type AgentTaskRunToolCall = {
+  id: string;
+  toolCallId: string;
+  name: string;
+  arguments?: unknown;
+  capability: AgentTaskRunCapability;
+  status: "running" | "done" | "failed";
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+  resultPreview?: string;
+  artifactIds?: string[];
+};
+
+type AgentTaskRunApprovalStatus = "allowed" | "requested" | "approved" | "denied" | "blocked";
+type AgentTaskRunApproval = {
+  id: string;
+  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
+  capability: AgentTaskRunCapability;
+  status: AgentTaskRunApprovalStatus;
+  trustMode: TrustMode;
+  effect: "allow" | "prompt" | "deny";
+  label: string;
+  reason: string;
+  risky: boolean;
+  override?: "prompt" | "deny";
+  summary: string;
+  message?: string;
+  createdAt: string;
+  requestedAt?: string;
+  decidedAt?: string;
+  updatedAt?: string;
+};
+
+type AgentTaskRunTestReport = {
+  kind: "junit" | "sarif";
+  path: string;
+  summary: string;
+  status: "passed" | "failed" | "unknown";
+  tests?: number;
+  failures?: number;
+  errors?: number;
+  skipped?: number;
+  suites?: number;
+  durationSeconds?: number;
+  findings?: number;
+  errorFindings?: number;
+  warningFindings?: number;
+  noteFindings?: number;
+  rules?: number;
+  failedTests?: Array<{
+    name: string;
+    classname?: string;
+    file?: string;
+    line?: number;
+    message?: string;
+    type?: "failure" | "error";
+  }>;
+  findingDetails?: Array<{
+    ruleId?: string;
+    level?: "error" | "warning" | "note" | "none";
+    message?: string;
+    path?: string;
+    line?: number;
+    column?: number;
+  }>;
+};
+
+type AgentTaskRunArtifact = {
+  id: string;
+  kind: "browser_screenshot" | "command_output" | "file_change" | "patch" | "tool_result";
+  title: string;
+  summary?: string;
+  path?: string;
+  width?: number;
+  height?: number;
+  writeMode?: "create" | "replace";
+  content?: string;
+  contentTruncated?: boolean;
+  lineCount?: number;
+  diff?: string;
+  diffTruncated?: boolean;
+  changedPaths?: string[];
+  additions?: number;
+  deletions?: number;
+  command?: string;
+  executionProfile?: "host" | "container" | "sandbox";
+  executionIsolation?: string;
+  workingDirectory?: string;
+  exitCode?: number;
+  durationMs?: number;
+  stdout?: string;
+  stderr?: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  reportPaths?: string[];
+  testReports?: AgentTaskRunTestReport[];
+  toolCallId?: string;
+  createdAt: string;
+};
+
+type AgentTaskRunWorktreeStatus = "creating" | "ready" | "failed" | "merged" | "discarded" | "cleaned";
+
+type AgentTaskRunWorktreeDiff = {
+  hasChanges: boolean;
+  files: number;
+  insertions?: number;
+  deletions?: number;
+  changedPaths: string[];
+  updatedAt: string;
+};
+
+type AgentTaskRunWorktreePatchPreview = {
+  text: string;
+  bytes: number;
+  lineCount: number;
+  truncated: boolean;
+  updatedAt: string;
+};
+
+type AgentTaskRunWorktreePullRequestFeedbackItem = {
+  kind: "comment" | "review" | "thread";
+  author?: string;
+  state?: string;
+  body?: string;
+  path?: string;
+  line?: number;
+  url?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+type AgentTaskRunWorktreePullRequestFeedback = {
+  total: number;
+  comments: number;
+  reviews: number;
+  threads?: number;
+  unresolvedThreads?: number;
+  resolvedThreads?: number;
+  changesRequested: number;
+  approved: number;
+  commented: number;
+  summary: string;
+  threadFetchError?: string;
+  items: AgentTaskRunWorktreePullRequestFeedbackItem[];
+};
+
+type AgentTaskRunWorktreePullRequestReview = {
+  state?: string;
+  isDraft?: boolean;
+  reviewDecision?: string;
+  mergeStateStatus?: string;
+  checkSummary: string;
+  checks: {
+    total: number;
+    passed: number;
+    failed: number;
+    pending: number;
+    skipped: number;
+    cancelled: number;
+    unknown: number;
+  };
+  summary: string;
+  feedback?: AgentTaskRunWorktreePullRequestFeedback;
+  updatedAt: string;
+};
+
+type AgentTaskRunWorktreePullRequest = {
+  title: string;
+  body: string;
+  branch: string;
+  baseBranch?: string;
+  baseRef?: string;
+  commit: string;
+  remoteName?: string;
+  remoteUrl?: string;
+  pushCommand?: string;
+  createCommand?: string;
+  preparedAt: string;
+  pushedAt?: string;
+  createdAt?: string;
+  url?: string;
+  review?: AgentTaskRunWorktreePullRequestReview;
+};
+
+type AgentTaskRunWorktreeConflict = {
+  type: "sync";
+  message: string;
+  files: string[];
+  originalHead?: string;
+  taskHead?: string;
+  detectedAt: string;
+};
+
+type AgentTaskRunWorktree = {
+  enabled: boolean;
+  status: AgentTaskRunWorktreeStatus;
+  originalRoot?: string;
+  path?: string;
+  branch?: string;
+  baseRef?: string;
+  plannedFromTaskRunId?: string;
+  continuedFromTaskRunId?: string;
+  replayOfTaskRunId?: string;
+  createdAt?: string;
+  diff?: AgentTaskRunWorktreeDiff;
+  patchPreview?: AgentTaskRunWorktreePatchPreview;
+  pullRequest?: AgentTaskRunWorktreePullRequest;
+  conflict?: AgentTaskRunWorktreeConflict;
+  mergeCommit?: string;
+  mergedAt?: string;
+  discardedAt?: string;
+  cleanedAt?: string;
+  error?: string;
+};
+
+type AgentTaskRunPlan = {
+  summary?: string;
+  items: Array<{
+    text: string;
+    status?: "pending" | "in_progress" | "completed";
+  }>;
+  sourceMessageIndex?: number;
+  updatedAt: string;
+};
+
+type AgentTaskRunPlanReviewStatus = "approved" | "revision_requested" | "cancelled";
+
+type AgentTaskRunPlanReview = {
+  status: AgentTaskRunPlanReviewStatus;
+  updatedAt: string;
+};
+
+type AgentTaskRunCompletion = {
+  summary?: string;
+  items: Array<{
+    text: string;
+    status?: "completed" | "needs_followup" | "blocked";
+  }>;
+  sourceMessageIndex?: number;
+  updatedAt: string;
+};
+
+type AgentTaskRunVerification = {
+  status: "passed" | "failed" | "unknown";
+  summary: string;
+  commandCount: number;
+  failedCommandCount: number;
+  parsedReportCount: number;
+  failedReportCount: number;
+  passedReportCount: number;
+  unknownReportCount: number;
+  updatedAt: string;
+};
+
+type AgentTaskRunVerificationStatus = AgentTaskRunVerification["status"];
+
+type AgentTaskRun = {
+  id: string;
+  userMessageIndex: number;
+  promptPreview: string;
+  status: AgentTaskRunStatus;
+  model?: string;
+  providerName?: string;
+  modelSelectionReason?: string;
+  loop?: {
+    enabled: boolean;
+    maxIterations: number;
+  };
+  planMode?: {
+    enabled: boolean;
+  };
+  plan?: AgentTaskRunPlan;
+  completion?: AgentTaskRunCompletion;
+  planReview?: AgentTaskRunPlanReview;
+  worktree?: AgentTaskRunWorktree;
+  verification?: AgentTaskRunVerification;
+  capabilities: AgentTaskRunCapability[];
+  tools: AgentTaskRunToolCall[];
+  approvals: AgentTaskRunApproval[];
+  artifacts: AgentTaskRunArtifact[];
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  error?: string;
+};
+
+type TaskWorktreeInventoryItem = {
+  sessionId: string;
+  sessionTitle: string;
+  taskRunId: string;
+  promptPreview: string;
+  status: AgentTaskRunStatus;
+  verificationStatus?: AgentTaskRunVerificationStatus;
+  verificationSummary?: string;
+  worktreeStatus: AgentTaskRunWorktreeStatus;
+  branch?: string;
+  path?: string;
+  folderExists: boolean;
+  canOpen: boolean;
+  canPreparePullRequest: boolean;
+  canCreatePullRequest: boolean;
+  canDiscard: boolean;
+  canCleanup: boolean;
+  pullRequestTitle?: string;
+  pullRequestPreparedAt?: string;
+  pullRequestUrl?: string;
+  changedFiles?: number;
+  updatedAt: string;
+  createdAt?: string;
+};
+
+type TaskWorktreeInventoryResult = {
+  worktrees: TaskWorktreeInventoryItem[];
+};
+
 type WorkspaceInfo = {
   root: string;
   gitBranch?: string;
@@ -102,12 +446,14 @@ type DesktopState = {
     apiKeyPresent: boolean;
     tavilyApiKeyPresent: boolean;
     mcpServers: McpServersConfig;
+    workspacePolicies: WorkspaceCapabilityPolicies;
   };
   sessionId?: string;
   messages: ChatMessage[];
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
   agentLoop?: AgentLoopState;
+  taskRuns?: AgentTaskRun[];
 };
 
 type BrowserTargetState = {
@@ -148,6 +494,7 @@ type SessionSummary = {
   selectedProviderName?: string;
   modelSelectionReason?: string;
   agentLoop?: AgentLoopState;
+  taskRuns?: AgentTaskRun[];
   trustMode: TrustMode;
   messageCount: number;
   running: boolean;
@@ -169,6 +516,7 @@ type AgentRunResult = {
   newMessages: ChatMessage[];
   modelSelection?: PublicModelSelection;
   agentLoop?: AgentLoopState;
+  taskRuns?: AgentTaskRun[];
   running?: boolean;
 };
 
@@ -208,6 +556,7 @@ type SessionLifecycleEvent = {
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
   agentLoop?: AgentLoopState;
+  taskRuns?: AgentTaskRun[];
   output?: string;
   error?: string;
 };
@@ -226,6 +575,7 @@ type ConfigPatch = {
   providers?: LlmProviderPatch[];
   trustMode?: TrustMode;
   mcpServers?: McpServersConfig;
+  workspacePolicies?: WorkspaceCapabilityPolicies;
 };
 
 type WorkspaceScaffoldOptions = {
@@ -266,6 +616,35 @@ type ToolSummary = {
 
 type ToolListResult = {
   tools: ToolSummary[];
+};
+
+type CapabilityPolicyEffect = "allow" | "prompt" | "deny";
+
+type CapabilityPolicyModeSummary = {
+  trustMode: TrustMode;
+  effect: CapabilityPolicyEffect;
+  label: string;
+  reason: string;
+  override?: CapabilityPolicyOverrideEffect;
+  riskyEffect?: CapabilityPolicyEffect;
+  riskyLabel?: string;
+  riskyReason?: string;
+  riskyOverride?: CapabilityPolicyOverrideEffect;
+};
+
+type CapabilityPolicySummary = {
+  capability: AgentTaskRunCapability;
+  label: string;
+  description: string;
+  modes: CapabilityPolicyModeSummary[];
+};
+
+type CapabilityPolicyResult = {
+  currentTrustMode: TrustMode;
+  source: "built-in" | "workspace";
+  workspaceRoot: string;
+  workspaceOverrides: WorkspaceCapabilityPolicyOverrides;
+  policies: CapabilityPolicySummary[];
 };
 
 type SkillSummary = {
@@ -328,11 +707,21 @@ type PromptPayload = {
     enabled?: boolean;
     maxIterations?: number;
   };
+  plan?: boolean | {
+    enabled?: boolean;
+  };
+  worktree?: boolean | {
+    enabled?: boolean;
+    taskRunId?: string;
+    replayOfTaskRunId?: string;
+    plannedFromTaskRunId?: string;
+  };
 };
 
 type DesktopApi = {
   getState(): Promise<DesktopState>;
   chooseWorkspace(): Promise<DesktopState>;
+  openWorkspace(workspaceRoot: string): Promise<DesktopState>;
   chooseImages(): Promise<ImagePickerResult>;
   readLocalImage(filePath: string): Promise<LocalImageResult>;
   createWorkspace(options?: WorkspaceScaffoldOptions): Promise<DesktopState>;
@@ -347,10 +736,43 @@ type DesktopApi = {
   listModels(patch: ConfigPatch): Promise<ModelListResult>;
   runDoctor(patch: ConfigPatch): Promise<DoctorReport>;
   listTools(): Promise<ToolListResult>;
+  listCapabilityPolicies(): Promise<CapabilityPolicyResult>;
   listSkills(): Promise<SkillListResult>;
   createSkill(input: SkillCreateInput): Promise<SkillCreateResult>;
+  listTaskWorktrees(): Promise<TaskWorktreeInventoryResult>;
   sendPrompt(prompt: PromptPayload | string): Promise<AgentRunResult>;
   stopAgentLoop(sessionId?: string): Promise<DesktopState>;
+  taskWorktreeAction(input: {
+    sessionId?: string;
+    taskRunId: string;
+    action:
+      | "open"
+      | "refresh"
+      | "preview"
+      | "merge"
+      | "discard"
+      | "cleanup"
+      | "prepare_pr"
+      | "create_pr"
+      | "refresh_pr"
+      | "sync"
+      | "continue_conflict"
+      | "abort_conflict"
+      | "open_conflict_file";
+    conflictPath?: string;
+  }): Promise<DesktopState>;
+  taskRunPlanAction(input: {
+    sessionId?: string;
+    taskRunId: string;
+    action: "approve" | "request_revision" | "cancel";
+  }): Promise<DesktopState>;
+  openTaskRunEvidence(input: {
+    sessionId?: string;
+    taskRunId: string;
+    artifactId: string;
+    path: string;
+    line?: number;
+  }): Promise<{ path: string; line?: number }>;
   getBrowserState(): Promise<BrowserState>;
   setBrowserPaneOpen(open: boolean): Promise<BrowserState>;
   setBrowserDefaultMode(mode: BrowserMode): Promise<BrowserState>;

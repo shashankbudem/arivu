@@ -57,7 +57,7 @@ export class Agent {
       }
       existingPromptMessage.content = trimChatContent(existingPromptMessage.content);
     }
-    const workspace = await detectWorkspace(this.session.cwd);
+    const workspace = await detectWorkspace(this.options.cwd);
     const skills = await discoverSkills();
     const skillInstruction = skillsSystemMessage(skills);
     const availableSkillNames = skills.map((skill) => skill.name);
@@ -130,8 +130,10 @@ export class Agent {
     try {
       let webSearchCalls = 0;
 
+      const allowedToolNames = runOptions.allowedToolNames ? new Set(runOptions.allowedToolNames) : undefined;
+      const toolSchemas = allowedToolNames ? tools.schemas.filter((tool) => allowedToolNames.has(tool.name)) : tools.schemas;
       for (let step = 0; step < MAX_STEPS; step += 1) {
-        const availableTools = webSearchCalls > 0 ? [] : tools.schemas;
+        const availableTools = webSearchCalls > 0 ? [] : toolSchemas;
         const response = await this.complete({
           messages: messagesForStep(this.session.messages, webSearchCalls, [skillInstruction, ...attachedSkillMessages]),
           tools: availableTools
@@ -238,6 +240,7 @@ function systemPrompt(workspaceRoot: string) {
     "Use apply_patch for existing-file edits when possible.",
     "Use write_file only for new files or explicit full replacements.",
     "Run relevant tests or checks after edits when practical.",
+    "For multi-step coding tasks, include a short `Plan:` section with 2-6 checklist or numbered items when it helps the user track the work.",
     "Use Arivu browser tools as hidden/background tools by default. Use visible browser mode only when the user explicitly asks to see a separate browser window.",
     "For screenshot or visual browser checks, prefer Chrome DevTools MCP through mcp_list_tools and mcp_call_tool when it is configured; fall back to browser_screenshot only when Chrome tooling is unavailable.",
     "If browser_snapshot is empty but browser_screenshot returns visual elements or a usable screenshot, continue with browser_click or browser_click_at; do not conclude the page is unloaded solely from an empty snapshot.",

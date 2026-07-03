@@ -1,0 +1,72 @@
+# Arivu Harness
+
+Arivu is moving from a chat-first local coding agent toward a governed coding harness. The target shape follows a split-plane design:
+
+- **Control plane:** session state, model routing, tool schemas, approvals, trust modes, run records, Activity/audit UI, and future workflow orchestration.
+- **Execution plane:** file reads/writes, shell commands, browser targets, MCP servers, package installs, tests, and future isolated worktrees/sandboxes.
+
+The important boundary is that the model proposes actions, but Arivu-owned code validates, records, authorizes, executes, and persists them.
+
+## Implemented Foundation
+
+Current sessions persist three layers of state:
+
+- `messages`: the user/assistant/tool transcript used for model context and visible chat.
+- `agentLoop`: optional high-level loop state for one-shot bounded continuation.
+- `taskRuns`: durable per-prompt run records that tie a user query to status, selected model/provider, captured plan state, capabilities used, tool calls, and artifacts.
+
+Each desktop prompt now creates a task run before the model starts. Completed assistant turns can update a bounded task-run plan when they include a `Plan:`/`Approach:`/`Next steps:` section, so Activity can show what the agent intended alongside what it did. Tool calls update the same run as they happen, approval decisions are saved as durable requested/approved/denied/allowed/blocked records, and browser screenshot, direct-edit, plus shell command results are promoted into run artifacts. Patch artifacts preserve a bounded unified diff, changed paths, and addition/deletion counts for direct `apply_patch` edits. File-change artifacts preserve the write path, write mode, line count, and bounded new-content preview for direct `write_file` edits. Command artifacts preserve the command text, execution profile/isolation/cwd metadata, exit code, duration, bounded stdout/stderr snippets, detected test-report paths, parsed JUnit/SARIF summaries, and bounded failing-test/finding previews when matching report files exist inside the execution workspace. When a run finishes, Arivu derives a compact verification summary from those command artifacts, including failed exits and parsed report status counts. Failed verification summaries block task-worktree PR draft, PR creation, and merge promotion actions while still allowing preview/open/refresh/discard. Passed worktree verification now produces a promotion hint that tells the user whether to preview, prepare a PR, create a PR, or review an already created draft. Activity command results expose bounded open-report/source actions for attached evidence paths and can draft a focused repair prompt from failed JUnit/SARIF evidence; failed worktree verification can also draft a repair prompt that arms the same managed worktree for the next prompt. Continued worktree repair runs whose verification is missing or unknown can draft a Rerun checks prompt that keeps the same branch armed and carries over commands from the previous failed run. Created PR cards can refresh and persist a compact GitHub CLI review/check/comment snapshot with bounded latest feedback previews plus best-effort line-level review-thread summaries either manually or through a user-started Watch PR background refresh, then draft a Review PR handoff prompt that keeps the created branch armed, includes the last refreshed PR status and review feedback when present, and asks the agent to inspect PR status, review comments, and check results before making any fixes. Continued worktree runs also render a compact repair history chain by following persisted `continuedFromTaskRunId` links back to the original run; each chain entry can focus that attempt's Activity details, open the managed worktree when the existing lifecycle rules allow it, compare verification/command/report summaries plus per-file deltas against the current attempt, or draft a Replay prompt that reruns that entry's verification commands in the current worktree and records `replayOfTaskRunId` on the resulting run. Replay attempts are grouped under their evidence run with latest verification outcome visible in the repair history; groups with repeated failed replay outcomes can draft a Review handoff prompt that continues the current worktree and asks the agent to distinguish a real remaining defect from stale commands, environment issues, or missing preconditions. In Loop mode, when an iteration chooses to continue after producing failed parsed report evidence, Arivu injects the latest structured report evidence into the next iteration once. The Activity rail still reconstructs readable tool rows from chat messages, but enriches those groups with the durable run metadata, including approval audit rows and verification summaries. If old tool protocol is compacted or restored without visible messages, the run record can still explain what happened.
+
+Desktop prompts can opt into one-shot Plan approval mode from the composer or `/plan`. Plan mode records `planMode` on the task run, injects a planning-only instruction, and restricts the model to local read/discovery tools (`list`, `read`, `search`, `git_status`, current date/location, and local skills). Write, shell, browser, web-search, and MCP tools are not advertised for the run. Captured plan cards in Activity show the planning run, persist an approve/revise/cancel `planReview` state, and only expose execution follow-ups after approval. Use approved plan drafts a normal execution prompt. Start worktree drafts the approved plan, arms a new isolated task worktree, and records `plannedFromTaskRunId` on the follow-up run's worktree metadata. Approved-plan worktrees ask the agent to end with a parseable `Completion notes:` checklist, persist that checklist on the follow-up run, and render an Approved plan source review card with source checklist, changed-path evidence, patch-preview state, verification cues, and conservative completion notes that mark each planned step as supported, needing evidence, or blocked by failed verification. Supported notes require passed verification, recorded changes, a patch preview, and at least one matching changed file, verification command, or assistant-authored close-out note for that item.
+
+Desktop prompts can also opt into one-shot task worktree mode. When enabled, Arivu creates an isolated git worktree under the app-data `task-worktrees` directory, creates a branch named `arivu/task-...`, runs the agent tools against that checkout, and records the original root, worktree path, branch, base commit, diff summary, patch preview, pull-request metadata, conflict metadata, and lifecycle state on the task run. Follow-up repair or verification prompts can pass a prior `taskRunId` to continue an existing ready managed worktree; the new run records `continuedFromTaskRunId` and starts with stale preview/PR metadata cleared. Replay prompts also pass `replayOfTaskRunId`, which the main process validates against the same managed worktree before persisting it on the new run. The saved chat remains attached to the original project, while tool execution uses the isolated worktree path. The Activity rail can open the managed worktree folder, refresh the changed-file summary, generate a bounded unified-diff preview, sync the task branch with the current original checkout, show conflicted files when sync stops for manual resolution, open individual conflicted files from the recorded conflict list, continue or abort that conflict resolution, prepare a pull-request draft, push/create a remote draft PR through GitHub CLI, refresh created PR review/check/comment status and line-level review threads through GitHub CLI manually or through an explicit Watch PR toggle, fast-forward merge a previewed completed worktree into the original clean checkout, discard an unmerged task worktree, and clean up a merged worktree/branch.
+
+Task runs use coarse capabilities instead of treating all tools as equal:
+
+- `read_repo`
+- `write_workspace`
+- `run_command`
+- `network_fetch`
+- `browser_control`
+- `mcp_call`
+- `skill_context`
+- `local_context`
+- `unknown`
+
+Task-run capabilities now feed the shared capability policy table in `src/permissions/capabilityPolicy.ts`. `ApprovalManager` uses that table to allow, prompt, or deny sensitive actions, the desktop Tools drawer uses the same policy decisions for status labels, and Settings renders the same matrix as a Capability policy panel. The panel also saves stricter per-workspace overrides for enforceable capabilities such as repo reads, writes, shell commands, network fetches, browser control, MCP calls, and unknown tool activity. Overrides can require approval or block a capability, but they cannot weaken a built-in prompt/deny decision. This keeps the audit vocabulary, enforcement vocabulary, and user-visible explanation aligned.
+
+## Current Local Execution Model
+
+Arivu currently executes against the active local workspace:
+
+- File and search tools are workspace-contained.
+- Existing-file edits prefer unified patches and require read-before-replace checks.
+- Shell commands run through the local `run` tool with trust-mode approval. The tool now accepts an explicit `executionProfile` and records profile/isolation/cwd metadata on command artifacts.
+- Browser tools use isolated Electron browser targets with a persistent Arivu browser profile.
+- MCP tools use configured stdio servers through short-lived clients.
+
+Only `executionProfile: "host"` is configured today. Requests for `container` or `sandbox` fail before approval or execution, so future execution-plane targets are explicit without implying isolation that does not exist yet. This is appropriate for a local desktop app where the user owns the machine, but it is not the same as a multi-tenant cloud sandbox. Arivu should continue treating local execution as powerful and auditable.
+
+## Next Harness Milestones
+
+1. **Broader patch review boundary**
+   Task worktrees have a bounded patch preview before merge, Settings has an inventory for recorded managed worktrees, and direct `apply_patch`/`write_file` edits now leave durable bounded change artifacts on task runs. Next, add an explicit reviewable patch stage for larger non-worktree edits and looped tasks.
+
+2. **Deeper report-aware repair loop**
+   JUnit failing tests and SARIF locations are now captured as bounded previews with open evidence actions, Draft fix prompts, one-shot Loop continuation evidence injection, run-level verification summaries, failed-verification gates on task-worktree promotion, a worktree-level Fix verification prompt that continues the same branch, a Rerun checks prompt for continued worktree repairs that completed without verification evidence, promotion hints when verification passes, and a persisted repair history chain across continued worktree attempts with Details/Open/Compare/Replay affordances, per-file attempt deltas, structured replay lineage, grouped replay outcomes, and Review handoff prompts for repeated failed replay outcomes. Review handoffs now summarize the repeated failure pattern and include a minimal verification plan. Plan approval mode now gives larger tasks a read-only approval boundary with persisted approve/revise/cancel review state, approved-plan-to-worktree handoff, post-execution source-plan review cues, persisted assistant-authored close-out notes, and item-specific changed-file/command/completion-note matching. Next, deepen planning with stronger semantic matching from richer artifacts such as reports, LSP diagnostics, and PR checks.
+
+3. **Configurable capability policy**
+   The local policy table is explicit and visible in Settings, and stricter workspace-specific overrides are enforced by the same table. Repo read tools now route through the same approval boundary, so a workspace can require approval or block `list`, `read`, `search`, and `git_status`. Next, make the capability policy more explainable in the UI without weakening the default local safety posture.
+
+4. **Sandbox option**
+   The command tool now has an explicit execution-profile seam. Next, implement a real container, gVisor, Kata, or microVM backend for package installs/tests instead of the app host.
+
+5. **PR/review workflow**
+   Task worktrees can prepare PR draft metadata, create remote draft PRs through GitHub CLI, refresh created PR review/check/comment snapshots with bounded feedback previews and line-level review-thread summaries through GitHub CLI, watch a created PR with user-started background refresh, derive an explicit ready/blocked/waiting merge cue from the last refreshed snapshot, sync with the current original checkout, pause on conflicted files with explicit file-level Open/Continue/Abort actions, keep promotion blocked while conflicts are active, and draft a Review PR continuation prompt from created PR cards with the last refreshed PR status and review feedback included when present. Next, add richer review-state notifications and deeper PR-check evidence handoffs.
+
+## Non-Goals For The Local Desktop MVP
+
+- Do not introduce a heavy external workflow engine before task runs and worktrees prove useful locally.
+- Do not merge model/provider lists across providers without also switching provider context.
+- Do not treat MCP servers as trusted merely because they are configured. They remain privileged local integrations and should stay visible in task-run capability records.
+- Do not use the user's Chrome profile by default for Arivu browser tools. Chrome DevTools MCP can remain an optional specialist tool when real Chrome state is needed.

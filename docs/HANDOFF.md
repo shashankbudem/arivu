@@ -36,13 +36,17 @@ Implemented:
 - Desktop prompt `+` menu for project/images/browser window/tools/skills/MCP options, plus a direct composer model switcher.
 - Desktop hidden agent browser target plus separate tabbed visible browser window, backed by isolated Electron browser targets and a persistent Arivu browser profile.
 - Desktop skills list and add-skill form backed by the global skills directory.
-- Desktop composer slash commands for local actions: `/compact`, `/session`, `/tools`, `/skills`, `/browser`, and `/loop`.
+- Desktop composer slash commands for local actions: `/compact`, `/session`, `/tools`, `/skills`, `/browser`, `/plan`, and `/loop`.
+- Desktop one-shot read-only Plan approval mode with a composer toggle and `/plan`, persisted `planMode` task-run metadata, local read/discovery tool allowlisting for the planning run, persisted approve/revise/cancel plan review state, approved-plan drafting, and approved-plan-to-worktree handoff from captured Activity plan cards.
 - Desktop one-shot bounded agent loop mode with a composer toggle, cooperative Stop Loop action, persisted loop metadata, Activity/sidebar/history status, and hidden loop-control markers stripped from visible assistant replies.
+- Desktop one-shot task worktree mode with a composer toggle and `/worktree`, creating an isolated git branch/worktree for the next prompt, recording the branch/path/base commit on the task run, exposing Activity actions to open the managed worktree folder, refresh diff summary, preview patch, sync the task branch with the current original checkout, open individual conflict files, continue or abort sync conflicts, prepare/create a draft PR, refresh created PR review/check/comment status plus line-level review threads through GitHub CLI, derive ready/blocked/waiting merge cues from refreshed PR snapshots, merge, discard, or clean up the task worktree, blocking PR/merge promotion when run verification failed or a conflict is active, drafting Fix verification prompts that continue the same managed worktree branch, drafting Rerun checks prompts for continued repairs with unknown verification, drafting Review PR prompts from created PR cards with the last refreshed PR status and bounded review feedback when present, showing a persisted repair history chain across continued attempts with Details/Open/Compare/Replay affordances, per-file attempt deltas, stored replay lineage, grouped replay outcomes, and Review handoff prompts with repeated-failure summaries plus minimal verification plans, showing promotion guidance when verification passes, and showing a Settings inventory for opening, preparing/creating PRs, discarding, or cleaning up recorded task worktrees across saved sessions.
 - Desktop inline available-tools drawer, backed by the actual tool registry through IPC.
+- Desktop Capability policy matrix in Settings, backed by the same trust-mode table used by approvals and tool status labels, with stricter per-workspace overrides for enforceable capabilities including repo reads.
 - Desktop MCP server JSON config in Settings plus `mcp_list_tools` and `mcp_call_tool`.
 - Desktop browser-style chat search with match navigation.
 - Desktop collapsible/resizable left sidebar and slim Activity rail/panel.
 - Desktop collapsible sidebar sections and Activity rows.
+- Desktop durable per-query task runs. Each prompt stores run status, selected model/provider, plan/loop metadata, captured assistant plan state, coarse tool capabilities, approval records, tool-call records, and artifacts on the saved session, including screenshots and structured command/report evidence.
 - Desktop UI concept samples for comparing visual directions.
 - Desktop icon-only message actions: Edit/Copy on user messages, Retry/Copy on agent replies, failed-user-message Retry/Edit/Copy after send errors, and failed-prompt retry from the error strip with hover/focus labels.
 - Desktop compact-context action that locally summarizes older session messages, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
@@ -56,9 +60,10 @@ Implemented:
 - Markdown rendering for assistant responses, with Shiki-highlighted fenced code blocks and per-block copy controls.
 - Default TUI built with `blessed`.
 - One-shot mode via `arivu "task"`.
-- `resume <session-id>` and `config get|set`.
+- `sessions`, `resume <session-id>`, and `config get|set`; inside the TUI, `/sessions [n]` lists recent saved sessions and `/resume <session-id>` switches the live TUI into that saved session.
 - OpenAI-compatible `/chat/completions` client.
 - Agent tool-call loop plus desktop bounded agent-loop mode for multi-iteration tasks.
+- Harness foundation docs in `docs/HARNESS.md`, with task runs plus opt-in task worktrees and local worktree lifecycle actions implemented; sandbox execution remains a future milestone.
 - Tools: `list`, `read`, `search`, `web_search`, `current_datetime`, `current_location`, `list_skills`, `read_skill`, `mcp_list_tools`, `mcp_call_tool`, `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, `browser_type`, `apply_patch`, `write_file`, `run`, `git_status`.
 - Trust modes: `readonly`, `ask`, `trusted`.
 - Session storage.
@@ -134,6 +139,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Desktop chat history is backed by the same JSON session store used by CLI/TUI resume.
 - Desktop workspace creation uses Electron's save dialog to create a directory and switch into it.
 - Desktop startup and `New chat` start unassigned; the prompt `+` menu can route the draft to no project, a recent project, or an opened workspace before the first prompt locks the chat target.
+- The sidebar Workspaces section doubles as the recent workspace list: folder/name rows reopen a saved workspace directly, while the chevron expands that workspace's chats.
 - `blessed` remains for the TUI fallback.
 - OpenAI-compatible API support is the provider layer for v1; direct provider-specific SDKs are deferred.
 - Model listing is provider-scoped. A combined model picker would need grouped provider rows and would need to switch both provider and model together.
@@ -142,6 +148,10 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Assistant tool-call messages with no natural-language text are sent as `content: null` instead of `content: ""` because some OpenAI-compatible endpoints reject empty assistant message content.
 - Blank assistant history messages without tool calls are omitted from provider requests because they carry no useful context and stricter models such as `diffusiongemma-26b-a4b-it` reject them on follow-up prompts.
 - Desktop send failures keep the optimistic user message visible in renderer state, add Retry/Edit/Copy on that failed bubble, and retry the same bubble without duplicating the query.
+- Desktop sends create a durable task run before the model starts. Tool events update the active run, and the Activity rail attaches run status, model/provider, capabilities, loop metadata, and artifacts to the query group.
+- Plan approval mode is one-shot. It records `planMode`, injects a planning instruction, disables Loop/Worktree for that prompt, advertises only local read/discovery tools, persists approve/revise/cancel review state on captured plan cards, and only drafts follow-up prompts after approval. Approved cards can either draft a normal execution prompt or draft the plan into a new task worktree that persists `plannedFromTaskRunId`; plan-derived worktrees ask for and persist final `Completion notes:` from the agent, then show an Approved plan source card with checklist, changed-path, patch-preview, verification cues, and per-step completion notes. Notes cite matching changed files, verification commands, or assistant close-out bullets when a conservative text match exists, keep unmatched steps as needing evidence, and mark all steps blocked when verification fails.
+- Task worktree mode keeps saved chats attached to the original project while constructing the agent with the isolated worktree as the execution cwd. It requires a git-backed project with at least one commit. Activity worktree merge requires the original checkout to be clean, the changed worktree to have a stored patch preview, the task run verification not to be failed, and no active worktree conflict; it auto-commits dirty task worktree changes and fast-forwards the original checkout to the task branch. Sync merges the current original checkout into the task branch, records conflicted files when Git stops, and exposes Continue/Abort conflict actions from Activity. Created PR cards can refresh PR review/check/comment/thread snapshots manually or through a user-started Watch PR timer in the current session. Repair and verification-rerun prompts can continue a previous ready worktree by sending `worktree: { enabled: true, taskRunId }`, and the new run records `continuedFromTaskRunId`.
+- Trust-mode decisions flow through `src/permissions/capabilityPolicy.ts`. `ApprovalManager`, the desktop Tools drawer, and Settings all use the same capability table for allow/prompt/deny behavior across `write_workspace`, `run_command`, `network_fetch`, `browser_control`, and `mcp_call`. Saved workspace policy overrides can only tighten those decisions to prompt or deny.
 - Context compaction is deterministic and local; it does not call the model to summarize. It preserves non-compaction system prompts, replaces older visible turns with one hidden system compaction note, normalizes retained tool protocol into plain text, and saves the active session.
 - Existing-file edits should prefer unified patches.
 - Full-file writes are allowed for creation and explicit replacement only.
@@ -163,10 +173,12 @@ The user has a Tavily key in shell config; do not print or commit it.
 
 - Desktop packaging is not implemented; current desktop mode is local dev/start only.
 - Tool output is summarized in the activity pane, with diff previews for patch/file-write activity where available. Activity rows can collapse/expand.
+- Task runs record captured plan/capability/tool/artifact metadata. Direct `apply_patch` edits are captured as bounded patch artifacts with changed paths and line stats, direct `write_file` edits are captured as bounded file-change artifacts with write mode and new-content preview, and shell command output is captured as an artifact with command text, execution profile/isolation/cwd metadata, exit code, duration, bounded stdout/stderr snippets, detected test-report paths, parsed JUnit/SARIF summaries, bounded failing-test/finding previews, run-level verification summaries that gate task-worktree PR/merge promotion when failed, passed-verification promotion hints, created-PR Review PR prompts seeded with manually refreshed or watched PR review/check/comment snapshots and line-level thread summaries when present, persisted repair history chains with focus/open/compare/replay controls plus `replayOfTaskRunId` lineage, Activity open actions for attached report/source evidence, Draft fix prompts, worktree-level Fix verification and Rerun checks prompts, replay failure Review prompts with pattern summaries and focused verification plans, and one-shot Loop continuation injection for the latest failed report evidence inside the execution workspace.
+- Task worktree open/sync/merge/discard/cleanup and PR creation are local desktop actions. Create PR requires GitHub CLI credentials and a usable origin remote. Conflict resolution is Activity-driven today: open the managed folder or individual conflicted files from the conflict card, resolve files, then Continue or Abort the recorded sync conflict.
 - Approval prompts are action-aware for shell and write actions, but still need more polish for a production-grade UX.
 - Persistent provider capability detection is not implemented. Tool support is inferred per request through retries/fallbacks, not cached as provider config.
 - Provider-specific multimodal capability detection is not implemented; image prompts require a model endpoint that accepts OpenAI-compatible image content parts.
-- Desktop history exists with deletion, but the CLI still lacks a `sessions` listing command.
+- Desktop history exists with deletion, and the CLI can list recent sessions with `arivu sessions`.
 - Workspace creation currently creates an empty folder; there is no project template or git initialization flow yet.
 - No packaging or release workflow beyond `npm link` and local build.
 
@@ -176,8 +188,11 @@ Best next milestone: deepen the coding-agent workflow now that the desktop cockp
 
 High-value tasks:
 
-- Add CLI/TUI session picker/list command.
-- Add recent workspace list.
+- Add an interactive TUI session picker and richer `arivu sessions` filters.
+- Add richer PR review handoff controls such as review-state notifications and deeper PR-check evidence handoffs.
+- Add stronger semantic plan matching from richer artifacts such as parsed reports, LSP diagnostics, PR checks, and model-authored evidence labels beyond the current completion-note checklist.
+- Make the capability policy explainable/configurable in the UI without weakening the default local safety posture.
+- Polish stale-path recovery and cleanup for recent workspace rows.
 - Add model/provider health check command.
 - Add provider capability flags for tool-calling vs plain chat, using observed fallback outcomes.
 - Add first-run setup flow for base URL, model, API key, and trust mode.

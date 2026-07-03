@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -30,6 +30,143 @@ describe("session store", () => {
         updatedAt: "2026-01-01T00:05:00.000Z",
         lastDecision: "done"
       },
+      taskRuns: [
+        {
+          id: "run-1",
+          userMessageIndex: 0,
+          promptPreview: "hello",
+          status: "completed",
+          model: "test-model",
+          providerName: "Test Provider",
+          planMode: {
+            enabled: true
+          },
+          plan: {
+            summary: "make the repair safely",
+            items: [
+              { text: "Inspect failure", status: "completed" },
+              { text: "Patch code", status: "pending" }
+            ],
+            sourceMessageIndex: 2,
+            updatedAt: "2026-01-01T00:01:30.000Z"
+          },
+          completion: {
+            summary: "finished against the approved plan",
+            items: [
+              { text: "Inspect failure", status: "completed" },
+              { text: "Patch code", status: "needs_followup" }
+            ],
+            sourceMessageIndex: 5,
+            updatedAt: "2026-01-01T00:02:30.000Z"
+          },
+          planReview: {
+            status: "approved",
+            updatedAt: "2026-01-01T00:01:40.000Z"
+          },
+          verification: {
+            status: "passed",
+            summary: "Verification passed: 1 command, no failed exits.",
+            commandCount: 1,
+            failedCommandCount: 0,
+            parsedReportCount: 0,
+            failedReportCount: 0,
+            passedReportCount: 0,
+            unknownReportCount: 0,
+            updatedAt: "2026-01-01T00:01:55.000Z"
+          },
+          worktree: {
+            enabled: true,
+            status: "ready",
+            originalRoot: "/tmp/project",
+            path: "/tmp/arivu-worktree",
+            branch: "arivu/task-run-1",
+            baseRef: "abc1234",
+            plannedFromTaskRunId: "run-plan",
+            continuedFromTaskRunId: "run-original",
+            replayOfTaskRunId: "run-original",
+            createdAt: "2026-01-01T00:00:30.000Z",
+            diff: {
+              hasChanges: true,
+              files: 1,
+              insertions: 2,
+              deletions: 1,
+              changedPaths: ["README.md"],
+              updatedAt: "2026-01-01T00:01:30.000Z"
+            },
+            patchPreview: {
+              text: "diff --git a/README.md b/README.md\n+hello\n",
+              bytes: 44,
+              lineCount: 3,
+              truncated: false,
+              updatedAt: "2026-01-01T00:01:45.000Z"
+            },
+            pullRequest: {
+              title: "Arivu: hello",
+              body: "body",
+              branch: "arivu/task-run-1",
+              baseBranch: "main",
+              baseRef: "abc1234",
+              commit: "abc123456789abc123456789abc123456789abcd",
+              remoteName: "origin",
+              remoteUrl: "https://github.com/acme/repo.git",
+              pushCommand: "git push",
+              createCommand: "gh pr create --draft",
+              preparedAt: "2026-01-01T00:02:30.000Z"
+            },
+            conflict: {
+              type: "sync",
+              message: "README.md needs conflict resolution.",
+              files: ["README.md"],
+              originalHead: "1111111111111111111111111111111111111111",
+              taskHead: "2222222222222222222222222222222222222222",
+              detectedAt: "2026-01-01T00:02:45.000Z"
+            },
+            mergeCommit: "abc123456789",
+            mergedAt: "2026-01-01T00:03:00.000Z"
+          },
+          capabilities: ["read_repo"],
+          tools: [
+            {
+              id: "tool-1",
+              toolCallId: "call_1",
+              name: "read",
+              arguments: { path: "README.md" },
+              capability: "read_repo",
+              status: "done",
+              startedAt: "2026-01-01T00:01:00.000Z",
+              completedAt: "2026-01-01T00:02:00.000Z",
+              resultPreview: "fixture"
+            }
+          ],
+          approvals: [],
+          artifacts: [
+            {
+              id: "call_patch:patch",
+              kind: "patch",
+              title: "Patch applied",
+              summary: "README.md (1 hunks) (1 file +1)",
+              diff: "--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+world\n",
+              changedPaths: ["README.md"],
+              additions: 1,
+              createdAt: "2026-01-01T00:01:45.000Z"
+            },
+            {
+              id: "call_write:file_change:notes/plan.md",
+              kind: "file_change",
+              title: "File created",
+              summary: "Created notes/plan.md (2 lines)",
+              path: "notes/plan.md",
+              writeMode: "create",
+              content: "# Plan\nShip it.\n",
+              lineCount: 2,
+              createdAt: "2026-01-01T00:01:50.000Z"
+            }
+          ],
+          startedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:02:00.000Z",
+          completedAt: "2026-01-01T00:02:00.000Z"
+        }
+      ],
       messages: [{ role: "user", content: "hello" }],
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z"
@@ -48,6 +185,94 @@ describe("session store", () => {
         lastDecision: "done"
       },
       messages: [{ role: "user", content: "hello" }]
+    });
+    await expect(store.load("abc123")).resolves.toMatchObject({
+      taskRuns: [
+        {
+          id: "run-1",
+          status: "completed",
+          plan: {
+            summary: "make the repair safely",
+            items: [
+              { text: "Inspect failure", status: "completed" },
+              { text: "Patch code", status: "pending" }
+            ],
+            sourceMessageIndex: 2
+          },
+          planMode: {
+            enabled: true
+          },
+          completion: {
+            summary: "finished against the approved plan",
+            items: [
+              { text: "Inspect failure", status: "completed" },
+              { text: "Patch code", status: "needs_followup" }
+            ],
+            sourceMessageIndex: 5
+          },
+          planReview: {
+            status: "approved",
+            updatedAt: "2026-01-01T00:01:40.000Z"
+          },
+          worktree: {
+            enabled: true,
+            status: "ready",
+            path: "/tmp/arivu-worktree",
+            branch: "arivu/task-run-1",
+            plannedFromTaskRunId: "run-plan",
+            continuedFromTaskRunId: "run-original",
+            replayOfTaskRunId: "run-original",
+            diff: {
+              hasChanges: true,
+              files: 1,
+              changedPaths: ["README.md"]
+            },
+            patchPreview: {
+              truncated: false,
+              lineCount: 3
+            },
+            pullRequest: {
+              title: "Arivu: hello",
+              branch: "arivu/task-run-1",
+              baseBranch: "main",
+              remoteName: "origin",
+              preparedAt: "2026-01-01T00:02:30.000Z"
+            },
+            conflict: {
+              type: "sync",
+              files: ["README.md"],
+              detectedAt: "2026-01-01T00:02:45.000Z"
+            },
+            mergeCommit: "abc123456789"
+          },
+          capabilities: ["read_repo"],
+          verification: {
+            status: "passed",
+            summary: "Verification passed: 1 command, no failed exits.",
+            commandCount: 1,
+            failedCommandCount: 0,
+            parsedReportCount: 0,
+            updatedAt: "2026-01-01T00:01:55.000Z"
+          },
+          tools: [{ name: "read", status: "done" }],
+          artifacts: [
+            {
+              id: "call_patch:patch",
+              kind: "patch",
+              changedPaths: ["README.md"],
+              additions: 1
+            },
+            {
+              id: "call_write:file_change:notes/plan.md",
+              kind: "file_change",
+              path: "notes/plan.md",
+              writeMode: "create",
+              content: "# Plan\nShip it.\n",
+              lineCount: 2
+            }
+          ]
+        }
+      ]
     });
   });
 
@@ -71,6 +296,83 @@ describe("session store", () => {
     });
 
     await expect(store.list()).resolves.toMatchObject([{ id: "newer" }, { id: "older" }]);
+  });
+
+  it("loads legacy task runs without approval records", async () => {
+    const legacySession = {
+      id: "legacy-task-run",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      taskRuns: [
+        {
+          id: "run-legacy",
+          userMessageIndex: 0,
+          promptPreview: "legacy",
+          status: "completed",
+          capabilities: ["read_repo"],
+          tools: [],
+          artifacts: [
+            {
+              id: "artifact-command",
+              kind: "command_output",
+              title: "Command output",
+              command: "npm test",
+              executionProfile: "host",
+              executionIsolation: "local host process",
+              workingDirectory: "/tmp/project",
+              exitCode: 0,
+              createdAt: "2026-01-01T00:00:01.000Z"
+            }
+          ],
+          startedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+          completedAt: "2026-01-01T00:00:01.000Z"
+        }
+      ],
+      messages: [{ role: "user", content: "legacy" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z"
+    };
+    await writeFile(path.join(tempDir, "legacy-task-run.json"), `${JSON.stringify(legacySession)}\n`, "utf8");
+
+    await expect(new SessionStore(tempDir).load("legacy-task-run")).resolves.toMatchObject({
+      taskRuns: [
+        {
+          id: "run-legacy",
+          approvals: [],
+          artifacts: [
+            {
+              id: "artifact-command",
+              executionProfile: "host",
+              executionIsolation: "local host process",
+              workingDirectory: "/tmp/project"
+            }
+          ]
+        }
+      ]
+    });
+  });
+
+  it("skips malformed session files when listing", async () => {
+    const store = new SessionStore(tempDir);
+    await writeFile(path.join(tempDir, "broken.json"), "{", "utf8");
+    await store.save({
+      id: "valid",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "good work" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    await expect(store.list()).resolves.toMatchObject([{ id: "valid" }]);
+  });
+
+  it("skips oversized session files when listing", async () => {
+    const store = new SessionStore(tempDir);
+    await writeFile(path.join(tempDir, "huge.json"), "x".repeat(2 * 1024 * 1024 + 1), "utf8");
+
+    await expect(store.list()).resolves.toEqual([]);
   });
 
   it("deletes a saved session", async () => {

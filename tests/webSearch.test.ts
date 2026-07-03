@@ -139,4 +139,15 @@ describe("web search helpers", () => {
       }
     ]);
   });
+
+  it("bounds Tavily error bodies", async () => {
+    await expect(
+      searchWeb("hello world", 2, {
+        tavilyApiKey: "tvly-test",
+        async fetcher() {
+          return new Response("x".repeat(300_000), { status: 500 });
+        }
+      })
+    ).rejects.toThrow(/\[truncated\]/);
+  });
 });

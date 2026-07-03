@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   normalizePromptLoopOptions,
   normalizePromptPayload,
+  normalizePromptPlanOptions,
   normalizePromptReuseLastUserMessage,
-  normalizePromptSkillNames
+  normalizePromptSkillNames,
+  normalizePromptWorktreeOptions
 } from "../src/agent/promptPayload.js";
 
 describe("prompt payload normalization", () => {
@@ -95,5 +97,34 @@ describe("prompt payload normalization", () => {
       maxIterations: 3
     });
     expect(normalizePromptLoopOptions("fix this")).toEqual({ enabled: false, maxIterations: 5 });
+  });
+
+  it("normalizes plan approval options", () => {
+    expect(normalizePromptPlanOptions({ content: "plan this", plan: true })).toEqual({ enabled: true });
+    expect(normalizePromptPlanOptions({ content: "plan this", plan: { enabled: true } })).toEqual({ enabled: true });
+    expect(normalizePromptPlanOptions({ content: "plan this", plan: { enabled: false } })).toEqual({ enabled: false });
+    expect(normalizePromptPlanOptions("plan this")).toEqual({ enabled: false });
+  });
+
+  it("normalizes task worktree options", () => {
+    expect(normalizePromptWorktreeOptions({ content: "fix this", worktree: true })).toEqual({ enabled: true });
+    expect(normalizePromptWorktreeOptions({ content: "fix this", worktree: { enabled: true } })).toEqual({ enabled: true });
+    expect(normalizePromptWorktreeOptions({ content: "fix this", worktree: { enabled: true, taskRunId: "run-123" } })).toEqual({
+      enabled: true,
+      taskRunId: "run-123"
+    });
+    expect(
+      normalizePromptWorktreeOptions({
+        content: "fix this",
+        worktree: { enabled: true, taskRunId: "run-current", replayOfTaskRunId: "run-original", plannedFromTaskRunId: "run-plan" }
+      })
+    ).toEqual({
+      enabled: true,
+      taskRunId: "run-current",
+      replayOfTaskRunId: "run-original",
+      plannedFromTaskRunId: "run-plan"
+    });
+    expect(normalizePromptWorktreeOptions({ content: "fix this", worktree: { enabled: false } })).toEqual({ enabled: false });
+    expect(normalizePromptWorktreeOptions("fix this")).toEqual({ enabled: false });
   });
 });

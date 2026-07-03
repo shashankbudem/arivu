@@ -22,6 +22,9 @@ type DoctorOptions = {
   fetcher?: FetchLike;
 };
 
+const MAX_DIAGNOSTIC_BODY_BYTES = 64 * 1024;
+const DIAGNOSTIC_FETCH_TIMEOUT_MS = 15_000;
+
 type DoctorConfig = Pick<AppConfig, "apiKey" | "tavilyApiKey" | "baseUrl" | "model" | "trustMode"> &
   Partial<Pick<AppConfig, "mcpServers">>;
 
@@ -77,10 +80,10 @@ function check(id: string, label: string, status: DoctorStatus, message: string,
 
 async function checkModels(config: DoctorConfig, fetcher: FetchLike): Promise<{ check: DoctorCheck; models?: string[] }> {
   try {
-    const response = await fetcher(`${trimBaseUrl(config.baseUrl)}/models`, {
+    const response = await fetchWithTimeout(fetcher, `${trimBaseUrl(config.baseUrl)}/models`, {
       headers: headers(config.apiKey)
     });
-    const text = await response.text();
+    const text = await readResponseText(response);
     if (!response.ok) {
       return {
         check: check("models", "Models endpoint", "fail", `Model list request failed (${response.status}).`, truncate(text, 500))
@@ -130,7 +133,7 @@ async function checkBasicChat(config: DoctorConfig, fetcher: FetchLike): Promise
 
 async function checkStreaming(config: DoctorConfig, fetcher: FetchLike): Promise<DoctorCheck> {
   try {
-    const response = await fetcher(`${trimBaseUrl(config.baseUrl)}/chat/completions`, {
+    const response = await fetchWithTimeout(fetcher, `${trimBaseUrl(config.baseUrl)}/chat/completions`, {
       method: "POST",
       headers: headers(config.apiKey),
       body: JSON.stringify({
@@ -141,7 +144,7 @@ async function checkStreaming(config: DoctorConfig, fetcher: FetchLike): Promise
       })
     });
     if (!response.ok) {
-      const text = await response.text();
+      const text = await readResponseText(response);
       return check("streaming", "Streaming", "warn", `Streaming request failed (${response.status}); batch fallback may be used.`, truncate(text, 500));
     }
 
@@ -204,7 +207,7 @@ async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<Do
   }
 
   try {
-    const response = await fetcher("https://api.tavily.com/search", {
+    const response = await fetchWithTimeout(fetcher, "https://api.tavily.com/search", {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -222,7 +225,7 @@ async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<Do
         include_usage: true
       })
     });
-    const text = await response.text();
+    const text = await readResponseText(response);
     return response.ok
       ? check("tavily", "Tavily", "pass", "Tavily search endpoint accepted the key.")
       : check("tavily", "Tavily", "fail", `Tavily request failed (${response.status}).`, truncate(text, 500));
@@ -233,12 +236,12 @@ async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<Do
 
 async function postChat(config: DoctorConfig, fetcher: FetchLike, body: Record<string, unknown>) {
   try {
-    const response = await fetcher(`${trimBaseUrl(config.baseUrl)}/chat/completions`, {
+    const response = await fetchWithTimeout(fetcher, `${trimBaseUrl(config.baseUrl)}/chat/completions`, {
       method: "POST",
       headers: headers(config.apiKey),
       body: JSON.stringify(body)
     });
-    const text = await response.text();
+    const text = await readResponseText(response);
     return {
       ok: response.ok,
       status: response.status,
@@ -260,6 +263,19 @@ function headers(apiKey: string | undefined): Record<string, string> {
     Authorization: `Bearer ${apiKey ?? ""}`,
     "Content-Type": "application/json"
   };
+}
+
+async function fetchWithTimeout(fetcher: FetchLike, input: string, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DIAGNOSTIC_FETCH_TIMEOUT_MS);
+  try {
+    return await fetcher(input, {
+      ...init,
+      signal: init.signal ?? controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function summarize(checks: DoctorCheck[]): Record<DoctorStatus, number> {
@@ -286,6 +302,40 @@ function parseJson<T>(text: string): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+async function readResponseText(response: Response, maxBytes = MAX_DIAGNOSTIC_BODY_BYTES) {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return truncate(await response.text(), maxBytes);
+  }
+
+  const decoder = new TextDecoder();
+  let output = "";
+  let bytesRead = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    const remaining = maxBytes - bytesRead;
+    if (value.byteLength > remaining) {
+      if (remaining > 0) {
+        output += decoder.decode(value.slice(0, remaining), { stream: true });
+      }
+      await reader.cancel();
+      output += decoder.decode();
+      return `${output}\n[truncated]`;
+    }
+
+    bytesRead += value.byteLength;
+    output += decoder.decode(value, { stream: true });
+  }
+
+  output += decoder.decode();
+  return output;
 }
 
 function truncate(value: string, max: number) {

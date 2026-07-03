@@ -4,7 +4,7 @@ import { Agent } from "../agent/Agent.js";
 import { chatContentToText } from "../agent/content.js";
 import { OpenAICompatibleChatClient } from "../agent/OpenAICompatibleChatClient.js";
 import type { AgentRunEvent, AgentSession, ChatMessage } from "../agent/types.js";
-import type { AppConfig } from "../config.js";
+import { workspacePolicyOverridesForRoot, type AppConfig } from "../config.js";
 import { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { SessionStore } from "../sessions/SessionStore.js";
 import { detectWorkspace, type WorkspaceInfo } from "../workspace.js";
@@ -29,8 +29,16 @@ type ActivityLine = {
 };
 
 type FocusTarget = "input" | "conversation" | "activity";
+export type TuiSlashCommand =
+  | { kind: "clear" | "exit" | "help" | "status" }
+  | { kind: "sessions"; limit: number }
+  | { kind: "resume"; sessionId: string }
+  | { kind: "error"; message: string }
+  | { kind: "unknown" };
 
 const SPINNER = ["-", "\\", "|", "/"];
+const DEFAULT_TUI_SESSION_LIST_LIMIT = 10;
+const MAX_TUI_SESSION_LIST_LIMIT = 50;
 
 export class TuiApp {
   private screen!: blessed.Widgets.Screen;
@@ -41,6 +49,9 @@ export class TuiApp {
   private commandBar!: blessed.Widgets.BoxElement;
   private agent!: Agent;
   private workspace!: WorkspaceInfo;
+  private config!: AppConfig;
+  private cwd!: string;
+  private currentSession?: AgentSession;
   private readonly store = new SessionStore();
   private readonly log: LogLine[] = [];
   private readonly activityLog: ActivityLine[] = [];
@@ -61,21 +72,15 @@ export class TuiApp {
       throw new Error("The Arivu TUI requires an interactive terminal. Use one-shot mode for non-TTY usage.");
     }
 
-    this.workspace = await detectWorkspace(this.options.cwd);
-    this.lastMessageCount = this.options.session?.messages.length ?? 0;
-    this.agent = new Agent({
-      client: new OpenAICompatibleChatClient(this.options.config),
-      approvals: new ApprovalManager(this.options.config.trustMode, (message) => this.confirm(message)),
-      cwd: this.options.cwd,
-      model: this.options.config.model,
-      baseUrl: this.options.config.baseUrl,
-      tavilyApiKey: this.options.config.tavilyApiKey,
-      mcpServers: this.options.config.mcpServers,
-      session: this.options.session
-    });
+    this.currentSession = this.options.session;
+    this.config = configForSession(this.options.config, this.currentSession);
+    this.cwd = this.currentSession?.cwd ?? this.options.cwd;
+    this.workspace = await detectWorkspace(this.cwd);
+    this.lastMessageCount = this.currentSession?.messages.length ?? 0;
+    this.agent = this.createAgent(this.currentSession);
 
     this.createScreen();
-    this.seedFromSession();
+    this.seedFromSession(this.currentSession);
     this.render();
 
     await new Promise<void>((resolve) => {
@@ -219,8 +224,25 @@ export class TuiApp {
     this.focusInput();
   }
 
-  private seedFromSession() {
-    const messages = this.options.session?.messages ?? [];
+  private createAgent(session?: AgentSession) {
+    return new Agent({
+      client: new OpenAICompatibleChatClient(this.config),
+      approvals: new ApprovalManager(
+        this.config.trustMode,
+        (message) => this.confirm(message),
+        workspacePolicyOverridesForRoot(this.config, this.workspace.root)
+      ),
+      cwd: this.cwd,
+      model: this.config.model,
+      baseUrl: this.config.baseUrl,
+      tavilyApiKey: this.config.tavilyApiKey,
+      mcpServers: this.config.mcpServers,
+      session
+    });
+  }
+
+  private seedFromSession(session?: AgentSession) {
+    const messages = session?.messages ?? [];
     for (const message of messages) {
       if (message.role === "user") {
         this.log.push({ kind: "user", text: chatContentToText(message.content), time: new Date() });
@@ -267,7 +289,7 @@ export class TuiApp {
       return;
     }
 
-    if (this.handleSlashCommand(value)) {
+    if (await this.handleSlashCommand(value)) {
       this.render();
       return;
     }
@@ -287,6 +309,8 @@ export class TuiApp {
         onEvent: (event) => this.handleAgentEvent(event)
       });
       await this.store.save(result.session);
+      this.currentSession = result.session;
+      this.cwd = result.session.cwd;
       if (!this.liveActivity) {
         this.appendActivity(result.session.messages.slice(before));
       }
@@ -314,56 +338,47 @@ export class TuiApp {
     }
   }
 
-  private handleSlashCommand(value: string): boolean {
-    if (value === "/exit" || value === "/quit") {
+  private async handleSlashCommand(value: string): Promise<boolean> {
+    const command = parseTuiSlashCommand(value);
+    if (!command || command.kind === "unknown") {
+      return false;
+    }
+
+    if (command.kind === "exit") {
       this.exit();
       return true;
     }
 
-    if (value === "/help") {
-      this.log.push({
-        kind: "system",
-        text: [
-          "Commands:",
-          "/help    Show this help",
-          "/clear   Clear the visible conversation",
-          "/status  Show workspace and model status",
-          "/exit    Quit",
-          "",
-          "Keys:",
-          "Tab / Shift-Tab changes focus",
-          "Ctrl-L clears the visible conversation",
-          "Ctrl-C exits"
-        ].join("\n"),
-        time: new Date()
-      });
-      this.setStatus("Help");
+    if (command.kind === "help") {
+      this.showHelp();
       return true;
     }
 
-    if (value === "/clear") {
+    if (command.kind === "clear") {
       this.clearConversation();
       return true;
     }
 
-    if (value === "/status") {
-      this.log.push({
-        kind: "system",
-        text: [
-          `Workspace: ${this.workspace.root}`,
-          `Project: ${this.workspace.packageName ?? path.basename(this.workspace.root)}`,
-          `Git: ${this.workspace.gitBranch ?? "no branch"} / ${this.workspace.dirty ? "dirty" : "clean"}`,
-          `Model: ${this.options.config.model}`,
-          `Base URL: ${this.options.config.baseUrl}`,
-          `Trust: ${this.options.config.trustMode}`
-        ].join("\n"),
-        time: new Date()
-      });
-      this.setStatus("Status");
+    if (command.kind === "status") {
+      this.showStatus();
       return true;
     }
 
-    return false;
+    if (command.kind === "sessions") {
+      await this.showSessions(command.limit);
+      return true;
+    }
+
+    if (command.kind === "resume") {
+      await this.resumeSession(command.sessionId);
+      return true;
+    }
+
+    if (command.kind === "error") {
+      this.log.push({ kind: "error", text: command.message, time: new Date() });
+      this.setStatus("Command error");
+    }
+    return true;
   }
 
   private appendActivity(messages: ChatMessage[]) {
@@ -458,6 +473,91 @@ export class TuiApp {
     const index = this.activityLog.length - 1;
     this.streamingToolRows.set(key, index);
     return index;
+  }
+
+  private showHelp() {
+    this.log.push({
+      kind: "system",
+      text: [
+        "Commands:",
+        "/help          Show this help",
+        "/clear         Clear the visible conversation",
+        "/status        Show workspace and model status",
+        "/sessions [n]  List recent saved sessions",
+        "/resume <id>   Resume a saved session in this TUI",
+        "/exit          Quit",
+        "",
+        "Keys:",
+        "Tab / Shift-Tab changes focus",
+        "Ctrl-L clears the visible conversation",
+        "Ctrl-C exits"
+      ].join("\n"),
+      time: new Date()
+    });
+    this.setStatus("Help");
+  }
+
+  private showStatus() {
+    this.log.push({
+      kind: "system",
+      text: [
+        `Session: ${this.currentSession?.id ?? "new"}`,
+        `Workspace: ${this.workspace.root}`,
+        `Project: ${this.workspace.packageName ?? path.basename(this.workspace.root)}`,
+        `Git: ${this.workspace.gitBranch ?? "no branch"} / ${this.workspace.dirty ? "dirty" : "clean"}`,
+        `Model: ${this.config.model}`,
+        `Base URL: ${this.config.baseUrl}`,
+        `Trust: ${this.config.trustMode}`
+      ].join("\n"),
+      time: new Date()
+    });
+    this.setStatus("Status");
+  }
+
+  private async showSessions(limit: number) {
+    try {
+      const sessions = await this.store.list();
+      this.log.push({
+        kind: "system",
+        text: formatTuiSessionList(sessions, limit),
+        time: new Date()
+      });
+      this.setStatus("Sessions");
+    } catch (error) {
+      this.log.push({
+        kind: "error",
+        text: `Unable to list sessions: ${error instanceof Error ? error.message : String(error)}`,
+        time: new Date()
+      });
+      this.setStatus("Session list failed");
+    }
+  }
+
+  private async resumeSession(sessionId: string) {
+    try {
+      const session = await this.store.load(sessionId);
+      this.currentSession = session;
+      this.config = configForSession(this.options.config, session);
+      this.cwd = session.cwd;
+      this.workspace = await detectWorkspace(this.cwd);
+      this.agent = this.createAgent(session);
+      this.lastMessageCount = session.messages.length;
+      this.streamingAssistantIndex = undefined;
+      this.liveActivity = false;
+      this.streamingToolRows.clear();
+      this.log.splice(0, this.log.length);
+      this.activityLog.splice(0, this.activityLog.length);
+      this.seedFromSession(session);
+      this.focusInput();
+      this.setStatus(`Resumed session ${session.id}`);
+    } catch (error) {
+      this.log.push({
+        kind: "error",
+        text: `Unable to resume session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        time: new Date()
+      });
+      this.setStatus("Resume failed");
+    }
   }
 
   private confirm(message: string): Promise<boolean> {
@@ -688,4 +788,98 @@ function shortenPath(value: string, max: number) {
     return value;
   }
   return `...${value.slice(value.length - max + 3)}`;
+}
+
+export function parseTuiSlashCommand(value: string): TuiSlashCommand | undefined {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("/")) {
+    return undefined;
+  }
+
+  const [name = "", ...args] = trimmed.split(/\s+/);
+  switch (name.toLowerCase()) {
+    case "/exit":
+    case "/quit":
+      return { kind: "exit" };
+    case "/help":
+      return { kind: "help" };
+    case "/clear":
+      return { kind: "clear" };
+    case "/status":
+      return { kind: "status" };
+    case "/sessions":
+      return parseSessionsCommand(args);
+    case "/resume":
+      if (!args[0]) {
+        return { kind: "error", message: "Usage: /resume <session-id>" };
+      }
+      return { kind: "resume", sessionId: args[0] };
+    default:
+      return { kind: "unknown" };
+  }
+}
+
+export function formatTuiSessionList(sessions: AgentSession[], limit = DEFAULT_TUI_SESSION_LIST_LIMIT) {
+  const visible = sessions.slice(0, clampSessionLimit(limit));
+  if (visible.length === 0) {
+    return "No saved sessions.";
+  }
+
+  return [
+    "Recent sessions:",
+    "",
+    ...visible.map((session) =>
+      [
+        session.id,
+        formatSessionUpdatedAt(session.updatedAt),
+        path.basename(session.projectRoot ?? session.cwd),
+        tuiSessionTitle(session)
+      ].join("  ")
+    ),
+    "",
+    "Resume with /resume <session-id>."
+  ].join("\n");
+}
+
+function parseSessionsCommand(args: string[]): TuiSlashCommand {
+  if (args.length === 0) {
+    return { kind: "sessions", limit: DEFAULT_TUI_SESSION_LIST_LIMIT };
+  }
+
+  const limit = Number.parseInt(args[0] ?? "", 10);
+  if (!Number.isFinite(limit) || limit < 1) {
+    return { kind: "error", message: "Usage: /sessions [positive-limit]" };
+  }
+
+  return { kind: "sessions", limit: clampSessionLimit(limit) };
+}
+
+function clampSessionLimit(value: number) {
+  return Math.min(Math.max(Math.floor(value), 1), MAX_TUI_SESSION_LIST_LIMIT);
+}
+
+function tuiSessionTitle(session: AgentSession) {
+  const content = session.messages.find((message) => message.role === "user")?.content;
+  const title = content ? chatContentToText(content).trim().split(/\s+/).slice(0, 10).join(" ") : "";
+  return title || "Untitled session";
+}
+
+function formatSessionUpdatedAt(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function configForSession(config: AppConfig, session?: AgentSession): AppConfig {
+  if (!session) {
+    return config;
+  }
+  return {
+    ...config,
+    model: session.model ?? config.model,
+    baseUrl: session.baseUrl ?? config.baseUrl,
+    trustMode: session.trustMode
+  };
 }

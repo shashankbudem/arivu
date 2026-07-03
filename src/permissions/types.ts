@@ -2,6 +2,13 @@ export type TrustMode = "ask" | "readonly" | "trusted";
 
 export type ApprovalAction =
   | {
+      type: "read";
+      summary: string;
+      path?: string;
+      query?: string;
+      destructive?: boolean;
+    }
+  | {
       type: "write";
       summary: string;
       path?: string;
@@ -22,6 +29,13 @@ export type ApprovalAction =
       server: string;
       tool: string;
       arguments?: unknown;
+      destructive?: boolean;
+    }
+  | {
+      type: "network";
+      summary: string;
+      destination?: string;
+      query?: string;
       destructive?: boolean;
     }
   | {

@@ -20,14 +20,18 @@ export function summarizePatch(diff: string): string {
   return patches.map((patch) => `${cleanPatchPath(patch.newPath)} (${patch.hunks.length} hunks)`).join(", ");
 }
 
-export async function applyUnifiedDiff(diff: string, resolvePath: (path: string) => string, beforeWrite: (path: string) => Promise<void>) {
+export async function applyUnifiedDiff(
+  diff: string,
+  resolvePath: (path: string) => string | Promise<string>,
+  beforeWrite: (path: string) => Promise<void>
+) {
   const patches = parseUnifiedDiff(diff);
   if (patches.length === 0) {
     throw new Error("Patch did not contain any file changes.");
   }
 
   for (const patch of patches) {
-    const target = resolvePath(cleanPatchPath(patch.newPath));
+    const target = await resolvePath(cleanPatchPath(patch.newPath));
     const exists = await existsFile(target);
     if (exists) {
       await beforeWrite(target);

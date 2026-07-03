@@ -1,25 +1,57 @@
+import { randomUUID } from "node:crypto";
 import { confirm } from "@inquirer/prompts";
 import chalk from "chalk";
+import { evaluateApprovalPolicy, type CapabilityPolicyOverrides } from "./capabilityPolicy.js";
 import { isDestructiveCommand } from "./destructive.js";
 import type { ApprovalAction, TrustMode } from "./types.js";
+import type { AgentTaskRunApprovalEvent } from "../agent/types.js";
+
+export type ApprovalAuditSink = (event: AgentTaskRunApprovalEvent) => void | Promise<void>;
+
+const MAX_APPROVAL_AUDIT_MESSAGE = 2_000;
 
 export class ApprovalManager {
   constructor(
     readonly mode: TrustMode,
-    private readonly prompt: (message: string) => Promise<boolean> = defaultPrompt
+    private readonly prompt: (message: string) => Promise<boolean> = defaultPrompt,
+    private readonly policyOverrides: CapabilityPolicyOverrides = {},
+    private readonly audit?: ApprovalAuditSink
   ) {}
 
   async require(action: ApprovalAction): Promise<void> {
-    if (action.type === "browser") {
-      return;
+    const destructive = action.destructive ?? (action.type === "shell" ? isDestructiveCommand(action.command) : action.type === "network");
+    const decision = evaluateApprovalPolicy(this.mode, action, { risky: destructive, overrides: this.policyOverrides });
+    const approvalId = randomUUID();
+    if (decision.effect === "deny") {
+      await this.emitAudit({
+        id: approvalId,
+        actionType: action.type,
+        capability: decision.capability,
+        status: "blocked",
+        trustMode: this.mode,
+        effect: decision.effect,
+        label: decision.label,
+        reason: decision.reason,
+        risky: destructive,
+        override: decision.override,
+        summary: summarizeApprovalAction(action)
+      });
+      throw new Error(`Refused ${action.type}: ${decision.reason}.`);
     }
-
-    if (this.mode === "readonly") {
-      throw new Error(`Refused ${action.type}: readonly trust mode is active.`);
-    }
-
-    const destructive = action.destructive ?? (action.type === "shell" && isDestructiveCommand(action.command));
-    if (this.mode === "trusted" && !destructive) {
+    if (decision.effect === "allow") {
+      await this.emitAudit({
+        id: approvalId,
+        actionType: action.type,
+        capability: decision.capability,
+        status: "allowed",
+        trustMode: this.mode,
+        effect: decision.effect,
+        label: decision.label,
+        reason: decision.reason,
+        risky: destructive,
+        override: decision.override,
+        summary: summarizeApprovalAction(action)
+      });
       return;
     }
 
@@ -28,12 +60,64 @@ export class ApprovalManager {
         ? formatShellApproval(action.command, destructive, action.cwd)
         : action.type === "mcp"
           ? formatMcpApproval(action, destructive)
-          : formatWriteApproval(action, destructive);
+          : action.type === "network"
+            ? formatNetworkApproval(action, destructive)
+            : action.type === "browser"
+              ? formatBrowserApproval(action, destructive)
+              : action.type === "read"
+                ? formatReadApproval(action)
+                : formatWriteApproval(action, destructive);
 
+    await this.emitAudit({
+      id: approvalId,
+      actionType: action.type,
+      capability: decision.capability,
+      status: "requested",
+      trustMode: this.mode,
+      effect: decision.effect,
+      label: decision.label,
+      reason: decision.reason,
+      risky: destructive,
+      override: decision.override,
+      summary: summarizeApprovalAction(action),
+      message: truncateApprovalAuditText(label)
+    });
     const approved = await this.prompt(label);
     if (!approved) {
+      await this.emitAudit({
+        id: approvalId,
+        actionType: action.type,
+        capability: decision.capability,
+        status: "denied",
+        trustMode: this.mode,
+        effect: decision.effect,
+        label: decision.label,
+        reason: decision.reason,
+        risky: destructive,
+        override: decision.override,
+        summary: summarizeApprovalAction(action),
+        message: truncateApprovalAuditText(label)
+      });
       throw new Error(`User denied ${action.type}.`);
     }
+    await this.emitAudit({
+      id: approvalId,
+      actionType: action.type,
+      capability: decision.capability,
+      status: "approved",
+      trustMode: this.mode,
+      effect: decision.effect,
+      label: decision.label,
+      reason: decision.reason,
+      risky: destructive,
+      override: decision.override,
+      summary: summarizeApprovalAction(action),
+      message: truncateApprovalAuditText(label)
+    });
+  }
+
+  private async emitAudit(event: AgentTaskRunApprovalEvent) {
+    await this.audit?.(event);
   }
 }
 
@@ -59,6 +143,16 @@ function formatWriteApproval(action: Extract<ApprovalAction, { type: "write" }>,
   return lines.join("\n");
 }
 
+function formatReadApproval(action: Extract<ApprovalAction, { type: "read" }>) {
+  return [
+    `Repo read: ${action.summary}`,
+    action.path ? `Path: ${action.path}` : "",
+    action.query ? `Query: ${action.query}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function formatMcpApproval(action: Extract<ApprovalAction, { type: "mcp" }>, destructive: boolean) {
   return [
     `${destructive ? "MCP tool call" : "MCP tool"}: ${action.server}/${action.tool}`,
@@ -66,6 +160,50 @@ function formatMcpApproval(action: Extract<ApprovalAction, { type: "mcp" }>, des
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function formatNetworkApproval(action: Extract<ApprovalAction, { type: "network" }>, destructive: boolean) {
+  return [
+    `${destructive ? "Network request" : "Network read"}: ${action.summary}`,
+    action.destination ? `Destination: ${action.destination}` : "",
+    action.query ? `Query: ${action.query}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatBrowserApproval(action: Extract<ApprovalAction, { type: "browser" }>, destructive: boolean) {
+  return [
+    `${destructive ? "Browser action" : "Browser read"}: ${action.action}`,
+    `Target: ${action.target}`,
+    action.mode ? `Mode: ${action.mode}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function summarizeApprovalAction(action: ApprovalAction) {
+  switch (action.type) {
+    case "read":
+      return [action.summary, action.path, action.query].filter(Boolean).join(" - ");
+    case "write":
+      return action.path ? `${action.summary} (${action.path})` : action.summary;
+    case "shell":
+      return action.command;
+    case "mcp":
+      return `${action.server}/${action.tool}`;
+    case "network":
+      return [action.summary, action.destination, action.query].filter(Boolean).join(" - ");
+    case "browser":
+      return `${action.action}: ${action.target}`;
+  }
+}
+
+function truncateApprovalAuditText(value: string) {
+  if (value.length <= MAX_APPROVAL_AUDIT_MESSAGE) {
+    return value;
+  }
+  return `${value.slice(0, MAX_APPROVAL_AUDIT_MESSAGE - 3).trimEnd()}...`;
 }
 
 function formatJson(value: unknown) {

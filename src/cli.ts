@@ -5,11 +5,19 @@ import { Agent } from "./agent/Agent.js";
 import { chatContentToText } from "./agent/content.js";
 import type { AgentSession } from "./agent/types.js";
 import { OpenAICompatibleChatClient } from "./agent/OpenAICompatibleChatClient.js";
-import { loadConfig, saveConfig, type AppConfig, type ConfigKey } from "./config.js";
+import {
+  loadConfig,
+  redactConfigForDisplay,
+  saveConfig,
+  workspacePolicyOverridesForRoot,
+  type AppConfig,
+  type ConfigKey
+} from "./config.js";
 import { runDoctor, type DoctorReport, type DoctorStatus } from "./diagnostics/doctor.js";
 import { ApprovalManager } from "./permissions/ApprovalManager.js";
 import { SessionStore } from "./sessions/SessionStore.js";
 import { TuiApp } from "./tui/TuiApp.js";
+import { detectWorkspace } from "./workspace.js";
 
 const program = new Command();
 
@@ -85,14 +93,15 @@ program
   .action(async (action: string, key?: ConfigKey, value?: string) => {
     const config = await loadConfig({ includeEnv: false });
     if (action === "get") {
+      const displayConfig = redactConfigForDisplay(config);
       if (key) {
         if (!isConfigKey(key)) {
           throw new Error(`Unknown config key: ${key}`);
         }
-        console.log(JSON.stringify({ [key]: config[key] ?? null }, null, 2));
+        console.log(JSON.stringify({ [key]: displayConfig[key] ?? null }, null, 2));
         return;
       }
-      console.log(JSON.stringify(config, null, 2));
+      console.log(JSON.stringify(displayConfig, null, 2));
       return;
     }
 
@@ -151,8 +160,9 @@ async function runTui(config: AppConfig, session?: AgentSession) {
 
 async function runOneShot(task: string, config: AppConfig) {
   const cwd = process.cwd();
+  const workspace = await detectWorkspace(cwd);
   const client = new OpenAICompatibleChatClient(config);
-  const approvals = new ApprovalManager(config.trustMode);
+  const approvals = new ApprovalManager(config.trustMode, undefined, workspacePolicyOverridesForRoot(config, workspace.root));
   const agent = new Agent({
     client,
     approvals,

@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createSkill, readSkill } from "../src/agent/skills.js";
 import { ApprovalManager } from "../src/permissions/ApprovalManager.js";
@@ -54,7 +55,7 @@ describe("createToolRegistry", () => {
     expect(coordinateResult.mode).toBe("visible");
   });
 
-  it("runs browser actions in readonly mode without approval prompts", async () => {
+  it("blocks browser actions in readonly mode", async () => {
     const browser = createFakeBrowser();
     let prompted = false;
     const registry = createToolRegistry({
@@ -66,16 +67,173 @@ describe("createToolRegistry", () => {
       browser
     });
 
-    const openResult = JSON.parse(await registry.execute("browser_open", { url: "https://example.com" })) as Record<string, unknown>;
-    const clickResult = JSON.parse(await registry.execute("browser_click", { target: "Sign in" })) as Record<string, unknown>;
-    const typeResult = JSON.parse(
-      await registry.execute("browser_type", { target: "Search", text: "ServiceNow", submit: true })
-    ) as Record<string, unknown>;
-
-    expect(openResult.action).toBe("open");
-    expect(clickResult.action).toBe("click");
-    expect(typeResult.action).toBe("type");
+    await expect(registry.execute("browser_open", { url: "https://example.com" })).resolves.toMatch(/readonly/);
+    await expect(registry.execute("browser_click", { target: "Sign in" })).resolves.toMatch(/readonly/);
+    await expect(registry.execute("browser_type", { target: "Search", text: "ServiceNow", submit: true })).resolves.toMatch(/readonly/);
     expect(prompted).toBe(false);
+  });
+
+  it("rejects browser file URLs that escape the workspace through symlinks", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-browser-file-"));
+    try {
+      const workspace = path.join(tempDir, "workspace");
+      const outside = path.join(tempDir, "outside");
+      await mkdir(workspace);
+      await mkdir(outside);
+      await symlink(outside, path.join(workspace, "link"));
+      const browser = createFakeBrowser();
+      const registry = createToolRegistry({
+        workspaceRoot: workspace,
+        approvals: new ApprovalManager("trusted", async () => true),
+        browser
+      });
+
+      const url = pathToFileURL(path.join(workspace, "link", "secret.txt")).toString();
+      await expect(registry.execute("browser_open", { url })).resolves.toMatch(/symlink/);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires approval before web search leaves the machine", async () => {
+    let prompted = false;
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("readonly", async () => {
+        prompted = true;
+        return false;
+      })
+    });
+
+    await expect(registry.execute("web_search", { query: "sensitive private query" })).resolves.toMatch(/denied network/);
+    expect(prompted).toBe(true);
+  });
+
+  it("enforces workspace read policy overrides for repo read tools", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-read-policy-"));
+    try {
+      await writeFile(path.join(tempDir, "README.md"), "hello\n", "utf8");
+      let prompted = false;
+      const registry = createToolRegistry({
+        workspaceRoot: tempDir,
+        approvals: new ApprovalManager(
+          "trusted",
+          async () => {
+            prompted = true;
+            return false;
+          },
+          { read_repo: "deny" }
+        )
+      });
+
+      await expect(registry.execute("list", { path: "." })).resolves.toMatch(/workspace policy override/);
+      await expect(registry.execute("read", { path: "README.md" })).resolves.toMatch(/workspace policy override/);
+      await expect(registry.execute("search", { query: "hello", path: "." })).resolves.toMatch(/workspace policy override/);
+      await expect(registry.execute("git_status", {})).resolves.toMatch(/workspace policy override/);
+      expect(prompted).toBe(false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("can prompt before repo reads when workspace policy requires it", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-read-prompt-"));
+    try {
+      await writeFile(path.join(tempDir, "README.md"), "hello\n", "utf8");
+      const prompts: string[] = [];
+      const registry = createToolRegistry({
+        workspaceRoot: tempDir,
+        approvals: new ApprovalManager(
+          "trusted",
+          async (message) => {
+            prompts.push(message);
+            return true;
+          },
+          { read_repo: "prompt" }
+        )
+      });
+
+      await expect(registry.execute("read", { path: "README.md" })).resolves.toBe("hello\n");
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain("Repo read: read file");
+      expect(prompts[0]).toContain("Path: README.md");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires approval before listing configured MCP tools", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("ask", async () => false),
+      mcpServers: {
+        fake: {
+          command: "definitely-not-started",
+          args: [],
+          env: {},
+          disabled: false
+        }
+      }
+    });
+
+    await expect(registry.execute("mcp_list_tools", {})).resolves.toMatch(/denied mcp/);
+  });
+
+  it("records host execution profile metadata for shell commands", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("ask", async () => true)
+    });
+
+    await expect(registry.execute("run", { command: "printf profile-ok" })).resolves.toContain(
+      `executionProfile: host\nexecutionIsolation: local host process\nworkingDirectory: ${process.cwd()}\nexitCode: 0\nstdout:\nprofile-ok`
+    );
+  });
+
+  it("rejects unconfigured command execution profiles before approval", async () => {
+    let prompted = false;
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("ask", async () => {
+        prompted = true;
+        return true;
+      })
+    });
+
+    await expect(registry.execute("run", { command: "printf should-not-run", executionProfile: "sandbox" })).resolves.toContain(
+      "sandbox execution is not configured yet"
+    );
+    expect(prompted).toBe(false);
+  });
+
+  it("previews large reads without marking the whole file safe to overwrite", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-large-read-"));
+    try {
+      const filePath = path.join(tempDir, "large.txt");
+      await writeFile(filePath, "a".repeat(30_000), "utf8");
+      const registry = createRegistry(tempDir);
+
+      const readResult = await registry.execute("read", { path: "large.txt" });
+      expect(readResult.length).toBeLessThan(21_000);
+      expect(readResult).toContain("[truncated]");
+      await expect(registry.execute("write_file", { path: "large.txt", content: "new", mode: "replace" })).resolves.toMatch(/has not been read/);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("truncates broad search output before returning it to the transcript", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-search-"));
+    try {
+      await writeFile(path.join(tempDir, "matches.txt"), Array.from({ length: 5000 }, (_, index) => `needle ${index}`).join("\n"), "utf8");
+      const registry = createRegistry(tempDir);
+
+      const result = await registry.execute("search", { query: "needle", path: "." });
+      expect(result.length).toBeLessThanOrEqual(60_012);
+      expect(result).toContain("[truncated]");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("reports an empty MCP configuration without throwing", async () => {

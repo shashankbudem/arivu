@@ -85,6 +85,56 @@ Desktop agent-loop check:
 3. Send a bounded task such as "Inspect the repo and tell me one thing to improve."
 4. Confirm the working pill shows loop progress, Activity shows an agent-loop system item, and Stop Loop changes the status to stopping until the current iteration finishes.
 
+Desktop task-run audit check:
+
+1. Run `npm run desktop:dev`.
+2. Send a prompt that uses at least one tool, for example "List top-level files and summarize them."
+3. Confirm the Activity query group shows the selected model/provider, run status, and capability chips such as `Read`.
+4. When an assistant reply includes a `Plan:`/`Approach:`/`Next steps:` checklist, confirm the Activity query group shows the captured plan and that reopening the saved chat keeps it.
+5. Send or inspect prompts that apply a patch and write a file, then confirm the Activity result rows show persisted patch/file-change summaries and diff-style previews after reopening the chat.
+6. Send or inspect a prompt that runs a command, then confirm the command result row shows command text, execution profile/isolation/cwd metadata, exit code, duration, and separated stdout/stderr details.
+7. Confirm a completed command-producing run shows a Verification panel with command count, failed exits, and parsed report counts derived from task-run artifacts.
+8. For a worktree-backed run whose verification failed, confirm Activity shows the promotion-blocked message and PR draft/Create PR/Merge controls are unavailable or disabled while Preview/Open/Refresh/Discard still work.
+9. Click Fix verification on that failed worktree run, confirm the composer is filled with a repair prompt, the Worktree control shows continuation state, and the next send creates a new run whose worktree points at the same branch/path with `continuedFromTaskRunId`.
+10. If that continued repair run completes with unknown verification, confirm Activity shows Rerun checks, clicking it fills the composer with a verification prompt, and the Worktree control continues the same branch again.
+11. For a worktree with multiple continued repair attempts, confirm Activity shows a Repair history chain with the original run and each continuation in order. Click Details on a prior attempt and confirm Activity focuses and expands that run's evidence; click Open where available and confirm the managed worktree folder opens; click Compare and confirm the panel compares selected versus current verification, command, report, and change summaries plus added/removed/shared file deltas; click Replay on an attempt with commands and confirm the composer drafts a replay-checks prompt continuing the current worktree. After sending that replay prompt, confirm the new run shows Replay metadata, appears in Replay outcomes under its evidence attempt, and that both remain after reopening the chat. If two replay outcomes for the same evidence run fail verification, confirm the Replay outcomes group shows Review and drafts a review handoff prompt with a failure-pattern summary and minimal verification plan.
+12. If a worktree run has passed verification, confirm Activity shows the next promotion step, such as Preview before PR/Merge, PR draft available, Create PR available, or draft PR already created. For a created draft PR, click Refresh PR and confirm Activity stores a review/check/comment/thread summary from GitHub CLI, shows a ready/blocked/waiting merge cue and bounded review feedback from that snapshot, then click Watch PR and confirm the card shows Watching/refresh status before stopping it. Click Review PR and confirm the composer is filled with a PR review handoff prompt that includes the refreshed PR status/check/comment/thread summary and the Worktree control continues the same branch.
+13. For commands that emit report paths such as `reports/junit.xml` or `reports/scan.sarif`, confirm the Activity result includes the detected report path, parsed report summary, and bounded failing-test or SARIF finding previews when the file exists in the execution workspace.
+14. Confirm parsed report results show compact open-report/source buttons, and that clicking one opens only the attached evidence path from the session/worktree root.
+15. Confirm failed parsed report results show Draft fix, and that clicking it fills the composer with a focused repair prompt containing the report path and bounded failing test or SARIF finding details.
+16. When Loop is enabled and a report-producing iteration ends with `Loop: continue`, confirm the next iteration receives one hidden `Arivu report remediation evidence artifact:` system message for the latest failed report artifact only once.
+17. For browser prompts that call `browser_screenshot`, confirm the Activity rail shows a screenshot artifact and the task-run metadata reports an artifact count.
+
+Desktop plan-approval check:
+
+1. Run `npm run desktop:dev`.
+2. Toggle `Plan` in the composer or run `/plan`.
+3. Send a larger implementation prompt and confirm the model responds with a `Plan:` instead of editing files or running commands.
+4. Confirm Activity marks the run as Plan approval and shows only local read/discovery capabilities if any tools were used.
+5. Click Approve on the captured plan card and confirm Activity shows the persisted approved status.
+6. Click Use approved plan and confirm the composer is filled with an approved-plan follow-up prompt.
+7. Click Start worktree on the approved plan card and confirm the composer is filled with the worktree-specific approved-plan prompt and the Worktree control shows `Plan tree`.
+8. Send that prompt from a git-backed project and confirm the new task run records a task worktree with the approved plan id visible in Activity metadata, the assistant's final response includes a parseable `Completion notes:` checklist, and the Approved plan source card shows plan checklist, evidence cues, and completion notes. Passed verification with changed files and a patch preview should mark a planned step supported only when a changed file, verification command, or assistant close-out bullet matches that step; unmatched steps should show Needs evidence, and failed verification should mark notes blocked.
+9. On another plan run, click Revise or Cancel and confirm the review status persists after reopening the saved chat.
+
+Desktop task-worktree check:
+
+1. Open a git-backed workspace with at least one commit.
+2. Toggle `Worktree` in the composer or run `/worktree`.
+3. Send a small coding prompt such as "Create a tiny note file named arivu-worktree-check.txt."
+4. Confirm Activity and `/session` show a task worktree branch/path.
+5. Use Open in Activity to open the managed worktree folder, then confirm the file was created there and not in the original checkout.
+6. In Activity, use Refresh to show the changed-file count.
+7. Use Preview to render the bounded patch preview in Activity.
+8. Use PR draft in Activity and confirm the run shows a pull-request draft card with title, branch, commit, and push/create commands when an `origin` remote exists.
+9. When GitHub CLI is authenticated and a disposable remote is available, use Create PR and confirm the returned URL is stored on the task run. Click Refresh PR on the created PR card and confirm Activity shows the persisted GitHub review/check/comment/thread summary plus a ready/blocked/waiting merge cue and bounded latest feedback previews. Click Watch PR and confirm it switches to Watching with a status line, then stop it. Click Review PR and confirm the composer drafts a PR review handoff prompt that includes the refreshed snapshot and keeps the created task worktree armed. Otherwise, verify the Create PR button is shown only for prepared previewed worktrees with an origin remote and base branch.
+10. Open Settings and confirm Task worktrees lists the run, shows present/missing folder state plus verification status, Open works for the recorded managed folder, and PR draft/Create PR is available only for eligible previewed ready worktrees whose verification has not failed.
+11. For a sync-conflict check, change the same tracked file differently in the original checkout and in the managed task worktree, then use Sync in Activity. Confirm the conflict panel appears, lists the conflicted file, lets you open that specific conflicted file, blocks Preview/PR/Merge actions, and keeps Open/Refresh/Discard available.
+12. Resolve the conflict markers in the managed task worktree, then click Continue and confirm the conflict panel clears, the diff summary updates, and Preview/PR/Merge actions become available again when verification allows them.
+13. Repeat the divergent setup and click Abort instead; confirm Git aborts the merge in the managed task worktree, the conflict panel clears, and the original checkout is unchanged.
+14. With the original checkout clean, use Merge to fast-forward the previewed worktree to the task branch.
+15. Use Clean up to remove the merged task worktree and branch. For an unmerged task, use Discard instead and confirm the original checkout is unchanged. Repeat the cleanup/discard path from Settings for a saved run and confirm the inventory refreshes afterward.
+
 Current-news/web-search check:
 
 ```bash
@@ -162,10 +212,10 @@ Desktop workflows to check manually after UI changes:
 - After the first prompt is sent, the project selector hides.
 - `Open` switches to an existing workspace folder.
 - `New workspace` creates a directory and switches into it.
-- Expandable Projects sidebar rows show project chats beneath the related project.
+- The Workspaces sidebar section shows recent workspaces from saved project chats. Click the folder/name area to reopen that workspace and use the chevron to expand chats beneath it.
 - The top-level Chats section shows saved chats that are not associated with any project.
 - `History` lists saved sessions, can reopen them, and can delete them.
-- Typing `/` in the desktop composer opens slash commands. Verify `/session` shows chat id plus estimated context used/remaining, `/tools` opens the tools list, `/skills` opens the skills selector, `/browser` opens or focuses the separate browser window, `/compact` runs the existing compact-context flow when enough messages exist, and unknown slash commands are not sent as model prompts.
+- Typing `/` in the desktop composer opens slash commands. Verify `/session` shows chat id plus estimated context used/remaining and latest task-run status, `/tools` opens the tools list, `/skills` opens the skills selector, `/browser` opens or focuses the separate browser window, `/plan` toggles one-shot read-only plan approval, `/worktree` toggles one-shot task worktree mode for git projects, `/compact` runs the existing compact-context flow when enough messages exist, and unknown slash commands are not sent as model prompts.
 - Skills in the prompt `+` menu show the installed global skills list. Load queues a skill for the next prompt, the composer shows a queued chip, and after the prompt succeeds the chat shows the skill as loaded context. The Add skill action opens Settings where a new skill can be saved as `<name>/SKILL.md`.
 - Model selection opens a dialog with search, loads options from the selected provider's `GET /models`, and keeps manual model id entry available when the provider has no list or no match.
 - Settings can save multiple OpenAI-compatible LLM providers, a Tavily key, and MCP server JSON. Confirm the model picker searches only the selected provider's models and does not combine lists across providers.
@@ -188,6 +238,8 @@ Desktop workflows to check manually after UI changes:
 - A failed send keeps the user bubble in the transcript, marks it retryable, and exposes icon-only Retry in the error strip.
 - Large pasted text opens the token-budget review dialog before insertion.
 - Tool-call activity is grouped by the triggering user query. Verify a prompt that uses multiple tools shows one expandable tool-run marker in the chat transcript and one matching expandable query group in the Activity panel.
+- Plan approval mode is one-shot. After sending a prompt with Plan armed, verify the composer returns to normal mode, Loop/Worktree are not armed, the task run shows Plan approval metadata, write/shell/browser/web/MCP tools are not advertised, Approve/Revise/Cancel persist review state, Use approved plan drafts an execution follow-up only after approval, and Start worktree drafts the approved plan while arming a new worktree that records the plan source id and shows source-plan review cues plus completion notes in Activity. Confirm matching changed files, commands, or assistant close-out bullets appear in the note evidence when available.
+- Worktree mode is one-shot. After sending a prompt with Worktree armed, verify the composer returns to normal mode and the task run retains the generated branch/path. After a failed-verification run, verify Fix verification drafts a repair prompt and arms continuation of the same branch. After a continued repair run without command evidence, verify Rerun checks drafts a verification prompt and arms continuation of the same branch again. For multi-attempt repairs, verify Activity shows the original run and each continuation in the Repair history chain, Details focuses the selected attempt's Activity evidence, Open uses the existing managed-worktree action when available, Compare summarizes selected versus current evidence with per-file deltas, and Replay drafts a current-worktree verification prompt from the selected attempt's commands. After sending Replay, verify the resulting run persists `Replay of ...` metadata after reload and appears in the Replay outcomes group for the evidence run. After two replay failures for the same evidence run, verify Review drafts a handoff prompt that asks whether the repeated failure is a real defect, stale command, environment issue, or missing precondition, includes the repeated-failure pattern, and suggests the smallest verification command to run first. After passed verification, verify Activity shows whether to Preview, prepare PR, create PR, or review an already created draft PR; when a PR URL exists, verify Refresh PR stores a review/check/comment/thread snapshot, renders a ready/blocked/waiting merge cue plus bounded review feedback, Watch PR changes to Watching with a refresh status line, and Review PR drafts a created-PR review prompt with the last refreshed PR status while keeping the same task worktree armed. Stop Watch PR and confirm the card returns to the non-watching state. After a completed run, verify Activity can refresh changed-file metadata, preview the patch, sync with the current original checkout, show conflicted files when Sync needs manual resolution, open individual conflicted files, continue or abort that conflict, prepare/create a PR, and expose the correct merge/discard/cleanup action for the worktree state. Verify Settings lists the recorded task worktree with present/missing folder state, opens the managed folder when present, and exposes PR draft/Create PR, Discard, or Clean up for eligible saved task worktrees.
 - Sidebar sections, the left sidebar, the compact Activity rail/panel, Activity query groups, and Activity rows collapse/expand.
 - The left sidebar and expanded Activity panel resize by dragging their divider handles.
 - Assistant replies render as Markdown; fenced code blocks are syntax-highlighted and expose an icon-only copy button.
@@ -208,7 +260,8 @@ The TUI is in `src/tui/TuiApp.ts`. Keep these behaviors intact:
 
 - Default `arivu` opens the TUI.
 - One-shot mode stays non-interactive.
-- `resume <session-id>` opens the TUI with session history.
+- `sessions` prints recent saved sessions newest first, and `resume <session-id>` opens the TUI with session history.
+- Inside the TUI, `/sessions [n]` lists recent saved sessions and `/resume <session-id>` switches the live TUI into that session.
 - Narrow terminals remain usable.
 - Approval prompts still resolve the same permission promise.
 
@@ -236,7 +289,8 @@ When adding or changing a tool:
 - Add a schema in `src/tools/registry.ts`.
 - Validate arguments with `zod`.
 - Keep paths contained with `resolveWorkspacePath`.
-- Route writes/shell through `ApprovalManager`.
+- Route sensitive actions through `ApprovalManager` and update `src/permissions/capabilityPolicy.ts` when a new harness capability or trust decision is needed. If the capability should be user-hardenable per workspace, expose it through the workspace policy override allowlist as a stricter `prompt`/`deny` option.
+- For repo read tools, verify `read_repo` workspace overrides can require approval or block `list`, `read`, `search`, and `git_status` without affecting local context tools.
 - Keep read-only local context tools side-effect-free and approval-free.
 - Keep `list_skills` and `read_skill` read-only; skills should be discovered from the global app data skills directory or `ARIVU_SKILLS_HOME`.
 - Treat MCP tools as configured external processes. `mcp_list_tools` is discovery; `mcp_call_tool` may perform whatever the selected MCP server implements.

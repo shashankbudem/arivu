@@ -1,8 +1,20 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { appConfigDir, appDataDir, loadConfig, saveConfig } from "../src/config.js";
+import {
+  REDACTED_SECRET_VALUE,
+  appConfigDir,
+  appDataDir,
+  configPath,
+  loadConfig,
+  mergeRedactedMcpServers,
+  normalizeWorkspacePolicyOverrides,
+  redactConfigForDisplay,
+  saveConfig,
+  updateWorkspacePolicy,
+  workspacePolicyOverridesForRoot
+} from "../src/config.js";
 
 let tempDir: string;
 
@@ -73,6 +85,55 @@ describe("config", () => {
     });
   });
 
+  it("saves config with owner-only file permissions", async () => {
+    await saveConfig({ apiKey: "saved-key" });
+
+    const mode = (await stat(configPath())).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it("redacts secrets for display and preserves masked MCP env values", () => {
+    const display = redactConfigForDisplay({
+      apiKey: "saved-key",
+      tavilyApiKey: "tavily-key",
+      providers: [{ id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: "provider-key" }],
+      mcpServers: {
+        docs: {
+          command: "server",
+          args: [],
+          env: { TOKEN: "mcp-token" },
+          disabled: false
+        }
+      }
+    });
+
+    expect(display.apiKey).toBe(REDACTED_SECRET_VALUE);
+    expect(display.tavilyApiKey).toBe(REDACTED_SECRET_VALUE);
+    expect(display.providers?.[0]?.apiKey).toBe(REDACTED_SECRET_VALUE);
+    expect(display.mcpServers?.docs?.env.TOKEN).toBe(REDACTED_SECRET_VALUE);
+
+    expect(
+      mergeRedactedMcpServers(
+        {
+          docs: {
+            command: "server",
+            args: [],
+            env: { TOKEN: REDACTED_SECRET_VALUE },
+            disabled: false
+          }
+        },
+        {
+          docs: {
+            command: "server",
+            args: [],
+            env: { TOKEN: "mcp-token" },
+            disabled: false
+          }
+        }
+      ).docs.env.TOKEN
+    ).toBe("mcp-token");
+  });
+
   it("ignores empty env vars", async () => {
     await saveConfig({ apiKey: "saved-key", model: "saved-model" });
     process.env.ARIVU_API_KEY = "";
@@ -110,6 +171,41 @@ describe("config", () => {
   it("reuses standard Tavily API key env var", async () => {
     process.env.TAVILY_API_KEY = "tvly-standard";
     await expect(loadConfig()).resolves.toMatchObject({ tavilyApiKey: "tvly-standard" });
+  });
+
+  it("saves workspace capability policy overrides by absolute workspace root", async () => {
+    const workspaceRoot = path.join(tempDir, "repo");
+    await saveConfig({
+      workspacePolicies: updateWorkspacePolicy({}, workspaceRoot, {
+        read_repo: "prompt",
+        write_workspace: "prompt",
+        browser_control: "deny"
+      })
+    });
+
+    const loaded = await loadConfig({ includeEnv: false });
+    expect(workspacePolicyOverridesForRoot(loaded, workspaceRoot)).toEqual({
+      read_repo: "prompt",
+      write_workspace: "prompt",
+      browser_control: "deny"
+    });
+    expect(workspacePolicyOverridesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
+  });
+
+  it("normalizes workspace capability policy overrides", () => {
+    const workspaceRoot = path.join(tempDir, "repo");
+    const policies = updateWorkspacePolicy({}, workspaceRoot, {
+      write_workspace: "prompt",
+      browser_control: "deny",
+      read_repo: "deny"
+    } as ReturnType<typeof normalizeWorkspacePolicyOverrides>);
+
+    expect(Object.keys(policies[path.resolve(workspaceRoot)]?.overrides ?? {})).toEqual([
+      "write_workspace",
+      "browser_control",
+      "read_repo"
+    ]);
+    expect(updateWorkspacePolicy(policies, workspaceRoot, {})).toEqual({});
   });
 
   it("migrates legacy config and data directories without overwriting Arivu files", async () => {

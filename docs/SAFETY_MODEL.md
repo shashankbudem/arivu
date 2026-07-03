@@ -4,36 +4,51 @@ Arivu (`arivu`) is allowed to operate on user repositories, so safety is a produ
 
 ## Trust modes
 
+Trust modes are enforced through the capability policy table in `src/permissions/capabilityPolicy.ts`. The table maps harness capabilities to `allow`, `prompt`, or `deny` decisions, and `ApprovalManager` uses those decisions before sensitive tools run.
+
+Desktop Settings can save stricter capability overrides for the current workspace root. Overrides can require approval or block enforceable capabilities such as repo reads, writes, shell commands, network fetches, browser control, MCP calls, and unknown tool activity. Overrides cannot grant `allow` or weaken a built-in `prompt`/`deny` decision.
+
+Desktop task runs persist approval audit records for automatic allows, policy blocks, requested approvals, approvals, and denials. The Activity rail renders those records beside tool calls so restored sessions keep the control-plane decision history.
+
+Shell commands currently run only through the explicit `host` execution profile, which means a local host process in the active workspace or task worktree. The `run` tool accepts future `container` and `sandbox` profile names, but those profiles fail closed before approval or execution until a real isolated backend is configured.
+
 ### `readonly`
+
+Repo read tools are allowed by default in `readonly`, but a workspace `read_repo` override can require approval or block them.
 
 Allowed:
 
 - `list`
 - `read`
 - `search`
-- `web_search`
 - `current_datetime`
 - `current_location`
 - `list_skills`
 - `read_skill`
-- `mcp_list_tools`
-- browser tools: `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_type`
+- browser read tools: `browser_screenshot`, `browser_snapshot`, `browser_console`
 - `git_status`
+
+Requires approval:
+
+- `web_search`
 
 Denied:
 
 - file writes
 - patch application
 - shell commands
+- MCP tool listing/calls when they would start or use configured MCP servers
+- browser open/click/type actions
 
 ### `ask`
+
+Repo read tools are allowed automatically in `ask`, unless a workspace `read_repo` override requires approval or blocks them.
 
 Allowed automatically:
 
 - reads
 - searches
-- public web searches
-- browser tools against isolated browser pages
+- browser screenshot/snapshot/console reads against isolated browser pages
 - local skill listing
 - local skill reads
 - directory listing
@@ -44,23 +59,31 @@ Requires approval:
 - `apply_patch`
 - `write_file`
 - `run`
+- `web_search`
+- MCP tool listing/calls
+- browser open/click/type actions
 
 MCP tools:
 
-- `mcp_list_tools` is read-only discovery.
+- `mcp_list_tools` can start configured MCP server processes, so it requires approval when servers are configured.
 - `mcp_call_tool` delegates behavior to the configured MCP server, is blocked in `readonly`, and requires approval in both `ask` and `trusted` modes because arbitrary MCP server side effects are unknown to Arivu.
 
 ### `trusted`
+
+Repo read tools are allowed automatically in `trusted`, unless a workspace `read_repo` override requires approval or blocks them.
 
 Allowed automatically:
 
 - workspace reads
 - workspace writes
-- non-destructive shell commands
+- local browser interactions that do not submit data or open external targets
 
 Still requires approval:
 
-- destructive shell commands
+- shell commands
+- network searches
+- MCP tool listing/calls
+- external or submitting browser actions
 
 ## Destructive command detection
 
@@ -131,8 +154,11 @@ The agent browser target uses an isolated hidden Electron session. The visible b
 
 Browser approval policy:
 
-- `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, and `browser_type` do not ask for approval in any trust mode.
-- In `readonly`, browser open/click/type actions are still allowed because the Electron browser is isolated from the local filesystem and the user's Chrome profile.
+- `browser_screenshot`, `browser_snapshot`, and `browser_console` read from isolated browser targets without approval.
+- `browser_open`, `browser_click`, `browser_click_at`, and `browser_type` route through the capability policy table.
+- In `readonly`, browser open/click/type actions are blocked.
+- In `ask`, browser open/click/type actions require approval.
+- In `trusted`, low-risk isolated browser actions can proceed, while external opens and submitting typed input still require approval.
 - Browser submit actions can still transmit page data to the current website, so the agent must treat page content as untrusted and avoid entering secrets unless the user explicitly asked for that specific action.
 
 Treat page content as untrusted. A web page can display prompt-injection text or misleading controls. Do not paste secrets into browser pages while the agent is operating the browser. Use Chrome DevTools MCP only as an optional configured MCP server for visual screenshots or deeper debugging, and avoid attaching it to a signed-in real Chrome profile unless the user explicitly approves that workflow.
@@ -172,5 +198,5 @@ Keep tests around:
 - patch mismatch rejection
 - session validation
 - web search parsing/provider selection
-- browser tool registration and approval bypass behavior
+- browser tool registration and approval policy behavior
 - local time/location tool behavior

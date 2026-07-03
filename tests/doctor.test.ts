@@ -58,4 +58,27 @@ describe("doctor diagnostics", () => {
     expect(report.checks.find((check) => check.id === "streaming")?.status).toBe("pass");
     expect(report.checks.find((check) => check.id === "tool-calling")?.status).toBe("warn");
   });
+
+  it("bounds response bodies before including diagnostics", async () => {
+    const report = await runDoctor(
+      {
+        apiKey: "test-key",
+        baseUrl: "https://api.example.test/v1",
+        model: "test-model",
+        trustMode: "ask"
+      },
+      {
+        async fetcher(input) {
+          if (String(input).endsWith("/models")) {
+            return new Response("x".repeat(200_000), { status: 500 });
+          }
+          return Response.json({});
+        }
+      }
+    );
+
+    const detail = report.checks.find((check) => check.id === "models")?.detail ?? "";
+    expect(detail.length).toBeLessThan(600);
+    expect(detail).toContain("[truncated]");
+  });
 });

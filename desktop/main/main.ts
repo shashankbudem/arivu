@@ -3,8 +3,8 @@ import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
-import type { WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import type { IpcMainInvokeEvent, NativeImage, WebContents } from "electron";
 import { execa } from "execa";
 import { Agent } from "../../src/agent/Agent.js";
 import { compactSessionMessages } from "../../src/agent/contextCompaction.js";
@@ -13,6 +13,7 @@ import {
   chatContentToText,
   trimChatContent
 } from "../../src/agent/content.js";
+import { buildTaskRunReportRemediationInstruction } from "../../src/agent/reportRemediation.js";
 import { createSkill, discoverSkills, globalSkillsDir, type CreateSkillInput, type SkillSummary } from "../../src/agent/skills.js";
 import { OpenAICompatibleChatClient } from "../../src/agent/OpenAICompatibleChatClient.js";
 import {
@@ -20,8 +21,10 @@ import {
   MAX_PROMPT_IMAGE_BYTES as MAX_IMAGE_BYTES,
   normalizePromptLoopOptions,
   normalizePromptPayload,
+  normalizePromptPlanOptions,
   normalizePromptReuseLastUserMessage,
   normalizePromptSkillNames,
+  normalizePromptWorktreeOptions,
   type PromptImageAttachment as ImageAttachment,
   type PromptPayload
 } from "../../src/agent/promptPayload.js";
@@ -33,15 +36,69 @@ import {
   type ModelProviderCandidate,
   type ModelSelection
 } from "../../src/agent/modelRouter.js";
-import type { AgentLoopState, AgentRunEvent, AgentSession, ChatMessage, ToolSchema } from "../../src/agent/types.js";
-import { appDataDir, appEnv, loadConfig, saveConfig, type AppConfig, type LlmProviderProfile } from "../../src/config.js";
+import {
+  capabilityForToolName,
+  createAgentTaskRun,
+  finishTaskRun,
+  markTaskRunRunning,
+  recordTaskRunApproval,
+  recordTaskRunAssistantCompletion,
+  recordTaskRunAssistantPlan,
+  recordTaskRunEvent,
+  trimTaskRuns
+} from "../../src/agent/taskRuns.js";
+import {
+  abortTaskWorktreeConflict,
+  cleanupMergedTaskWorktree,
+  continueTaskWorktreeConflict,
+  createTaskWorktreePullRequest,
+  createTaskWorktree,
+  discardTaskWorktree,
+  mergeTaskWorktree,
+  prepareTaskWorktreePullRequest,
+  previewTaskWorktreePatch,
+  refreshTaskWorktreePullRequest,
+  resolveTaskWorktreePath,
+  summarizeTaskWorktree,
+  syncTaskWorktreeWithOriginal,
+  taskWorktreeInstruction
+} from "../../src/agent/taskWorktree.js";
+import type {
+  AgentLoopState,
+  AgentRunEvent,
+  AgentSession,
+  AgentTaskRun,
+  AgentTaskRunApprovalEvent,
+  AgentTaskRunArtifact,
+  AgentTaskRunVerificationStatus,
+  AgentTaskRunWorktreeStatus,
+  ChatMessage,
+  ToolSchema
+} from "../../src/agent/types.js";
+import {
+  appDataDir,
+  appEnv,
+  loadConfig,
+  mergeRedactedMcpServers,
+  redactMcpServers,
+  saveConfig,
+  workspacePolicyOverridesForRoot,
+  type AppConfig,
+  type LlmProviderProfile
+} from "../../src/config.js";
 import { runDoctor, type DoctorReport } from "../../src/diagnostics/doctor.js";
 import { ApprovalManager } from "../../src/permissions/ApprovalManager.js";
+import { describeCapabilityPolicies, evaluateCapabilityPolicy } from "../../src/permissions/capabilityPolicy.js";
+import type { CapabilityPolicyOverrides } from "../../src/permissions/capabilityPolicy.js";
 import { SessionStore } from "../../src/sessions/SessionStore.js";
+import { resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
 import type { BrowserBounds, BrowserMode, BrowserState } from "../../src/tools/browserControl.js";
 import { detectWorkspace, type WorkspaceInfo } from "../../src/workspace.js";
 import { DesktopBrowserController } from "./browserController.js";
+import { isExternalHttpUrl, isTrustedAppNavigationUrl } from "./navigationSafety.js";
+
+const PLAN_MODE_TOOL_NAMES = ["list", "read", "search", "git_status", "current_datetime", "current_location", "list_skills", "read_skill"];
 
 type PublicConfig = {
   baseUrl: string;
@@ -52,6 +109,7 @@ type PublicConfig = {
   apiKeyPresent: boolean;
   tavilyApiKeyPresent: boolean;
   mcpServers: AppConfig["mcpServers"];
+  workspacePolicies: AppConfig["workspacePolicies"];
 };
 
 type DesktopState = {
@@ -63,6 +121,7 @@ type DesktopState = {
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
   agentLoop?: AgentLoopState;
+  taskRuns?: AgentTaskRun[];
   sessionId?: string;
   messages: ChatMessage[];
 };
@@ -75,6 +134,14 @@ type ToolSummary = {
   parameters: string[];
   status: ToolStatus;
   statusLabel: string;
+};
+
+type CapabilityPolicyResult = {
+  currentTrustMode: AppConfig["trustMode"];
+  source: "built-in" | "workspace";
+  workspaceRoot: string;
+  workspaceOverrides: CapabilityPolicyOverrides;
+  policies: ReturnType<typeof describeCapabilityPolicies>;
 };
 
 type SkillListResult = {
@@ -97,11 +164,71 @@ type SessionSummary = {
   selectedProviderName?: string;
   modelSelectionReason?: string;
   agentLoop?: AgentLoopState;
+  taskRuns?: AgentTaskRun[];
   trustMode: AppConfig["trustMode"];
   messageCount: number;
   running: boolean;
   createdAt: string;
   updatedAt: string;
+};
+
+type TaskWorktreeActionInput = {
+  sessionId?: string;
+  taskRunId?: string;
+  action?:
+    | "open"
+    | "refresh"
+    | "preview"
+    | "merge"
+    | "discard"
+    | "cleanup"
+    | "prepare_pr"
+    | "create_pr"
+    | "refresh_pr"
+    | "sync"
+    | "continue_conflict"
+    | "abort_conflict"
+    | "open_conflict_file";
+  conflictPath?: string;
+};
+
+type TaskRunPlanActionInput = {
+  sessionId?: string;
+  taskRunId?: string;
+  action?: "approve" | "request_revision" | "cancel";
+};
+
+type TaskWorktreeInventoryItem = {
+  sessionId: string;
+  sessionTitle: string;
+  taskRunId: string;
+  promptPreview: string;
+  status: AgentTaskRun["status"];
+  verificationStatus?: AgentTaskRunVerificationStatus;
+  verificationSummary?: string;
+  worktreeStatus: AgentTaskRunWorktreeStatus;
+  branch?: string;
+  path?: string;
+  folderExists: boolean;
+  canOpen: boolean;
+  canPreparePullRequest: boolean;
+  canCreatePullRequest: boolean;
+  canDiscard: boolean;
+  canCleanup: boolean;
+  pullRequestTitle?: string;
+  pullRequestPreparedAt?: string;
+  pullRequestUrl?: string;
+  changedFiles?: number;
+  updatedAt: string;
+  createdAt?: string;
+};
+
+type OpenTaskRunEvidenceInput = {
+  sessionId?: string;
+  taskRunId?: string;
+  artifactId?: string;
+  path?: string;
+  line?: number;
 };
 
 type PublicModelSelection = {
@@ -119,6 +246,7 @@ type SessionLifecycleEvent = {
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
   agentLoop?: AgentLoopState;
+  taskRuns?: AgentTaskRun[];
   output?: string;
   error?: string;
 };
@@ -132,6 +260,7 @@ type ConfigPatch = {
   providers?: LlmProviderPatch[];
   trustMode?: AppConfig["trustMode"];
   mcpServers?: AppConfig["mcpServers"];
+  workspacePolicies?: AppConfig["workspacePolicies"];
 };
 
 type PublicLlmProviderProfile = Omit<LlmProviderProfile, "apiKey"> & {
@@ -178,6 +307,8 @@ const rendererIndex = path.resolve(currentDir, "../renderer/index.html");
 const devUrl = appEnv("DESKTOP_DEV_URL");
 const MODEL_LIST_CACHE_TTL_MS = 10 * 60 * 1000;
 const AUTO_MODEL_LIST_TIMEOUT_MS = 4_000;
+const MANUAL_MODEL_LIST_TIMEOUT_MS = 10_000;
+const MODEL_LIST_BODY_LIMIT_BYTES = 256 * 1024;
 let mainWindow: BrowserWindow | undefined;
 const pendingApprovals = new Map<string, (approved: boolean) => void>();
 const browserController = new DesktopBrowserController();
@@ -208,6 +339,7 @@ class DesktopController {
       runningSessionIds: Array.from(this.runningSessionIds),
       modelSelection: publicModelSelectionForSession(this.session),
       agentLoop: this.session?.agentLoop,
+      taskRuns: this.session?.taskRuns,
       sessionId: this.session?.id,
       messages: this.session?.messages ?? []
     };
@@ -224,6 +356,23 @@ class DesktopController {
 
     this.cwd = result.filePaths[0];
     this.projectRoot = result.filePaths[0];
+    this.session = undefined;
+    this.markActiveViewChanged();
+    return this.state();
+  }
+
+  async openWorkspace(workspaceRoot: string) {
+    if (typeof workspaceRoot !== "string" || workspaceRoot.trim().length === 0) {
+      throw new Error("Workspace path is required.");
+    }
+
+    const nextRoot = path.resolve(workspaceRoot);
+    if (!(await pathExistsAsDirectory(nextRoot))) {
+      throw new Error(`Workspace is unavailable: ${nextRoot}`);
+    }
+
+    this.cwd = nextRoot;
+    this.projectRoot = nextRoot;
     this.session = undefined;
     this.markActiveViewChanged();
     return this.state();
@@ -312,6 +461,10 @@ class DesktopController {
     }
 
     const nextRoot = path.resolve(projectRoot);
+    if (!(await pathExistsAsDirectory(nextRoot))) {
+      throw new Error(`Project is unavailable: ${nextRoot}`);
+    }
+
     this.cwd = nextRoot;
     this.projectRoot = nextRoot;
     this.markActiveViewChanged();
@@ -399,6 +552,343 @@ class DesktopController {
     return this.state();
   }
 
+  async listTaskWorktrees(): Promise<{ worktrees: TaskWorktreeInventoryItem[] }> {
+    const sessions = await this.store.list();
+    const worktrees: TaskWorktreeInventoryItem[] = [];
+    for (const session of sessions) {
+      for (const run of session.taskRuns ?? []) {
+        const worktree = run.worktree;
+        if (!worktree?.enabled) {
+          continue;
+        }
+        const folderExists = worktree.path ? await pathExistsAsDirectory(worktree.path) : false;
+        const mutationLocked = ["queued", "running"].includes(run.status) || this.runningSessionIds.has(session.id);
+        const verificationBlocked = run.verification?.status === "failed";
+        const conflictBlocked = Boolean(worktree.conflict);
+        const hasManagedIdentity = Boolean(worktree.originalRoot && worktree.path && worktree.branch);
+        worktrees.push({
+          sessionId: session.id,
+          sessionTitle: sessionTitle(session),
+          taskRunId: run.id,
+          promptPreview: run.promptPreview,
+          status: run.status,
+          verificationStatus: run.verification?.status,
+          verificationSummary: run.verification?.summary,
+          worktreeStatus: worktree.status,
+          branch: worktree.branch,
+          path: worktree.path,
+          folderExists,
+          canOpen: folderExists && Boolean(worktree.path) && !["discarded", "cleaned"].includes(worktree.status),
+          canPreparePullRequest:
+            !verificationBlocked &&
+            !conflictBlocked &&
+            !mutationLocked &&
+            folderExists &&
+            hasManagedIdentity &&
+            worktree.status === "ready" &&
+            Boolean(worktree.patchPreview) &&
+            !worktree.pullRequest?.url,
+          canCreatePullRequest:
+            !verificationBlocked &&
+            !conflictBlocked &&
+            !mutationLocked &&
+            folderExists &&
+            hasManagedIdentity &&
+            worktree.status === "ready" &&
+            Boolean(worktree.pullRequest?.remoteName && worktree.pullRequest.baseBranch && !worktree.pullRequest.url),
+          canDiscard: !mutationLocked && hasManagedIdentity && ["ready", "failed"].includes(worktree.status),
+          canCleanup: !mutationLocked && hasManagedIdentity && worktree.status === "merged",
+          pullRequestTitle: worktree.pullRequest?.title,
+          pullRequestPreparedAt: worktree.pullRequest?.preparedAt,
+          pullRequestUrl: worktree.pullRequest?.url,
+          changedFiles: worktree.diff?.files,
+          updatedAt: run.updatedAt,
+          createdAt: worktree.createdAt
+        });
+      }
+    }
+    return {
+      worktrees: worktrees.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+    };
+  }
+
+  async taskWorktreeAction(input: TaskWorktreeActionInput = {}) {
+    const sessionId = typeof input.sessionId === "string" && input.sessionId.trim() ? input.sessionId.trim() : this.session?.id;
+    const taskRunId = typeof input.taskRunId === "string" && input.taskRunId.trim() ? input.taskRunId.trim() : undefined;
+    const action = input.action;
+    if (!sessionId) {
+      throw new Error("No active chat for task worktree action.");
+    }
+    if (!taskRunId) {
+      throw new Error("Task run id is required.");
+    }
+    if (
+      !action ||
+      ![
+        "open",
+        "refresh",
+        "preview",
+        "merge",
+        "discard",
+        "cleanup",
+        "prepare_pr",
+        "create_pr",
+        "refresh_pr",
+        "sync",
+        "continue_conflict",
+        "abort_conflict",
+        "open_conflict_file"
+      ].includes(action)
+    ) {
+      throw new Error("Unsupported task worktree action.");
+    }
+
+    const session = this.session?.id === sessionId ? this.session : await this.store.load(sessionId);
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun?.worktree?.enabled) {
+      throw new Error("This task run does not have a worktree.");
+    }
+    if (!["open", "refresh", "refresh_pr", "open_conflict_file"].includes(action) && this.runningSessionIds.has(session.id)) {
+      throw new Error("Wait for the agent to finish before changing a task worktree.");
+    }
+    if (!["open", "refresh", "refresh_pr", "open_conflict_file"].includes(action) && ["queued", "running"].includes(taskRun.status)) {
+      throw new Error("Wait for this task run to finish before changing its worktree.");
+    }
+
+    const worktree = taskRun.worktree;
+    try {
+      if (action === "open") {
+        const target = await resolveTaskWorktreePath(worktree);
+        const targetStat = await stat(target);
+        if (!targetStat.isDirectory()) {
+          throw new Error("Task worktree target is not a folder.");
+        }
+        const error = await shell.openPath(target);
+        if (error) {
+          throw new Error(error);
+        }
+        return this.state();
+      } else if (action === "open_conflict_file") {
+        if (!worktree.conflict) {
+          throw new Error("No task worktree conflict is currently recorded.");
+        }
+        const conflictPath = typeof input.conflictPath === "string" ? input.conflictPath.trim() : "";
+        if (!conflictPath) {
+          throw new Error("Conflict file path is required.");
+        }
+        if (!worktree.conflict.files.includes(conflictPath)) {
+          throw new Error("Conflict file is not recorded on this task worktree.");
+        }
+        const worktreeRoot = await resolveTaskWorktreePath(worktree);
+        const target = await resolveSafeWorkspacePath(worktreeRoot, conflictPath);
+        const targetStat = await stat(target);
+        if (!targetStat.isFile()) {
+          throw new Error("Conflict file target is not a file.");
+        }
+        const error = await shell.openPath(target);
+        if (error) {
+          throw new Error(error);
+        }
+        return this.state();
+      } else if (action === "refresh") {
+        worktree.diff = await summarizeTaskWorktree(worktree);
+        worktree.patchPreview = undefined;
+        worktree.error = undefined;
+      } else if (action === "preview") {
+        if (worktree.status !== "ready") {
+          throw new Error("Only ready task worktrees can be previewed.");
+        }
+        if (worktree.conflict) {
+          throw new Error("Resolve or abort the task worktree conflict before previewing.");
+        }
+        const result = await previewTaskWorktreePatch(worktree);
+        worktree.diff = result.diff;
+        worktree.patchPreview = result.patchPreview;
+        worktree.error = undefined;
+      } else if (action === "merge") {
+        if (worktree.status !== "ready") {
+          throw new Error("Only ready task worktrees can be merged.");
+        }
+        if (worktree.conflict) {
+          throw new Error("Resolve or abort the task worktree conflict before merging.");
+        }
+        const result = await mergeTaskWorktree(worktree, { taskRunId: taskRun.id, verification: taskRun.verification });
+        worktree.status = result.status;
+        worktree.diff = result.diff;
+        worktree.mergeCommit = result.mergeCommit;
+        worktree.mergedAt = result.mergedAt;
+        worktree.conflict = undefined;
+        worktree.error = undefined;
+      } else if (action === "prepare_pr") {
+        if (worktree.conflict) {
+          throw new Error("Resolve or abort the task worktree conflict before preparing a PR draft.");
+        }
+        const result = await prepareTaskWorktreePullRequest(worktree, {
+          taskRunId: taskRun.id,
+          promptPreview: taskRun.promptPreview,
+          verification: taskRun.verification
+        });
+        worktree.diff = result.diff;
+        worktree.pullRequest = result.pullRequest;
+        worktree.conflict = undefined;
+        worktree.error = undefined;
+      } else if (action === "create_pr") {
+        if (worktree.conflict) {
+          throw new Error("Resolve or abort the task worktree conflict before creating a PR.");
+        }
+        const result = await createTaskWorktreePullRequest(worktree, { verification: taskRun.verification });
+        worktree.pullRequest = result.pullRequest;
+        worktree.error = undefined;
+      } else if (action === "refresh_pr") {
+        const result = await refreshTaskWorktreePullRequest(worktree);
+        worktree.pullRequest = result.pullRequest;
+        worktree.error = undefined;
+      } else if (action === "sync") {
+        if (worktree.status !== "ready") {
+          throw new Error("Only ready task worktrees can be synced.");
+        }
+        const result = await syncTaskWorktreeWithOriginal(worktree, { taskRunId: taskRun.id });
+        worktree.diff = result.diff;
+        worktree.conflict = result.conflict;
+        worktree.patchPreview = undefined;
+        worktree.pullRequest = undefined;
+        worktree.error = result.conflict?.message;
+      } else if (action === "continue_conflict") {
+        if (worktree.status !== "ready") {
+          throw new Error("Only ready task worktrees can continue conflict resolution.");
+        }
+        const result = await continueTaskWorktreeConflict(worktree);
+        worktree.diff = result.diff;
+        worktree.conflict = undefined;
+        worktree.patchPreview = undefined;
+        worktree.pullRequest = undefined;
+        worktree.error = undefined;
+      } else if (action === "abort_conflict") {
+        if (worktree.status !== "ready") {
+          throw new Error("Only ready task worktrees can abort conflict resolution.");
+        }
+        const result = await abortTaskWorktreeConflict(worktree);
+        worktree.diff = result.diff;
+        worktree.conflict = undefined;
+        worktree.patchPreview = undefined;
+        worktree.pullRequest = undefined;
+        worktree.error = undefined;
+      } else if (action === "discard") {
+        if (!["ready", "failed"].includes(worktree.status)) {
+          throw new Error("Only ready or failed task worktrees can be discarded.");
+        }
+        const result = await discardTaskWorktree(worktree);
+        worktree.status = result.status;
+        worktree.discardedAt = result.discardedAt;
+        worktree.error = undefined;
+      } else {
+        const result = await cleanupMergedTaskWorktree(worktree);
+        worktree.status = result.status;
+        worktree.cleanedAt = result.cleanedAt;
+        worktree.error = undefined;
+      }
+    } catch (error) {
+      worktree.error = formatError(error);
+      taskRun.updatedAt = new Date().toISOString();
+      session.updatedAt = taskRun.updatedAt;
+      await this.store.save(session);
+      if (this.session?.id === session.id) {
+        this.session = session;
+      }
+      await this.sendSessionLifecycleEvent("updated", session);
+      throw error;
+    }
+
+    taskRun.updatedAt = new Date().toISOString();
+    session.updatedAt = taskRun.updatedAt;
+    await this.store.save(session);
+    if (this.session?.id === session.id) {
+      this.session = session;
+    }
+    await this.sendSessionLifecycleEvent("updated", session);
+    return this.state();
+  }
+
+  async taskRunPlanAction(input: TaskRunPlanActionInput = {}) {
+    const sessionId = typeof input.sessionId === "string" && input.sessionId.trim() ? input.sessionId.trim() : this.session?.id;
+    const taskRunId = typeof input.taskRunId === "string" && input.taskRunId.trim() ? input.taskRunId.trim() : undefined;
+    const action = input.action;
+    if (!sessionId) {
+      throw new Error("No active chat for plan action.");
+    }
+    if (!taskRunId) {
+      throw new Error("Task run id is required.");
+    }
+    if (!action || !["approve", "request_revision", "cancel"].includes(action)) {
+      throw new Error("Unsupported plan action.");
+    }
+
+    const session = this.session?.id === sessionId ? this.session : await this.store.load(sessionId);
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun?.planMode?.enabled) {
+      throw new Error("This task run is not a plan approval run.");
+    }
+    if (!taskRun.plan || (!taskRun.plan.summary && taskRun.plan.items.length === 0)) {
+      throw new Error("This task run does not have a captured plan.");
+    }
+    if (this.runningSessionIds.has(session.id) || ["queued", "running"].includes(taskRun.status)) {
+      throw new Error("Wait for the agent to finish before changing plan review state.");
+    }
+
+    const now = new Date().toISOString();
+    taskRun.planReview = {
+      status: planReviewStatusForAction(action),
+      updatedAt: now
+    };
+    taskRun.updatedAt = now;
+    session.updatedAt = now;
+    await this.store.save(session);
+    if (this.session?.id === session.id) {
+      this.session = session;
+    }
+    await this.sendSessionLifecycleEvent("updated", session);
+    return this.state();
+  }
+
+  async openTaskRunEvidence(input: OpenTaskRunEvidenceInput = {}) {
+    const sessionId = typeof input.sessionId === "string" && input.sessionId.trim() ? input.sessionId.trim() : this.session?.id;
+    const taskRunId = typeof input.taskRunId === "string" && input.taskRunId.trim() ? input.taskRunId.trim() : undefined;
+    const artifactId = typeof input.artifactId === "string" && input.artifactId.trim() ? input.artifactId.trim() : undefined;
+    const requestedPath = typeof input.path === "string" && input.path.trim() ? input.path.trim() : undefined;
+    if (!sessionId) {
+      throw new Error("No active chat for task-run evidence.");
+    }
+    if (!taskRunId || !artifactId || !requestedPath) {
+      throw new Error("Task run id, artifact id, and evidence path are required.");
+    }
+
+    const session = this.session?.id === sessionId ? this.session : await this.store.load(sessionId);
+    const taskRun = this.findTaskRun(session, taskRunId);
+    const artifact = taskRun?.artifacts.find((candidate) => candidate.id === artifactId);
+    if (!taskRun || !artifact) {
+      throw new Error("Task-run evidence was not found.");
+    }
+    if (!taskRunArtifactIncludesEvidencePath(artifact, requestedPath)) {
+      throw new Error("Evidence path is not attached to this task run.");
+    }
+
+    const workspaceRoot = taskRunExecutionRoot(session, taskRun);
+    const target = await resolveSafeWorkspacePath(workspaceRoot, requestedPath);
+    const targetStat = await stat(target);
+    if (!targetStat.isFile() && !targetStat.isDirectory()) {
+      throw new Error("Evidence target is not a file or folder.");
+    }
+
+    const error = await shell.openPath(target);
+    if (error) {
+      throw new Error(error);
+    }
+    return {
+      path: target,
+      line: typeof input.line === "number" && Number.isInteger(input.line) && input.line > 0 ? input.line : undefined
+    };
+  }
+
   async saveConfigPatch(patch: ConfigPatch) {
     const saved = await loadConfig({ includeEnv: false });
     const next: Partial<AppConfig> = {
@@ -434,7 +924,10 @@ class DesktopController {
       next.tavilyApiKey = patch.tavilyApiKey.trim();
     }
     if (patch.mcpServers) {
-      next.mcpServers = patch.mcpServers;
+      next.mcpServers = mergeRedactedMcpServers(patch.mcpServers, saved.mcpServers);
+    }
+    if (patch.workspacePolicies) {
+      next.workspacePolicies = patch.workspacePolicies;
     }
     if (activeProviderId && next.providers?.some((provider) => provider.id === activeProviderId)) {
       next.providers = updateProviderRuntime(next.providers, activeProviderId, patch);
@@ -470,16 +963,14 @@ class DesktopController {
       headers.Authorization = `Bearer ${apiKey}`;
     }
 
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
-      headers
-    });
+    const response = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/models`, { headers }, MANUAL_MODEL_LIST_TIMEOUT_MS);
+    const body = await readBoundedResponseText(response, MODEL_LIST_BODY_LIMIT_BYTES);
 
     if (!response.ok) {
-      const body = await response.text();
       throw new Error(`Model list request failed (${response.status}): ${body}`);
     }
 
-    const json = (await response.json()) as ModelListResponse;
+    const json = JSON.parse(body) as ModelListResponse;
     const models = (json.data ?? [])
       .map((model) => model.id)
       .filter((id): id is string => Boolean(id))
@@ -496,9 +987,10 @@ class DesktopController {
   async listTools(): Promise<{ tools: ToolSummary[] }> {
     const config = await this.effectiveConfig();
     const workspace = await detectWorkspace(this.cwd);
+    const policyOverrides = workspacePolicyOverridesForRoot(config, workspace.root);
     const registry = createToolRegistry({
       workspaceRoot: workspace.root,
-      approvals: new ApprovalManager(config.trustMode, async () => false),
+      approvals: new ApprovalManager(config.trustMode, async () => false, policyOverrides),
       tavilyApiKey: config.tavilyApiKey,
       mcpServers: config.mcpServers,
       browser: browserController
@@ -509,8 +1001,21 @@ class DesktopController {
         name: schema.name,
         description: schema.description,
         parameters: toolParameterNames(schema),
-        ...toolStatus(schema.name, config)
+        ...toolStatus(schema.name, config, policyOverrides)
       }))
+    };
+  }
+
+  async listCapabilityPolicies(): Promise<CapabilityPolicyResult> {
+    const config = await this.effectiveConfig();
+    const workspace = await detectWorkspace(this.cwd);
+    const workspaceOverrides = workspacePolicyOverridesForRoot(config, workspace.root);
+    return {
+      currentTrustMode: config.trustMode,
+      source: Object.keys(workspaceOverrides).length > 0 ? "workspace" : "built-in",
+      workspaceRoot: workspace.root,
+      workspaceOverrides,
+      policies: describeCapabilityPolicies(workspaceOverrides)
     };
   }
 
@@ -534,7 +1039,10 @@ class DesktopController {
     const content = normalizePromptPayload(prompt);
     const skillNames = normalizePromptSkillNames(prompt);
     const reuseLastUserMessage = normalizePromptReuseLastUserMessage(prompt);
+    const planOptions = normalizePromptPlanOptions(prompt);
     const loopOptions = normalizePromptLoopOptions(prompt);
+    const worktreeOptions = normalizePromptWorktreeOptions(prompt);
+    const planModeEnabled = planOptions.enabled;
     if (!chatContentHasRenderableContent(content)) {
       throw new Error("Prompt is required.");
     }
@@ -570,7 +1078,7 @@ class DesktopController {
     const before = session.messages.length;
     const lastMessage = session.messages.at(-1);
     const trimmedContent = trimChatContent(content);
-    const loopState = loopOptions.enabled ? createAgentLoopState(trimmedContent, loopOptions.maxIterations, now) : undefined;
+    const loopState = !planModeEnabled && loopOptions.enabled ? createAgentLoopState(trimmedContent, loopOptions.maxIterations, now) : undefined;
     const canReuseLastUserMessage =
       reuseLastUserMessage &&
       lastMessage?.role === "user" &&
@@ -588,11 +1096,131 @@ class DesktopController {
       session.agentLoop = undefined;
       this.loopStopRequests.delete(session.id);
     }
+    if (planModeEnabled) {
+      const planInstruction: ChatMessage = { role: "system", content: planningApprovalInstruction() };
+      if (canReuseLastUserMessage) {
+        session.messages.splice(Math.max(0, session.messages.length - 1), 0, planInstruction);
+      } else {
+        session.messages.push(planInstruction);
+      }
+    }
+    let userMessageIndex: number;
     if (canReuseLastUserMessage) {
       lastMessage.content = trimmedContent;
+      userMessageIndex = session.messages.indexOf(lastMessage);
     } else {
+      userMessageIndex = session.messages.length;
       session.messages.push({ role: "user", content: trimmedContent });
     }
+    const taskRun = createAgentTaskRun({
+      userMessageIndex: Math.max(0, userMessageIndex),
+      prompt: trimmedContent,
+      model: modelSelection.model,
+      providerName: modelSelection.providerName,
+      modelSelectionReason: modelSelection.reason,
+      loop: loopState,
+      planModeEnabled,
+      worktreeEnabled: !planModeEnabled && worktreeOptions.enabled,
+      now
+    });
+    let executionCwd = originCwd;
+    if (!planModeEnabled && worktreeOptions.enabled) {
+      const continuedRun = worktreeOptions.taskRunId ? this.findTaskRun(session, worktreeOptions.taskRunId) : undefined;
+      const replayRun = worktreeOptions.replayOfTaskRunId ? this.findTaskRun(session, worktreeOptions.replayOfTaskRunId) : undefined;
+      const plannedFromRun = worktreeOptions.plannedFromTaskRunId ? this.findTaskRun(session, worktreeOptions.plannedFromTaskRunId) : undefined;
+      if (worktreeOptions.taskRunId && !continuedRun?.worktree?.enabled) {
+        throw new Error("Task worktree to continue was not found.");
+      }
+      if (worktreeOptions.replayOfTaskRunId && !replayRun?.worktree?.enabled) {
+        throw new Error("Task worktree replay evidence run was not found.");
+      }
+      if (worktreeOptions.plannedFromTaskRunId && !plannedFromRun?.planMode?.enabled) {
+        throw new Error("Approved plan task run was not found.");
+      }
+      if (replayRun && !continuedRun?.worktree?.enabled) {
+        throw new Error("Replay checks require an existing task worktree continuation.");
+      }
+      if (plannedFromRun && (continuedRun || replayRun)) {
+        throw new Error("Approved plan worktree execution must start a new task worktree.");
+      }
+      if (plannedFromRun && plannedFromRun.planReview?.status !== "approved") {
+        throw new Error("Approve the plan before starting task worktree execution.");
+      }
+      if (plannedFromRun && (!plannedFromRun.plan || (!plannedFromRun.plan.summary && plannedFromRun.plan.items.length === 0))) {
+        throw new Error("Approved plan task run does not have a captured plan.");
+      }
+      if (continuedRun?.worktree?.enabled && continuedRun.worktree.status !== "ready") {
+        throw new Error("Only ready task worktrees can be continued.");
+      }
+      const worktree = continuedRun?.worktree?.enabled
+        ? {
+            originalRoot: continuedRun.worktree.originalRoot ?? originCwd,
+            path: await resolveTaskWorktreePath(continuedRun.worktree),
+            branch: continuedRun.worktree.branch ?? "arivu/task-unknown",
+            baseRef: continuedRun.worktree.baseRef ?? "unknown",
+            createdAt: continuedRun.worktree.createdAt ?? now
+          }
+        : await createTaskWorktree({ cwd: originCwd, sessionId: session.id, taskRunId: taskRun.id });
+      let replayOfTaskRunId: string | undefined;
+      if (continuedRun?.worktree?.enabled && replayRun?.worktree?.enabled) {
+        const replayPath = await resolveTaskWorktreePath(replayRun.worktree);
+        if (path.resolve(replayPath) !== path.resolve(worktree.path) || replayRun.worktree.branch !== worktree.branch) {
+          throw new Error("Replay evidence must belong to the same managed task worktree.");
+        }
+        replayOfTaskRunId = replayRun.id;
+      }
+      const worktreePathStat = await stat(worktree.path);
+      if (!worktreePathStat.isDirectory()) {
+        throw new Error("Task worktree target is not a folder.");
+      }
+      taskRun.worktree = continuedRun?.worktree?.enabled
+        ? {
+            enabled: true,
+            status: "ready",
+            originalRoot: worktree.originalRoot,
+            path: worktree.path,
+            branch: worktree.branch,
+            baseRef: worktree.baseRef,
+            createdAt: worktree.createdAt,
+            continuedFromTaskRunId: continuedRun.id,
+            replayOfTaskRunId
+          }
+        : {
+            enabled: true,
+            status: "ready",
+            plannedFromTaskRunId: plannedFromRun?.id,
+            ...worktree
+          };
+      executionCwd = worktree.path;
+      const worktreeInstruction: ChatMessage = {
+        role: "system",
+        content: [
+          taskWorktreeInstruction(worktree),
+          plannedFromRun
+            ? [
+                `This prompt executes approved plan task run ${plannedFromRun.id} in a new task worktree. Keep changes scoped to that approved plan.`,
+                "At the end of your final response, include a `Completion notes:` checklist with one bullet per approved plan item.",
+                "Prefix each completion bullet with `Completed:`, `Needs evidence:`, or `Blocked:` and mention the matching files or verification commands when possible."
+              ].join("\n")
+            : undefined,
+          continuedRun ? `This prompt continues existing task run ${continuedRun.id}. Keep the repair in the same task worktree.` : undefined,
+          replayOfTaskRunId
+            ? `This prompt replays verification evidence from task run ${replayOfTaskRunId}. Rerun the selected commands against the current task worktree and report the results.`
+            : undefined
+        ]
+          .filter((line): line is string => Boolean(line))
+          .join("\n")
+      };
+      const instructionIndex = canReuseLastUserMessage ? session.messages.indexOf(lastMessage) : userMessageIndex;
+      if (canReuseLastUserMessage) {
+        session.messages.splice(instructionIndex >= 0 ? instructionIndex : Math.max(0, session.messages.length - 1), 0, worktreeInstruction);
+      } else {
+        session.messages.splice(userMessageIndex, 0, worktreeInstruction);
+      }
+      taskRun.userMessageIndex += 1;
+    }
+    markTaskRunRunning(taskRun, now);
+    session.taskRuns = trimTaskRuns([...(session.taskRuns ?? []), taskRun]);
     session.updatedAt = now;
     if (this.activeViewRevision === originRevision) {
       this.session = session;
@@ -610,6 +1238,9 @@ class DesktopController {
       skillNames,
       config,
       loopEnabled: Boolean(loopState),
+      planModeEnabled,
+      taskRunId: taskRun.id,
+      executionCwd,
       eventTarget
     });
 
@@ -620,6 +1251,7 @@ class DesktopController {
       newMessages: session.messages.slice(before),
       modelSelection: publicModelSelection(modelSelection),
       agentLoop: session.agentLoop,
+      taskRuns: session.taskRuns,
       running: true
     };
   }
@@ -630,6 +1262,9 @@ class DesktopController {
     skillNames,
     config,
     loopEnabled,
+    planModeEnabled,
+    taskRunId,
+    executionCwd,
     eventTarget
   }: {
     session: AgentSession;
@@ -637,13 +1272,22 @@ class DesktopController {
     skillNames: string[];
     config: AppConfig;
     loopEnabled: boolean;
+    planModeEnabled: boolean;
+    taskRunId?: string;
+    executionCwd?: string;
     eventTarget?: WebContents;
   }) {
-    const approvals = new ApprovalManager(config.trustMode, (message) => requestApproval(message));
+    const policyWorkspace = await detectWorkspace(session.cwd);
+    const approvals = new ApprovalManager(
+      config.trustMode,
+      (message) => requestApproval(message),
+      workspacePolicyOverridesForRoot(config, policyWorkspace.root),
+      (event) => this.recordApprovalEvent(session, taskRunId, event)
+    );
     const agent = new Agent({
       client: new OpenAICompatibleChatClient(config),
       approvals,
-      cwd: session.cwd,
+      cwd: executionCwd ?? session.cwd,
       projectRoot: session.projectRoot,
       model: config.model,
       baseUrl: config.baseUrl,
@@ -654,19 +1298,25 @@ class DesktopController {
     });
 
     try {
+      this.markTaskRun(session, taskRunId, "running");
       const result = loopEnabled
         ? await this.runAgentLoop({
             agent,
             session,
             content,
             skillNames,
+            taskRunId,
+            executionCwd: executionCwd ?? session.cwd,
             eventTarget
           })
         : await agent.run(content, {
             skillNames,
             promptAlreadyInSession: true,
-            onEvent: (event) => sendAgentEvent(eventTarget, session.id, event)
+            allowedToolNames: planModeEnabled ? PLAN_MODE_TOOL_NAMES : undefined,
+            onEvent: this.agentEventRecorder(session, taskRunId, eventTarget, executionCwd ?? session.cwd)
           });
+      await this.recordLatestAssistantTaskMetadata(result.session, taskRunId);
+      this.finishSessionTaskRun(result.session, taskRunId, taskRunStatusForLoop(result.session.agentLoop));
       await this.store.save(result.session);
       if (this.session?.id === result.session.id) {
         this.session = result.session;
@@ -685,6 +1335,7 @@ class DesktopController {
         };
         this.loopStopRequests.delete(session.id);
       }
+      this.finishSessionTaskRun(session, taskRunId, "failed", formatError(error));
       await this.store.save(session);
       if (this.session?.id === session.id) {
         this.session = session;
@@ -693,22 +1344,134 @@ class DesktopController {
     }
   }
 
+  private markTaskRun(session: AgentSession, taskRunId: string | undefined, status: AgentTaskRun["status"]) {
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    const now = new Date().toISOString();
+    if (status === "running") {
+      markTaskRunRunning(taskRun, now);
+    } else {
+      taskRun.status = status;
+      taskRun.updatedAt = now;
+    }
+    session.updatedAt = now;
+  }
+
+  private finishSessionTaskRun(session: AgentSession, taskRunId: string | undefined, status: AgentTaskRun["status"], error?: string) {
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    finishTaskRun(taskRun, status, error);
+    session.updatedAt = taskRun.updatedAt;
+  }
+
+  private agentEventRecorder(session: AgentSession, taskRunId: string | undefined, eventTarget?: WebContents, executionCwd?: string) {
+    return (event: AgentRunEvent) => this.recordAgentEvent(session, taskRunId, eventTarget, event, executionCwd);
+  }
+
+  private async recordApprovalEvent(session: AgentSession, taskRunId: string | undefined, event: AgentTaskRunApprovalEvent) {
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    recordTaskRunApproval(taskRun, event, new Date().toISOString());
+    session.updatedAt = taskRun.updatedAt;
+    if (this.session?.id === session.id) {
+      this.session = session;
+    }
+    await this.store.save(session);
+    await this.sendSessionLifecycleEvent("updated", session);
+  }
+
+  private async recordAgentEvent(
+    session: AgentSession,
+    taskRunId: string | undefined,
+    eventTarget: WebContents | undefined,
+    event: AgentRunEvent,
+    executionCwd?: string
+  ) {
+    sendAgentEvent(eventTarget, session.id, event);
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    const changed = recordTaskRunEvent(taskRun, event, new Date().toISOString(), { workspaceRoot: executionCwd ?? session.cwd });
+    if (!changed) {
+      return;
+    }
+    session.updatedAt = taskRun.updatedAt;
+    if (this.session?.id === session.id) {
+      this.session = session;
+    }
+    await this.store.save(session);
+    await this.sendSessionLifecycleEvent("updated", session);
+  }
+
+  private async recordLatestAssistantTaskMetadata(session: AgentSession, taskRunId: string | undefined) {
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    for (let index = session.messages.length - 1; index > taskRun.userMessageIndex; index -= 1) {
+      const message = session.messages[index];
+      if (message?.role !== "assistant") {
+        continue;
+      }
+      if (taskRun.plan?.sourceMessageIndex === index && taskRun.completion?.sourceMessageIndex === index) {
+        return;
+      }
+      const now = new Date().toISOString();
+      const changedPlan = taskRun.plan?.sourceMessageIndex === index ? false : recordTaskRunAssistantPlan(taskRun, message.content, now, index);
+      const changedCompletion =
+        taskRun.completion?.sourceMessageIndex === index ? false : recordTaskRunAssistantCompletion(taskRun, message.content, now, index);
+      const changed = changedPlan || changedCompletion;
+      if (!changed) {
+        continue;
+      }
+      session.updatedAt = taskRun.updatedAt;
+      if (this.session?.id === session.id) {
+        this.session = session;
+      }
+      await this.store.save(session);
+      await this.sendSessionLifecycleEvent("updated", session);
+      return;
+    }
+  }
+
+  private findTaskRun(session: AgentSession, taskRunId: string | undefined): AgentTaskRun | undefined {
+    if (!session.taskRuns?.length) {
+      return undefined;
+    }
+    if (taskRunId) {
+      return session.taskRuns.find((run) => run.id === taskRunId);
+    }
+    return session.taskRuns.at(-1);
+  }
+
   private async runAgentLoop({
     agent,
     session,
     content,
     skillNames,
+    taskRunId,
+    executionCwd,
     eventTarget
   }: {
     agent: Agent;
     session: AgentSession;
     content: ChatMessage["content"];
     skillNames: string[];
+    taskRunId?: string;
+    executionCwd?: string;
     eventTarget?: WebContents;
   }): Promise<{ output: string; session: AgentSession }> {
     let output = "";
     let currentSession = session;
-    const onEvent = (event: AgentRunEvent) => sendAgentEvent(eventTarget, currentSession.id, event);
+    const onEvent = (event: AgentRunEvent) =>
+      this.recordAgentEvent(currentSession, taskRunId, eventTarget, event, executionCwd ?? currentSession.cwd);
 
     while (currentSession.agentLoop) {
       const loop = currentSession.agentLoop;
@@ -735,6 +1498,7 @@ class DesktopController {
       currentSession = result.session;
       const decision = stripAgentLoopDecision(currentSession) ?? "done";
       output = chatContentToText(lastAssistantMessage(currentSession)?.content ?? result.output);
+      await this.recordLatestAssistantTaskMetadata(currentSession, taskRunId);
       currentSession.agentLoop = {
         ...currentSession.agentLoop!,
         lastDecision: decision,
@@ -771,6 +1535,16 @@ class DesktopController {
         break;
       }
 
+      const remediationInstruction = buildTaskRunReportRemediationInstruction(
+        this.findTaskRun(currentSession, taskRunId),
+        currentSession.messages
+      );
+      if (remediationInstruction) {
+        currentSession.messages.push({
+          role: "system",
+          content: remediationInstruction
+        });
+      }
       currentSession.messages.push({
         role: "system",
         content: continuationAgentLoopInstruction(currentSession.agentLoop)
@@ -809,6 +1583,7 @@ class DesktopController {
       selectedProviderName: session.selectedProviderName,
       modelSelectionReason: session.modelSelectionReason,
       agentLoop: session.agentLoop,
+      taskRuns: session.taskRuns,
       trustMode: session.trustMode,
       messageCount: session.messages.filter((message) => message.role !== "system").length,
       running: this.runningSessionIds.has(session.id),
@@ -829,6 +1604,7 @@ class DesktopController {
       runningSessionIds: Array.from(this.runningSessionIds),
       modelSelection: publicModelSelectionForSession(session),
       agentLoop: session.agentLoop,
+      taskRuns: session.taskRuns,
       ...extra
     } satisfies SessionLifecycleEvent);
   }
@@ -885,7 +1661,8 @@ class DesktopController {
       if (!response.ok) {
         return undefined;
       }
-      const json = (await response.json()) as ModelListResponse;
+      const body = await readBoundedResponseText(response, MODEL_LIST_BODY_LIMIT_BYTES);
+      const json = JSON.parse(body) as ModelListResponse;
       const models = (json.data ?? [])
         .map((model) => model.id)
         .filter((id): id is string => Boolean(id))
@@ -909,6 +1686,66 @@ function sendAgentEvent(target: WebContents | undefined, sessionId: string, even
     return;
   }
   target.send("agent:event", { ...event, sessionId });
+}
+
+function taskRunStatusForLoop(loop: AgentLoopState | undefined): AgentTaskRun["status"] {
+  switch (loop?.status) {
+    case "stopped":
+      return "stopped";
+    case "blocked":
+      return "blocked";
+    case "failed":
+      return "failed";
+    case "max_iterations":
+      return "max_iterations";
+    default:
+      return "completed";
+  }
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: init.signal ?? controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readBoundedResponseText(response: Response, maxBytes: number) {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const text = await response.text();
+    return text.length > maxBytes ? `${text.slice(0, maxBytes)}\n[truncated]` : text;
+  }
+
+  const decoder = new TextDecoder();
+  let output = "";
+  let bytesRead = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    const remaining = maxBytes - bytesRead;
+    if (value.byteLength > remaining) {
+      if (remaining > 0) {
+        output += decoder.decode(value.slice(0, remaining), { stream: true });
+      }
+      await reader.cancel();
+      output += decoder.decode();
+      return `${output}\n[truncated]`;
+    }
+    bytesRead += value.byteLength;
+    output += decoder.decode(value, { stream: true });
+  }
+
+  output += decoder.decode();
+  return output;
 }
 
 const controller = new DesktopController();
@@ -981,6 +1818,30 @@ function initialAgentLoopInstruction(loop: AgentLoopState) {
   ].join("\n");
 }
 
+function planningApprovalInstruction() {
+  return [
+    "Plan approval mode is active for this prompt.",
+    "Use only local read/discovery tools if needed. Do not edit files, run shell commands, browse the web, control browsers, call MCP tools, install packages, create branches, or make external network requests.",
+    "Respond with a concise `Plan:` section containing 2-6 checklist or numbered steps.",
+    "Include important assumptions, risks, or unknowns only when they affect approval.",
+    "Include the first verification command or manual check you would run after approval when applicable.",
+    "End by asking the user to approve, revise, or cancel the plan."
+  ].join("\n");
+}
+
+function planReviewStatusForAction(action: NonNullable<TaskRunPlanActionInput["action"]>) {
+  switch (action) {
+    case "approve":
+      return "approved";
+    case "request_revision":
+      return "revision_requested";
+    case "cancel":
+      return "cancelled";
+    default:
+      return "revision_requested";
+  }
+}
+
 function continuationAgentLoopInstruction(loop: AgentLoopState) {
   return [
     `Agent loop continuation ${loop.iteration + 1} of ${loop.maxIterations}.`,
@@ -1015,10 +1876,14 @@ function stripAgentLoopDecision(session: AgentSession): AgentLoopState["lastDeci
 }
 
 function lastAssistantMessage(session: AgentSession) {
+  return lastAssistantMessageWithIndex(session)?.message;
+}
+
+function lastAssistantMessageWithIndex(session: AgentSession) {
   for (let index = session.messages.length - 1; index >= 0; index -= 1) {
     const message = session.messages[index];
     if (message?.role === "assistant") {
-      return message;
+      return { message, index };
     }
   }
   return undefined;
@@ -1101,7 +1966,8 @@ function toPublicConfig(config: AppConfig): PublicConfig {
     trustMode: config.trustMode,
     apiKeyPresent: Boolean(config.apiKey),
     tavilyApiKeyPresent: Boolean(config.tavilyApiKey),
-    mcpServers: config.mcpServers
+    mcpServers: redactMcpServers(config.mcpServers),
+    workspacePolicies: config.workspacePolicies
   };
 }
 
@@ -1194,13 +2060,7 @@ function toolParameterNames(schema: ToolSchema) {
   return Object.keys(properties).sort((left, right) => left.localeCompare(right));
 }
 
-function toolStatus(name: string, config: AppConfig): Pick<ToolSummary, "status" | "statusLabel"> {
-  if (name === "web_search") {
-    return {
-      status: "network",
-      statusLabel: config.tavilyApiKey ? "Network" : "Network fallback"
-    };
-  }
+function toolStatus(name: string, config: AppConfig, policyOverrides: CapabilityPolicyOverrides = {}): Pick<ToolSummary, "status" | "statusLabel"> {
   if (name === "current_location") {
     return {
       status: "privacy",
@@ -1208,45 +2068,38 @@ function toolStatus(name: string, config: AppConfig): Pick<ToolSummary, "status"
     };
   }
   if (name.startsWith("mcp_")) {
-    if (name === "mcp_call_tool") {
-      if (config.trustMode === "readonly") {
-        return {
-          status: "blocked",
-          statusLabel: "Blocked in readonly"
-        };
-      }
+    if (name === "mcp_list_tools" && Object.keys(config.mcpServers).length === 0) {
       return {
-        status: "approval",
-        statusLabel: "Requires approval"
+        status: "network",
+        statusLabel: "No servers"
       };
     }
-    return {
-      status: "network",
-      statusLabel: Object.keys(config.mcpServers).length > 0 ? "MCP" : "No servers"
-    };
   }
-  if (name.startsWith("browser_")) {
+  if (name.startsWith("browser_") && !["browser_open", "browser_click", "browser_click_at", "browser_type"].includes(name)) {
     return {
       status: "privacy",
       statusLabel: "Hidden browser"
     };
   }
-  if (["apply_patch", "write_file", "run"].includes(name)) {
-    if (config.trustMode === "readonly") {
-      return {
-        status: "blocked",
-        statusLabel: "Blocked in readonly"
-      };
-    }
+
+  const decision = evaluateCapabilityPolicy(config.trustMode, capabilityForToolName(name), {
+    risky: toolMayRequireApproval(name),
+    overrides: policyOverrides
+  });
+  if (name === "web_search") {
     return {
-      status: "approval",
-      statusLabel: config.trustMode === "trusted" ? "Approval for risky" : "Requires approval"
+      status: decision.effect === "deny" ? "blocked" : "approval",
+      statusLabel: config.tavilyApiKey ? "Network approval" : "Network fallback approval"
     };
   }
   return {
-    status: "enabled",
-    statusLabel: "Read-only"
+    status: decision.effect === "deny" ? "blocked" : decision.effect === "prompt" ? "approval" : "enabled",
+    statusLabel: decision.label
   };
+}
+
+function toolMayRequireApproval(name: string) {
+  return ["apply_patch", "write_file", "browser_open", "browser_click", "browser_click_at", "browser_type"].includes(name);
 }
 
 function normalizeProviders(providers: LlmProviderPatch[], existingProviders: LlmProviderProfile[] = []): LlmProviderProfile[] {
@@ -1428,8 +2281,51 @@ function applyConfigPatch(config: AppConfig, patch: ConfigPatch): AppConfig {
     baseUrl: patch.baseUrl?.trim() || config.baseUrl,
     model: patch.model?.trim() || config.model,
     trustMode: patch.trustMode ?? config.trustMode,
-    mcpServers: patch.mcpServers ?? config.mcpServers
+    mcpServers: patch.mcpServers ? mergeRedactedMcpServers(patch.mcpServers, config.mcpServers) : config.mcpServers,
+    workspacePolicies: patch.workspacePolicies ?? config.workspacePolicies
   };
+}
+
+async function pathExistsAsDirectory(filePath: string) {
+  try {
+    return (await stat(filePath)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function taskRunExecutionRoot(session: AgentSession, taskRun: AgentTaskRun) {
+  const worktree = taskRun.worktree;
+  if (worktree?.enabled && worktree.path && !["discarded", "cleaned"].includes(worktree.status)) {
+    return worktree.path;
+  }
+  return session.cwd;
+}
+
+function taskRunArtifactIncludesEvidencePath(artifact: AgentTaskRunArtifact, requestedPath: string) {
+  if (artifact.kind !== "command_output") {
+    return false;
+  }
+
+  const paths = new Set<string>();
+  for (const reportPath of artifact.reportPaths ?? []) {
+    paths.add(reportPath);
+  }
+  for (const report of artifact.testReports ?? []) {
+    paths.add(report.path);
+    for (const failure of report.failedTests ?? []) {
+      if (failure.file) {
+        paths.add(failure.file);
+      }
+    }
+    for (const finding of report.findingDetails ?? []) {
+      if (finding.path) {
+        paths.add(finding.path);
+      }
+    }
+  }
+
+  return paths.has(requestedPath);
 }
 
 function createWindow() {
@@ -1449,6 +2345,7 @@ function createWindow() {
   });
   mainWindow = window;
   browserController.attach(window);
+  configureMainWindowNavigation(window);
 
   if (devUrl) {
     void window.loadURL(devUrl);
@@ -1462,7 +2359,12 @@ function createWindow() {
       console.log("desktop smoke: renderer loaded");
       setTimeout(() => {
         const smoke = appEnv("BROWSER_SMOKE") === "1" ? captureBrowserSmoke(window) : captureSmokeScreenshot(window);
-        void smoke.finally(() => app.quit());
+        void smoke
+          .then(() => app.quit())
+          .catch((error) => {
+            console.error(`desktop smoke failed: ${error instanceof Error ? error.message : String(error)}`);
+            app.exit(1);
+          });
       }, 500);
     });
   }
@@ -1473,15 +2375,65 @@ function createWindow() {
   });
 }
 
+function configureMainWindowNavigation(window: BrowserWindow) {
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    void openExternalIfSafe(url);
+    return { action: "deny" };
+  });
+
+  window.webContents.on("will-navigate", (event, url) => {
+    if (isTrustedAppNavigationUrl(url, { devUrl, rendererIndex })) {
+      return;
+    }
+
+    event.preventDefault();
+    void openExternalIfSafe(url);
+  });
+}
+
+async function openExternalIfSafe(url: string) {
+  if (isExternalHttpUrl(url)) {
+    await shell.openExternal(url);
+  }
+}
+
 async function captureSmokeScreenshot(window: BrowserWindow | undefined) {
   if (!window) {
     return;
   }
   await waitForDesktopSmokeContent(window);
-  const image = await window.webContents.capturePage();
-  const screenshotPath = path.join(os.tmpdir(), "arivu-desktop-smoke.png");
+  await prepareDesktopSmokeView(window);
+  const image = await captureNonBlankPage(window);
+  const smokeView = appEnv("DESKTOP_SMOKE_VIEW");
+  const screenshotPath = path.join(os.tmpdir(), smokeView === "settings" ? "arivu-desktop-smoke-settings.png" : "arivu-desktop-smoke.png");
   await writeFile(screenshotPath, image.toPNG());
   console.log(`desktop smoke screenshot: ${screenshotPath}`);
+}
+
+async function prepareDesktopSmokeView(window: BrowserWindow) {
+  const smokeView = appEnv("DESKTOP_SMOKE_VIEW");
+  if (smokeView !== "settings") {
+    return;
+  }
+  await window.webContents.executeJavaScript(
+    `document.querySelector('button[aria-label="Settings"]')?.click()`,
+    true
+  );
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 5_000) {
+    const ready = await window.webContents
+      .executeJavaScript(`Boolean(document.querySelector(".settings-panel .policy-table"))`, true)
+      .catch(() => false);
+    if (ready) {
+      await window.webContents.executeJavaScript(
+        `document.querySelector(".policy-settings-section")?.scrollIntoView({ block: "start" })`,
+        true
+      );
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
 }
 
 async function captureBrowserSmoke(window: BrowserWindow | undefined) {
@@ -1541,61 +2493,117 @@ async function waitForDesktopSmokeContent(window: BrowserWindow) {
   while (Date.now() - startedAt < 5_000) {
     const ready = await window.webContents
       .executeJavaScript(
-        `Boolean(document.querySelector(".boot, .app-shell")) && document.body.innerText.trim().length > 0`,
+        `Boolean(document.querySelector(".app-shell")) && document.body.innerText.trim().length > 0`,
         true
       )
       .catch(() => false);
     if (ready) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await waitForRendererPaint(window);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
 }
 
-ipcMain.handle("app:getState", () => controller.state());
-ipcMain.handle("workspace:choose", () => controller.chooseWorkspace());
-ipcMain.handle("images:choose", () => controller.chooseImages());
-ipcMain.handle("images:readLocal", (_event, filePath: string) => controller.readLocalImage(filePath));
-ipcMain.handle("workspace:create", (_event, options: WorkspaceScaffoldOptions) => controller.createWorkspace(options));
-ipcMain.handle("project:justChats", () => controller.openJustChats());
-ipcMain.handle("project:selectForChat", (_event, projectRoot: string | null) => controller.selectChatProject(projectRoot));
-ipcMain.handle("sessions:list", () => controller.listSessions());
-ipcMain.handle("sessions:open", (_event, id: string) => controller.openSession(id));
-ipcMain.handle("sessions:new", () => controller.newChat());
-ipcMain.handle("sessions:delete", (_event, id: string) => controller.deleteSession(id));
-ipcMain.handle("context:compact", () => controller.compactContext());
-ipcMain.handle("config:save", (_event, patch: ConfigPatch) => controller.saveConfigPatch(patch));
-ipcMain.handle("models:list", (_event, patch: ConfigPatch) => controller.listModels(patch));
-ipcMain.handle("doctor:run", (_event, patch: ConfigPatch) => controller.doctor(patch));
-ipcMain.handle("tools:list", () => controller.listTools());
-ipcMain.handle("skills:list", () => controller.listSkills());
-ipcMain.handle("skills:create", (_event, input: CreateSkillInput) => controller.createSkill(input));
-ipcMain.handle("agent:sendPrompt", (event, prompt: PromptPayload) => controller.sendPrompt(prompt, event.sender));
-ipcMain.handle("agent:stopLoop", (_event, sessionId?: string) => controller.stopAgentLoop(sessionId));
-ipcMain.handle("browser:getState", () => browserController.getState());
-ipcMain.handle("browser:setPaneOpen", (_event, open: boolean) => browserController.setPaneOpen(Boolean(open)));
-ipcMain.handle("browser:setDefaultMode", (_event, mode: BrowserMode) => browserController.setDefaultMode(mode));
-ipcMain.handle("browser:setBounds", (_event, bounds: BrowserBounds) => browserController.setVisibleBounds(bounds));
-ipcMain.handle("browser:setVisibleSuppressed", (_event, suppressed: boolean) => browserController.setVisibleSuppressed(Boolean(suppressed)));
-ipcMain.handle("browser:open", (_event, args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }) => browserController.open(args));
-ipcMain.handle("browser:newTab", (_event, args?: { url?: string }) => browserController.newVisibleTab(args ?? {}));
-ipcMain.handle("browser:selectTab", (_event, tabId: string) => browserController.selectVisibleTab(tabId));
-ipcMain.handle("browser:closeTab", (_event, tabId: string) => browserController.closeVisibleTab(tabId));
-ipcMain.handle("browser:goBack", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
+async function waitForRendererPaint(window: BrowserWindow) {
+  await window.webContents
+    .executeJavaScript(
+      `document.body?.getBoundingClientRect().width ?? 0`,
+      true
+    )
+    .catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 750));
+}
+
+async function captureNonBlankPage(window: BrowserWindow) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    window.show();
+    window.focus();
+    await waitForRendererPaint(window);
+    const image = await window.webContents.capturePage();
+    if (nativeImageHasVisibleContent(image)) {
+      return image;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("desktop smoke screenshot appears blank.");
+}
+
+function nativeImageHasVisibleContent(image: NativeImage) {
+  const size = image.getSize();
+  if (size.width <= 0 || size.height <= 0) {
+    return false;
+  }
+  const bitmap = image.toBitmap();
+  const strideX = Math.max(1, Math.floor(size.width / 96));
+  const strideY = Math.max(1, Math.floor(size.height / 54));
+  let visibleSamples = 0;
+  for (let y = 0; y < size.height; y += strideY) {
+    for (let x = 0; x < size.width; x += strideX) {
+      const index = (y * size.width + x) * 4;
+      const blue = bitmap[index] ?? 0;
+      const green = bitmap[index + 1] ?? 0;
+      const red = bitmap[index + 2] ?? 0;
+      if (red > 70 || green > 70 || blue > 70) {
+        visibleSamples += 1;
+        if (visibleSamples > 20) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+handleFromMain("app:getState", () => controller.state());
+handleFromMain("workspace:choose", () => controller.chooseWorkspace());
+handleFromMain("workspace:open", (_event, workspaceRoot: string) => controller.openWorkspace(workspaceRoot));
+handleFromMain("images:choose", () => controller.chooseImages());
+handleFromMain("images:readLocal", (_event, filePath: string) => controller.readLocalImage(filePath));
+handleFromMain("workspace:create", (_event, options: WorkspaceScaffoldOptions) => controller.createWorkspace(options));
+handleFromMain("project:justChats", () => controller.openJustChats());
+handleFromMain("project:selectForChat", (_event, projectRoot: string | null) => controller.selectChatProject(projectRoot));
+handleFromMain("sessions:list", () => controller.listSessions());
+handleFromMain("sessions:open", (_event, id: string) => controller.openSession(id));
+handleFromMain("sessions:new", () => controller.newChat());
+handleFromMain("sessions:delete", (_event, id: string) => controller.deleteSession(id));
+handleFromMain("context:compact", () => controller.compactContext());
+handleFromMain("config:save", (_event, patch: ConfigPatch) => controller.saveConfigPatch(patch));
+handleFromMain("models:list", (_event, patch: ConfigPatch) => controller.listModels(patch));
+handleFromMain("doctor:run", (_event, patch: ConfigPatch) => controller.doctor(patch));
+handleFromMain("tools:list", () => controller.listTools());
+handleFromMain("policy:list", () => controller.listCapabilityPolicies());
+handleFromMain("skills:list", () => controller.listSkills());
+handleFromMain("skills:create", (_event, input: CreateSkillInput) => controller.createSkill(input));
+handleFromMain("agent:listTaskWorktrees", () => controller.listTaskWorktrees());
+handleFromMain("agent:sendPrompt", (event, prompt: PromptPayload) => controller.sendPrompt(prompt, event.sender));
+handleFromMain("agent:stopLoop", (_event, sessionId?: string) => controller.stopAgentLoop(sessionId));
+handleFromMain("agent:taskWorktreeAction", (_event, input: TaskWorktreeActionInput) => controller.taskWorktreeAction(input));
+handleFromMain("agent:taskRunPlanAction", (_event, input: TaskRunPlanActionInput) => controller.taskRunPlanAction(input));
+handleFromMain("agent:openTaskRunEvidence", (_event, input: OpenTaskRunEvidenceInput) => controller.openTaskRunEvidence(input));
+handleFromMain("browser:getState", () => browserController.getState());
+handleFromMain("browser:setPaneOpen", (_event, open: boolean) => browserController.setPaneOpen(Boolean(open)));
+handleFromMain("browser:setDefaultMode", (_event, mode: BrowserMode) => browserController.setDefaultMode(mode));
+handleFromMain("browser:setBounds", (_event, bounds: BrowserBounds) => browserController.setVisibleBounds(bounds));
+handleFromMain("browser:setVisibleSuppressed", (_event, suppressed: boolean) => browserController.setVisibleSuppressed(Boolean(suppressed)));
+handleFromMain("browser:open", (_event, args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }) => browserController.open(args));
+handleFromMain("browser:newTab", (_event, args?: { url?: string }) => browserController.newVisibleTab(args ?? {}));
+handleFromMain("browser:selectTab", (_event, tabId: string) => browserController.selectVisibleTab(tabId));
+handleFromMain("browser:closeTab", (_event, tabId: string) => browserController.closeVisibleTab(tabId));
+handleFromMain("browser:goBack", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
   typeof args === "object" ? browserController.goBack(args.mode, args.tabId) : browserController.goBack(args)
 );
-ipcMain.handle("browser:goForward", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
+handleFromMain("browser:goForward", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
   typeof args === "object" ? browserController.goForward(args.mode, args.tabId) : browserController.goForward(args)
 );
-ipcMain.handle("browser:reload", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
+handleFromMain("browser:reload", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
   typeof args === "object" ? browserController.reload(args.mode, args.tabId) : browserController.reload(args)
 );
-ipcMain.handle("browser:stop", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
+handleFromMain("browser:stop", (_event, args?: BrowserMode | { mode?: BrowserMode; tabId?: string }) =>
   typeof args === "object" ? browserController.stop(args.mode, args.tabId) : browserController.stop(args)
 );
-ipcMain.handle("browser:screenshot", (_event, args: { mode?: BrowserMode; tabId?: string }) => browserController.screenshot(args ?? {}));
-ipcMain.handle("approval:respond", (_event, response: { id: string; approved: boolean }) => {
+handleFromMain("browser:screenshot", (_event, args: { mode?: BrowserMode; tabId?: string }) => browserController.screenshot(args ?? {}));
+handleFromMain("approval:respond", (_event, response: { id: string; approved: boolean }) => {
   const resolve = pendingApprovals.get(response.id);
   if (!resolve) {
     return;
@@ -1603,6 +2611,25 @@ ipcMain.handle("approval:respond", (_event, response: { id: string; approved: bo
   pendingApprovals.delete(response.id);
   resolve(response.approved);
 });
+
+function handleFromMain<T extends unknown[]>(
+  channel: string,
+  listener: (event: IpcMainInvokeEvent, ...args: T) => unknown | Promise<unknown>
+) {
+  ipcMain.handle(channel, (event, ...args: T) => {
+    assertTrustedIpcSender(event);
+    return listener(event, ...args);
+  });
+}
+
+function assertTrustedIpcSender(event: IpcMainInvokeEvent) {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    throw new Error("Refused IPC request from an untrusted sender.");
+  }
+  if (!event.senderFrame || !isTrustedAppNavigationUrl(event.senderFrame.url, { devUrl, rendererIndex })) {
+    throw new Error("Refused IPC request from an untrusted frame.");
+  }
+}
 
 app.whenReady().then(() => {
   createWindow();

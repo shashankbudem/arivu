@@ -119,7 +119,7 @@ describe("agent", () => {
 
     const agent = new Agent({
       client,
-      approvals: new ApprovalManager("readonly", async () => false),
+      approvals: new ApprovalManager("readonly", async () => true),
       cwd: tempDir
     });
 
@@ -131,6 +131,35 @@ describe("agent", () => {
 
     const second = await agent.run("continue", { skillNames: ["qa-check"] });
     expect(second.session.messages.filter((message) => String(message.content).startsWith("Skill loaded into chat: qa-check"))).toHaveLength(1);
+  });
+
+  it("can restrict advertised tools for plan approval runs", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "Plan:\n1. Inspect the files.\n2. Patch the smallest area after approval."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted", async () => true),
+      cwd: tempDir
+    });
+
+    await agent.run("plan the change", {
+      allowedToolNames: ["list", "read", "search", "git_status", "current_datetime", "current_location", "list_skills", "read_skill"]
+    });
+
+    const toolNames = client.requests[0]?.tools.map((tool) => tool.name) ?? [];
+    expect(toolNames).toEqual(["list", "read", "search", "current_datetime", "current_location", "list_skills", "read_skill", "git_status"]);
+    expect(toolNames).not.toContain("apply_patch");
+    expect(toolNames).not.toContain("write_file");
+    expect(toolNames).not.toContain("run");
+    expect(toolNames).not.toContain("web_search");
+    expect(toolNames).not.toContain("browser_open");
+    expect(toolNames).not.toContain("mcp_call_tool");
   });
 
   it("answers from existing web results instead of offering repeated web searches", async () => {
@@ -171,7 +200,7 @@ describe("agent", () => {
 
     const agent = new Agent({
       client,
-      approvals: new ApprovalManager("readonly", async () => false),
+      approvals: new ApprovalManager("readonly", async () => true),
       cwd: tempDir
     });
 

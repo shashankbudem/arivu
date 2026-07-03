@@ -66,6 +66,150 @@ Decision: the visible Electron browser window has a native tab shell. Each visib
 
 Reason: multi-page browser tasks should not overwrite the user's current visible page. Tabs preserve normal browser expectations, keep per-page navigation/screenshot/console state separate, and still let simple tool calls work without requiring a tab id.
 
+## 2026-06-23: Task runs as the harness audit layer
+
+Decision: desktop prompts create persisted `taskRuns` entries on the saved session. Each run records status, selected model/provider, loop metadata, coarse tool capabilities, tool calls, and artifacts such as browser screenshots and command output.
+
+Reason: Arivu needs a control-plane record that is more durable and structured than the chat transcript alone. Task runs make Activity grouping, retries, compaction, future worktree isolation, and capability policy easier to reason about without introducing a heavy workflow engine yet.
+
+## 2026-06-23: One-shot task worktrees
+
+Decision: add opt-in desktop task worktree mode. When armed for a prompt, Arivu creates a git branch/worktree under app data, runs tools against that isolated checkout, and records the worktree metadata on the task run while keeping the saved chat attached to the original project.
+
+Reason: coding-agent changes need an isolation primitive before broader autonomy, loops, and PR/review flows. Git worktrees give Arivu a local, inspectable execution surface without introducing container or VM sandboxing yet.
+
+## 2026-06-23: Conservative task worktree lifecycle
+
+Decision: expose Activity actions to refresh a worktree diff summary, merge a completed ready worktree, discard an unmerged worktree, and clean up a merged worktree. Merge requires the original checkout to be clean, auto-commits dirty task worktree changes with a local Arivu author, and fast-forwards the original checkout to the task branch.
+
+Reason: task isolation is only useful if users can safely finish or abandon the isolated change set. A clean-checkout plus fast-forward rule avoids hidden conflict resolution and reduces the chance of clobbering user work before Arivu has a full patch-review/PR workflow.
+
+## 2026-06-23: Patch preview before task worktree merge
+
+Decision: changed task worktrees must have a stored bounded patch preview before merge. The preview action stores a unified diff, including untracked files, on the task run and renders it in Activity.
+
+Reason: worktree isolation needs a visible apply boundary. Requiring preview before merge gives users a reviewable artifact and keeps the first local harness path aligned with the later PR/review workflow.
+
+## 2026-06-23: Structured command artifacts
+
+Decision: shell command results stored on task runs include exit code, tool duration, bounded stdout/stderr fields, detected report paths, parsed JUnit/SARIF summaries, and bounded failing-test/finding previews when matching report files exist inside the execution workspace. Activity renders those fields as the command result detail and marks nonzero exits or failed parsed reports as failed rows.
+
+Reason: the harness architecture needs durable, human-readable evidence for what the agent ran and what happened. Splitting command output into structured fields and parsing bounded report evidence makes test/build/security failures easier to scan while keeping raw report bodies in the workspace instead of bloating session state.
+
+## 2026-06-24: Task-run evidence opens from Activity
+
+Decision: Activity command results expose compact open-report/source actions for report paths, JUnit failed-test files, and SARIF finding locations attached to that command artifact. The main process validates the requested path against the artifact, then resolves it under the session or task-worktree root before opening it.
+
+Reason: parsed reports are most useful when the user can jump directly from a failed run to the underlying evidence. Keeping the allowed path list anchored to the stored artifact preserves the harness audit boundary while making failures faster to inspect.
+
+## 2026-06-24: Capability policy table
+
+Decision: centralize trust-mode allow/prompt/deny decisions in `src/permissions/capabilityPolicy.ts`, keyed by task-run capability names. `ApprovalManager` evaluates approval actions through this table, and the desktop Tools drawer reads the same decisions for user-facing status labels.
+
+Reason: the harness needs one policy vocabulary for audit, UI, and enforcement. Keeping the table small and explicit makes the current local desktop safety posture easier to reason about and creates a future seam for workspace-specific policy without spreading trust-mode conditionals through tool code.
+
+## 2026-06-24: Draft-first report remediation
+
+Decision: Activity command results with failed JUnit/SARIF evidence expose a Draft fix action that fills the composer with a bounded, targeted repair prompt. The prompt includes report paths, failing tests, SARIF findings, and relevant stderr excerpts, but it does not automatically submit a new agent turn.
+
+Reason: parsed reports should accelerate repair without making failed checks trigger surprise edits. Draft-first remediation keeps the user in the review loop, preserves the existing composer/worktree controls, and prepares the path for a future opt-in automatic repair loop.
+
+## 2026-06-24: Loop report evidence injection
+
+Decision: when a Loop-mode run chooses `Loop: continue` after producing failed parsed JUnit/SARIF evidence, Arivu injects the latest actionable report evidence into the next loop iteration once. The injected system message includes a marker tied to the command artifact id so repeated continuations do not replay stale evidence.
+
+Reason: looped repair tasks should carry structured failure evidence forward without relying on the model to rediscover it in prior tool output. Limiting injection to opted-in Loop mode and to the latest artifact keeps the behavior bounded and avoids surprising edits after a run has already completed or blocked.
+
+## 2026-06-24: Durable task-run plan capture
+
+Decision: task runs store a bounded plan snapshot when a completed assistant turn includes a `Plan:`, `Approach:`, `Implementation plan:`, `Next steps:`, or `What I'll do:` section with checklist or numbered items. The desktop Activity rail renders that plan inside the query group and the session store persists it with the run.
+
+Reason: the harness architecture calls for human-comprehensible collaboration: users need to see not only tool calls, but the intent those calls served. Capturing plans from visible assistant text creates an audit-friendly planning layer without inventing a separate workflow engine or exposing private model reasoning.
+
+## 2026-06-24: Managed worktree open action
+
+Decision: Activity task-worktree controls include an Open action that opens the managed worktree folder for inspection. The main process validates the stored worktree path with the same Arivu app-data root and branch-prefix checks used by merge/discard/cleanup before calling the OS folder opener, and a successful open does not mutate the task-run audit record.
+
+Reason: isolated task worktrees are only useful if users can inspect the actual execution workspace quickly. Opening only managed Arivu worktrees keeps the affordance tied to the review boundary instead of becoming a general arbitrary-path launcher.
+
+## 2026-06-24: Session-backed task worktree inventory
+
+Decision: Settings lists task worktrees recorded on saved sessions, including prompt/session context, branch/path, lifecycle status, changed-file count when known, and whether the folder still exists. The inventory uses session/task-run metadata as the authority and only exposes valid lifecycle actions through the existing guarded task-worktree action: Open for present managed worktrees, Discard for ready/failed worktrees, and Clean up for merged worktrees.
+
+Reason: a worktree-per-task model needs an inventory so old isolated work does not become invisible once its chat is no longer active. Starting from persisted task runs preserves the audit boundary and avoids treating arbitrary filesystem directories as harness state. Reusing the existing lifecycle action keeps stale missing-folder cleanup on the same git prune and branch-deletion path as Activity cleanup.
+
+## 2026-06-24: Local PR draft prep for task worktrees
+
+Decision: previewed ready task worktrees can prepare pull-request draft metadata without pushing to a remote. The action commits dirty task worktree changes locally, stores title/body/branch/base/commit metadata on the task run, and renders push plus `gh pr create --draft` commands when an `origin` remote and base branch are available.
+
+Reason: the harness needs a review boundary before remote writes. Local PR draft prep gives users a durable, inspectable handoff artifact before the separate explicit remote creation action pushes or opens a PR.
+
+## 2026-06-24: Explicit remote PR creation
+
+Decision: remote PR creation is a separate task-worktree action after PR draft prep. The action confirms in the UI, verifies the worktree is still clean at the drafted commit, pushes the task branch, runs `gh pr create --draft`, and stores the returned PR URL on the task run.
+
+Reason: remote writes should not be a side effect of local draft preparation. Splitting draft prep from creation preserves a review boundary while still letting users complete the PR flow when GitHub CLI credentials are available.
+
+## 2026-06-24: User-visible capability policy
+
+Decision: Settings renders a built-in Capability policy matrix sourced from `src/permissions/capabilityPolicy.ts`, the same table used by `ApprovalManager` and the Tools drawer.
+
+Reason: trust modes are a control-plane boundary, not just configuration text. Showing the actual allow/approval/blocked matrix makes policy explainable before adding repo or workspace overrides.
+
+## 2026-06-24: Stricter workspace policy overrides
+
+Decision: workspace-specific capability policy overrides are saved by absolute workspace root and can only tighten enforceable capabilities to `prompt` or `deny`. The same override map is passed to `ApprovalManager`, the desktop Tools drawer, and the Settings policy matrix.
+
+Reason: local projects have different risk profiles, but workspace policy must not become a hidden way to bypass trust modes. Restricting overrides to stricter decisions preserves default-deny behavior while letting users harden sensitive repos.
+
+## 2026-07-02: Repo reads route through capability policy
+
+Decision: `list`, `read`, `search`, and `git_status` now call `ApprovalManager` with a `read` action mapped to `read_repo`. Settings exposes `read_repo` as a workspace override, so local repo reads remain automatic by default but can be approval-gated or blocked for a sensitive workspace.
+
+Reason: the harness policy model should govern both execution-changing actions and read scope. Routing repo reads through the same policy boundary makes workspace hardening enforceable instead of only descriptive, while preserving the normal low-friction read-only workflow unless the user tightens policy.
+
+## 2026-06-25: Durable approval audit on task runs
+
+Decision: `ApprovalManager` emits audit events for automatic allows, policy blocks, approval requests, approvals, and denials. Desktop runs persist those events on the active task run and render them in Activity.
+
+Reason: approval prompts are part of the control-plane trace. Saving them beside tool calls makes a restored or compacted chat explain why an action was allowed, blocked, or performed after human review.
+
+## 2026-06-25: Explicit command execution profile seam
+
+Decision: the `run` tool accepts an explicit `executionProfile`, emits profile/isolation/cwd metadata, and stores that metadata on command artifacts. Only `host` is supported today; `container` and `sandbox` fail closed before approval or execution until real isolated execution backends exist.
+
+Reason: Arivu needs to distinguish control-plane audit records from execution-plane isolation. Naming the profile now prevents the UI and docs from implying sandboxing while giving future container/gVisor/Kata work a stable tool-schema boundary.
+
+## 2026-06-25: Durable patch artifacts on task runs
+
+Decision: successful direct `apply_patch` calls create task-run patch artifacts with a bounded unified diff, changed paths, and addition/deletion counts. Activity renders the persisted patch artifact as a diff preview instead of relying only on transient tool-call arguments.
+
+Reason: the harness needs a reviewable evidence trail for non-worktree edits as well as commands. Persisting bounded patch artifacts moves direct edits closer to the same audit boundary as task worktree previews without forcing a full patch-staging workflow yet.
+
+## 2026-06-25: Durable write-file artifacts on task runs
+
+Decision: successful direct `write_file` calls create task-run file-change artifacts with the path, create/replace mode, line count, and bounded new-content preview. Activity renders the persisted file-change artifact as a diff-style preview instead of relying only on transient tool-call arguments.
+
+Reason: full-file create/replace writes are just as important to audit as unified patches. Capturing the new-content preview keeps direct writes inspectable after reload or compaction while avoiding storage of old file contents in the session record.
+
+## 2026-06-25: Evidence-derived task-run verification summaries
+
+Decision: finishing a task run derives and persists a verification summary from command artifacts. The summary records command count, failed exits, parsed report count, and failed/passed/unknown report counts, and Activity renders it beside the run metadata.
+
+Reason: users need a compact answer to what Arivu actually verified, but that answer must be grounded in tool evidence rather than assistant prose. Persisting verification summaries makes restored or compacted chats easier to audit and prepares report-aware repair loops to connect to task-worktree lifecycle decisions.
+
+## 2026-06-25: Failed verification gates task-worktree promotion
+
+Decision: task-worktree PR draft prep, remote draft PR creation, and merge reject runs whose persisted verification summary is failed. Activity and Settings surface that verification state while preserving inspection actions such as Open, Refresh, Preview, and Discard.
+
+Reason: a failed command or parsed report is evidence that the task branch is not ready for review or merge. Gating promotion on stored verification connects the harness audit trail to actual lifecycle controls without blocking users from inspecting or throwing away the isolated worktree.
+
+## 2026-06-26: Failed-verification repair continues the same worktree
+
+Decision: Activity offers Fix verification for failed task-worktree verification. The action drafts a repair prompt from run-level command/report evidence, arms the composer to send `worktree: { enabled: true, taskRunId }`, validates the referenced ready managed worktree in the main process, and records `continuedFromTaskRunId` on the new task run.
+
+Reason: a failed verification gate should lead to a repair loop on the same isolated branch, not force users to start a new task branch or manually copy paths. The continuation id keeps the workflow auditable while stale patch preview and PR draft metadata stay out of the follow-up run until the repaired branch is previewed again.
+
 ## 2026-06-04: Conservative write safety
 
 Decision: require path containment, read-before-replace, patch mismatch checks, and approval routing for writes.
@@ -137,3 +281,87 @@ Reason: users need to know what the agent can call without reading source or cro
 Decision: minimize the desktop header/sidebar by removing the session id from the header, removing the sidebar subtitle, using icon-only header actions with CSS tooltips, and slimming the Activity panel into a compact rail.
 
 Reason: the chat surface should stay visually dominant. Session ids and permanent action labels were useful during debugging but consumed too much screen space for normal use.
+
+## 2026-06-26: Continued repairs get an explicit rerun-checks prompt
+
+Decision: when a continued task-worktree repair finishes with missing or unknown verification, Activity offers `Rerun checks`. The prompt continues the same managed worktree and reuses command text from the previous failed run when available.
+
+Reason: a repair is not promotion-ready until verification is captured. Making the rerun step explicit keeps the control-plane state honest without forcing Arivu to auto-run arbitrary commands.
+
+## 2026-06-26: Passed worktree verification shows promotion guidance
+
+Decision: when a ready task worktree has passed verification, Activity shows a positive promotion hint. The hint tells the user whether the branch still needs a patch preview, can prepare a PR draft or merge, can create a draft PR, or already has a created draft PR.
+
+Reason: failed verification already blocks promotion visibly; passed verification should be equally legible so the repair loop has a clear end state without auto-merging or auto-opening remote PRs.
+
+## 2026-06-26: Worktree repair attempts render as a persisted chain
+
+Decision: Activity follows each task run's `worktree.continuedFromTaskRunId` links and renders a compact repair history chain for continued worktree attempts.
+
+Reason: repair loops should be auditable as a sequence of attempts, not just the latest run. Building the chain from persisted task-run ids keeps it stable after reload or context compaction.
+
+## 2026-06-27: Repair history rows focus prior evidence
+
+Decision: repair history rows expose a Details action that focuses and expands the matching Activity group, plus an Open action when the existing guarded task-worktree lifecycle rules say that attempt's managed worktree can be opened.
+
+Reason: the history chain should be actionable without creating a second evidence viewer or bypassing the managed-worktree safety boundary. Reusing Activity groups keeps command/report/tool evidence in one place, and reusing the Open lifecycle action preserves the same path validation as the main worktree controls.
+
+## 2026-06-27: Repair history can compare and replay attempts
+
+Decision: repair history rows can compare a selected attempt against the current attempt using compact persisted task-run summaries, and can draft a Replay prompt that continues the current managed worktree while rerunning verification commands from the selected evidence attempt. Replay sends `replayOfTaskRunId` with the continuation payload, and the main process only persists it after validating that the evidence run belongs to the same managed task worktree branch/path.
+
+Reason: repair loops need a practical way to answer "what changed between attempts?" and "rerun the same check" without introducing a hidden workflow engine. Drafting Replay through the existing composer keeps the user in control, preserves structured lineage on the current worktree run, and reuses the same command evidence extraction used by Rerun checks.
+
+## 2026-06-27: Repair history shows per-file deltas and replay outcomes
+
+Decision: the repair-history Compare panel derives per-file added/removed/shared path deltas from stored worktree diff summaries, patch previews, patch artifacts, and file-change artifacts. The repair-history timeline also groups replay attempts by `replayOfTaskRunId` and surfaces each replay run's latest verification outcome.
+
+Reason: compact summary rows are useful, but repair loops often turn on "which files changed?" and "did replaying that check pass later?" Deriving this from durable task-run evidence keeps restored chats auditable without adding a new workflow database.
+
+## 2026-06-27: Repeated replay failures draft a review handoff
+
+Decision: when at least two replay attempts for the same evidence run fail verification, Activity exposes a Review action in the replay outcome group. The action drafts a continuation prompt for the current managed worktree, includes the evidence run, failed replay summaries, a repeated-failure pattern summary, suggested verification commands, a minimal verification plan, and failed command evidence, and asks the agent to classify the failure as a real defect, stale command, environment issue, or missing precondition.
+
+Reason: repeated replay failures usually need a change in strategy rather than another blind rerun. Keeping the handoff as a draft prompt preserves user control while making the accumulated run evidence actionable.
+
+## 2026-07-01: Created PR cards draft review handoffs
+
+Decision: when a task-worktree run has a created PR URL, Activity exposes Review PR on the PR card. The action drafts a continuation prompt for the same managed worktree, includes PR URL/title/base/remote/commit details, the latest verification summary, any last refreshed PR review/check/comment/thread snapshot, and suggested verification commands, and asks the agent to inspect PR review comments and check results before editing.
+
+Reason: a created PR is a review boundary, but handing control to an automatic repair loop would be too eager. Drafting the review handoff keeps the user in control, preserves the existing worktree continuation path, and makes the PR URL plus local verification and refreshed remote review/comment evidence actionable.
+
+## 2026-07-01: Created PR cards refresh review and check snapshots
+
+Decision: created PR cards expose Refresh PR. The action runs GitHub CLI from the managed task worktree, requests `state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,comments,reviews,url`, then makes a best-effort `gh api graphql` lookup for line-level review threads. Arivu rolls those fields into a compact review/check/comment/thread summary with bounded latest feedback previews and persists it on `worktree.pullRequest.review`.
+
+Reason: Review PR handoffs are more useful when the Activity card already shows the latest remote review, line-level thread, and check state. Keeping refresh explicit avoids surprising network calls and still gives restored chats a durable snapshot of GitHub's last known PR state.
+
+## 2026-07-02: User-started Watch PR refresh
+
+Decision: created PR cards also expose Watch PR. The renderer stores a session-scoped watch entry after the user starts it, immediately calls the same guarded `refresh_pr` IPC action, repeats that action every 90 seconds while the watched PR remains in the active session, and shows refreshing, last-refreshed, or error status on the card. Stopping the watch, changing sessions, or losing the PR card removes the watcher.
+
+Reason: PR checks and reviews can change after a draft is created, but Arivu should not poll GitHub without the user asking. A renderer-owned watch keeps the behavior easy to see and stop while reusing the same main-process validation, GitHub CLI command path, and persisted review snapshot as manual Refresh PR.
+
+## 2026-07-02: Plan-derived worktrees expose completion notes
+
+Decision: the Approved plan source card now derives per-step completion notes for plan-derived worktrees. Notes are conservative: failed verification marks planned steps blocked, missing verification/changes/patch preview marks them as needing evidence, and passed verification plus recorded changes plus a patch preview is still only enough for a planned step to be supported when a changed file, verification command, or assistant-authored completion note matches that step. Approved-plan worktree instructions ask the agent to end with a parseable `Completion notes:` checklist, task runs persist that checklist, and matching is textual and bounded over changed paths, command text, report paths, parsed report summaries, failed test metadata, SARIF finding previews, and final close-out bullets.
+
+Reason: plan approval is only useful if the user can see how execution closed the loop. Item-specific matching lets the UI cite concrete files, commands, or final agent-authored close-out bullets when available, while keeping unmatched checklist items visible as needing evidence instead of overstating proof.
+
+## 2026-07-02: Refreshed PR snapshots derive merge readiness cues
+
+Decision: Activity derives a ready/blocked/waiting/unknown merge cue from the last refreshed created-PR snapshot. The ready cue is conservative: the PR must be open, non-draft, approved, merge-clean or hook-clean, and have settled checks without failures, cancellations, pending, or unknown states. Failed checks, cancelled checks, changes requested, or blocked/dirty/behind merge states produce a blocked cue; draft, review-required, pending, missing, or unknown evidence produces waiting or unknown.
+
+Reason: a refreshed PR snapshot should answer the user's immediate question, "can this merge?" without requiring them to parse GitHub status tokens. Keeping the rule conservative avoids overstating readiness from stale or partial remote data.
+
+## 2026-07-01: Plan approval mode is read-only
+
+Decision: desktop exposes Plan approval as a one-shot composer mode and `/plan` slash command. A planning run records `planMode` on the task run, injects a planning-only instruction, disables Loop/Worktree for that prompt, and advertises only local read/discovery tools (`list`, `read`, `search`, `git_status`, current date/location, and local skills). Captured Activity plan cards persist approve/revise/cancel review state, and only approved plans expose follow-up actions. Use approved plan drafts a normal execution prompt; Start worktree drafts the approved plan while arming a new task worktree and recording `plannedFromTaskRunId` on the follow-up run. Plan-derived worktrees resolve that source id back to an Activity review card with checklist and concrete execution evidence cues.
+
+Reason: the harness architecture needs a human-comprehensible approval boundary before high-risk work. Allowing local reads keeps the plan grounded in the repo, while withholding writes, shell, browser, network search, and MCP tools prevents the plan step from becoming execution in disguise.
+
+## 2026-06-27: Task worktrees expose sync conflict resolution
+
+Decision: Activity exposes a Sync action for ready task worktrees. Sync commits dirty task-worktree changes, merges the current original checkout head into the task branch, clears stale preview/PR metadata, and records conflicted files plus branch heads on `worktree.conflict` if Git stops for manual resolution. While a conflict is active, Preview, PR draft, Create PR, and Merge are blocked; Activity shows a conflict card with file-level Open actions plus Open worktree, Continue, and Abort actions. File-level Open validates the requested path against the stored conflict file list and managed worktree root before opening it. Continue stages resolved files and completes the merge commit. Abort runs `git merge --abort`.
+
+Reason: the original checkout can move while an isolated task branch is being repaired or verified. Sync makes that drift explicit without mutating the original checkout, and a persisted conflict record keeps the user-controlled resolution boundary visible after reload or context compaction.

@@ -1,16 +1,18 @@
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { execa } from "execa";
 import { z } from "zod";
 import type { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { isDestructiveCommand } from "../permissions/destructive.js";
 import type { AppConfig } from "../config.js";
+import { resolveCommandExecutionProfile } from "../execution/profile.js";
 import { discoverSkills, formatSkillList, readSkill } from "../agent/skills.js";
 import type { ToolSchema } from "../agent/types.js";
 import { FileStateTracker } from "./fileState.js";
 import { callMcpTool, listMcpTools } from "./mcp.js";
 import { applyUnifiedDiff, summarizePatch } from "./patch.js";
-import { resolveWorkspacePath } from "./pathSafety.js";
+import { assertRealPathInsideWorkspace, resolveSafeWorkspacePath } from "./pathSafety.js";
 import { formatWebSearchResults, searchWeb } from "./webSearch.js";
 import {
   formatBrowserToolResult,
@@ -33,6 +35,9 @@ type ToolDefinition = {
   execute(args: unknown): Promise<string>;
 };
 
+const MAX_TOOL_READ_BYTES = 20_000;
+const MAX_TOOL_SEARCH_OUTPUT = 60_000;
+
 export function createToolRegistry(context: ToolContext) {
   const state = new FileStateTracker();
   const tools = new Map<string, ToolDefinition>();
@@ -49,7 +54,8 @@ export function createToolRegistry(context: ToolContext) {
     },
     async execute(args) {
       const parsed = z.object({ path: z.string().default(".") }).parse(args);
-      const target = resolveWorkspacePath(context.workspaceRoot, parsed.path);
+      const target = await resolveSafeWorkspacePath(context.workspaceRoot, parsed.path);
+      await context.approvals.require({ type: "read", summary: "list workspace path", path: parsed.path });
       const entries = await readdir(target, { withFileTypes: true });
       return entries
         .map((entry) => `${entry.isDirectory() ? "dir " : "file"} ${entry.name}`)
@@ -68,10 +74,13 @@ export function createToolRegistry(context: ToolContext) {
     },
     async execute(args) {
       const parsed = z.object({ path: z.string() }).parse(args);
-      const target = resolveWorkspacePath(context.workspaceRoot, parsed.path);
-      const content = await readFile(target, "utf8");
-      await state.remember(target);
-      return content.length > 20_000 ? `${content.slice(0, 20_000)}\n[truncated]` : content;
+      const target = await resolveSafeWorkspacePath(context.workspaceRoot, parsed.path);
+      await context.approvals.require({ type: "read", summary: "read file", path: parsed.path });
+      const content = await readFilePreview(target);
+      if (!content.truncated) {
+        await state.remember(target);
+      }
+      return content.text;
     }
   });
 
@@ -86,13 +95,15 @@ export function createToolRegistry(context: ToolContext) {
     },
     async execute(args) {
       const parsed = z.object({ query: z.string(), path: z.string().default(".") }).parse(args);
-      const target = resolveWorkspacePath(context.workspaceRoot, parsed.path);
+      const target = await resolveSafeWorkspacePath(context.workspaceRoot, parsed.path);
+      await context.approvals.require({ type: "read", summary: "search workspace", path: parsed.path, query: parsed.query });
       try {
         const result = await execa("rg", ["--line-number", "--hidden", "--glob", "!.git", parsed.query, target], {
           cwd: context.workspaceRoot,
-          reject: false
+          reject: false,
+          maxBuffer: MAX_TOOL_SEARCH_OUTPUT * 2
         });
-        return result.stdout || result.stderr || "No matches.";
+        return truncateToolOutput(result.stdout || result.stderr || "No matches.", MAX_TOOL_SEARCH_OUTPUT);
       } catch (error) {
         return error instanceof Error ? error.message : String(error);
       }
@@ -116,6 +127,13 @@ export function createToolRegistry(context: ToolContext) {
           maxResults: z.number().int().min(1).max(10).default(5)
         })
         .parse(args);
+      await context.approvals.require({
+        type: "network",
+        summary: "web_search",
+        destination: context.tavilyApiKey ? "Tavily" : "Bing RSS",
+        query: parsed.query,
+        destructive: true
+      });
       const results = await searchWeb(parsed.query, parsed.maxResults, { tavilyApiKey: context.tavilyApiKey });
       return formatWebSearchResults(parsed.query, results);
     }
@@ -144,7 +162,7 @@ export function createToolRegistry(context: ToolContext) {
             newTab: z.boolean().default(false)
           })
           .parse(args);
-        const url = normalizeBrowserUrl(parsed.url);
+        const url = await normalizeSafeBrowserToolUrl(context.workspaceRoot, normalizeBrowserUrl(parsed.url));
         const mode = parsed.mode ?? hiddenAgentBrowserMode();
         await context.approvals.require({
           type: "browser",
@@ -387,6 +405,14 @@ export function createToolRegistry(context: ToolContext) {
       parameters: objectSchema({})
     },
     async execute() {
+      if (hasEnabledMcpServers(context.mcpServers)) {
+        await context.approvals.require({
+          type: "mcp",
+          server: "*",
+          tool: "list_tools",
+          destructive: true
+        });
+      }
       return listMcpTools(context.mcpServers);
     }
   });
@@ -438,7 +464,7 @@ export function createToolRegistry(context: ToolContext) {
       await context.approvals.require({ type: "write", summary, diff: parsed.diff });
       await applyUnifiedDiff(
         parsed.diff,
-        (requestedPath) => resolveWorkspacePath(context.workspaceRoot, requestedPath),
+        (requestedPath) => resolveSafeWorkspacePath(context.workspaceRoot, requestedPath),
         (target) => state.assertUnchanged(target)
       );
       return `Applied patch: ${summary}`;
@@ -457,7 +483,7 @@ export function createToolRegistry(context: ToolContext) {
     },
     async execute(args) {
       const parsed = z.object({ path: z.string(), content: z.string(), mode: z.enum(["create", "replace"]) }).parse(args);
-      const target = resolveWorkspacePath(context.workspaceRoot, parsed.path);
+      const target = await resolveSafeWorkspacePath(context.workspaceRoot, parsed.path);
       const existing = await exists(target);
       if (parsed.mode === "create" && existing) {
         throw new Error(`Refusing to create ${parsed.path}; file already exists.`);
@@ -490,13 +516,28 @@ export function createToolRegistry(context: ToolContext) {
   register({
     schema: {
       name: "run",
-      description: "Run a shell command in the workspace.",
+      description:
+        "Run a shell command in the workspace. Commands currently execute on the local host process; container/sandbox profiles are explicit future execution-plane targets and return an unsupported-profile error until configured.",
       parameters: objectSchema({
-        command: { type: "string", description: "Shell command to run." }
+        command: { type: "string", description: "Shell command to run." },
+        executionProfile: {
+          type: "string",
+          enum: ["host", "container", "sandbox"],
+          description: "Execution-plane profile. Use host today; container and sandbox are not configured yet."
+        }
       })
     },
     async execute(args) {
-      const parsed = z.object({ command: z.string() }).parse(args);
+      const parsed = z
+        .object({
+          command: z.string(),
+          executionProfile: z.enum(["host", "container", "sandbox"]).optional()
+        })
+        .parse(args);
+      const executionProfile = resolveCommandExecutionProfile(parsed.executionProfile);
+      if (!executionProfile.supported) {
+        throw new Error(executionProfile.reason ?? `Unsupported execution profile: ${executionProfile.profile}`);
+      }
       await context.approvals.require({
         type: "shell",
         command: parsed.command,
@@ -510,6 +551,9 @@ export function createToolRegistry(context: ToolContext) {
         timeout: 120_000
       });
       return [
+        `executionProfile: ${executionProfile.profile}`,
+        `executionIsolation: ${executionProfile.isolation}`,
+        `workingDirectory: ${context.workspaceRoot}`,
         `exitCode: ${result.exitCode}`,
         result.stdout ? `stdout:\n${result.stdout}` : "",
         result.stderr ? `stderr:\n${result.stderr}` : ""
@@ -526,6 +570,7 @@ export function createToolRegistry(context: ToolContext) {
       parameters: objectSchema({})
     },
     async execute() {
+      await context.approvals.require({ type: "read", summary: "git status", path: "." });
       const branch = await execa("git", ["branch", "--show-current"], {
         cwd: context.workspaceRoot,
         reject: false
@@ -577,6 +622,47 @@ async function exists(filePath: string) {
   } catch {
     return false;
   }
+}
+
+async function readFilePreview(filePath: string) {
+  const info = await stat(filePath);
+  if (info.size <= MAX_TOOL_READ_BYTES) {
+    return {
+      text: await readFile(filePath, "utf8"),
+      truncated: false
+    };
+  }
+
+  const handle = await open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(MAX_TOOL_READ_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return {
+      text: `${buffer.subarray(0, bytesRead).toString("utf8")}\n[truncated]`,
+      truncated: true
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+function truncateToolOutput(value: string, maxLength: number) {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}\n[truncated]`;
+}
+
+async function normalizeSafeBrowserToolUrl(workspaceRoot: string, rawUrl: string) {
+  const parsed = new URL(rawUrl);
+  if (parsed.protocol !== "file:") {
+    return rawUrl;
+  }
+
+  const filePath = fileURLToPath(parsed);
+  await assertRealPathInsideWorkspace(workspaceRoot, filePath, rawUrl);
+  return pathToFileURL(path.resolve(filePath)).toString();
+}
+
+function hasEnabledMcpServers(servers: AppConfig["mcpServers"] | undefined) {
+  return Object.values(servers ?? {}).some((server) => !server.disabled);
 }
 
 function currentDateTime(now = new Date()) {
