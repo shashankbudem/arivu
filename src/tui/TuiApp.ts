@@ -1,5 +1,6 @@
 import path from "node:path";
 import blessed from "blessed";
+import { execa } from "execa";
 import { Agent } from "../agent/Agent.js";
 import { chatContentToText } from "../agent/content.js";
 import { OpenAICompatibleChatClient } from "../agent/OpenAICompatibleChatClient.js";
@@ -30,11 +31,21 @@ type ActivityLine = {
 
 type FocusTarget = "input" | "conversation" | "activity";
 export type TuiSlashCommand =
-  | { kind: "clear" | "exit" | "help" | "status" }
+  | { kind: "clear" | "diff" | "exit" | "help" | "status" }
   | { kind: "sessions"; limit: number }
   | { kind: "resume"; sessionId: string }
   | { kind: "error"; message: string }
   | { kind: "unknown" };
+
+export type TuiGitDiffSummary = {
+  root: string;
+  branch?: string;
+  stagedShortstat?: string;
+  unstagedShortstat?: string;
+  stagedFiles: string[];
+  unstagedFiles: string[];
+  untrackedFiles: string[];
+};
 
 const SPINNER = ["-", "\\", "|", "/"];
 const DEFAULT_TUI_SESSION_LIST_LIMIT = 10;
@@ -364,6 +375,11 @@ export class TuiApp {
       return true;
     }
 
+    if (command.kind === "diff") {
+      await this.showGitDiff();
+      return true;
+    }
+
     if (command.kind === "sessions") {
       await this.showSessions(command.limit);
       return true;
@@ -483,6 +499,7 @@ export class TuiApp {
         "/help          Show this help",
         "/clear         Clear the visible conversation",
         "/status        Show workspace and model status",
+        "/diff          Show staged, unstaged, and untracked git changes",
         "/sessions [n]  List recent saved sessions",
         "/resume <id>   Resume a saved session in this TUI",
         "/exit          Quit",
@@ -512,6 +529,25 @@ export class TuiApp {
       time: new Date()
     });
     this.setStatus("Status");
+  }
+
+  private async showGitDiff() {
+    try {
+      const summary = await loadTuiGitDiffSummary(this.workspace.root);
+      this.log.push({
+        kind: "system",
+        text: formatTuiGitDiffSummary(summary),
+        time: new Date()
+      });
+      this.setStatus("Diff");
+    } catch (error) {
+      this.log.push({
+        kind: "error",
+        text: `Unable to summarize git diff: ${error instanceof Error ? error.message : String(error)}`,
+        time: new Date()
+      });
+      this.setStatus("Diff failed");
+    }
   }
 
   private async showSessions(limit: number) {
@@ -807,6 +843,8 @@ export function parseTuiSlashCommand(value: string): TuiSlashCommand | undefined
       return { kind: "clear" };
     case "/status":
       return { kind: "status" };
+    case "/diff":
+      return { kind: "diff" };
     case "/sessions":
       return parseSessionsCommand(args);
     case "/resume":
@@ -817,6 +855,64 @@ export function parseTuiSlashCommand(value: string): TuiSlashCommand | undefined
     default:
       return { kind: "unknown" };
   }
+}
+
+export async function loadTuiGitDiffSummary(root: string): Promise<TuiGitDiffSummary> {
+  await execa("git", ["-C", root, "rev-parse", "--is-inside-work-tree"]);
+  const [branch, stagedShortstat, unstagedShortstat, stagedFiles, unstagedFiles, statusShort] = await Promise.all([
+    gitOutput(root, ["branch", "--show-current"]),
+    gitOutput(root, ["diff", "--cached", "--shortstat"]),
+    gitOutput(root, ["diff", "--shortstat"]),
+    gitOutput(root, ["diff", "--cached", "--name-status", "--"]),
+    gitOutput(root, ["diff", "--name-status", "--"]),
+    gitOutput(root, ["status", "--short", "--untracked-files=normal"])
+  ]);
+
+  return {
+    root,
+    branch: branch || undefined,
+    stagedShortstat: stagedShortstat || undefined,
+    unstagedShortstat: unstagedShortstat || undefined,
+    stagedFiles: splitGitLines(stagedFiles).map(formatNameStatusLine),
+    unstagedFiles: splitGitLines(unstagedFiles).map(formatNameStatusLine),
+    untrackedFiles: splitGitLines(statusShort)
+      .filter((line) => line.startsWith("?? "))
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean)
+  };
+}
+
+export function formatTuiGitDiffSummary(summary: TuiGitDiffSummary) {
+  const hasChanges =
+    Boolean(summary.stagedShortstat || summary.unstagedShortstat) ||
+    summary.stagedFiles.length > 0 ||
+    summary.unstagedFiles.length > 0 ||
+    summary.untrackedFiles.length > 0;
+  if (!hasChanges) {
+    return [
+      "Git diff summary:",
+      `Root: ${summary.root}`,
+      summary.branch ? `Branch: ${summary.branch}` : undefined,
+      "",
+      "No staged, unstaged, or untracked changes."
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n");
+  }
+
+  return [
+    "Git diff summary:",
+    `Root: ${summary.root}`,
+    summary.branch ? `Branch: ${summary.branch}` : undefined,
+    "",
+    formatDiffSection("Staged", summary.stagedShortstat, summary.stagedFiles),
+    "",
+    formatDiffSection("Unstaged", summary.unstagedShortstat, summary.unstagedFiles),
+    "",
+    formatDiffSection("Untracked", undefined, summary.untrackedFiles)
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join("\n");
 }
 
 export function formatTuiSessionList(sessions: AgentSession[], limit = DEFAULT_TUI_SESSION_LIST_LIMIT) {
@@ -852,6 +948,36 @@ function parseSessionsCommand(args: string[]): TuiSlashCommand {
   }
 
   return { kind: "sessions", limit: clampSessionLimit(limit) };
+}
+
+async function gitOutput(root: string, args: string[]) {
+  const result = await execa("git", ["-C", root, ...args]);
+  return result.stdout.trim();
+}
+
+function splitGitLines(value: string) {
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function formatNameStatusLine(line: string) {
+  const [status = "", ...paths] = line.split("\t");
+  return `${status.padEnd(3)} ${paths.join(" -> ")}`.trimEnd();
+}
+
+function formatDiffSection(title: string, shortstat: string | undefined, files: string[]) {
+  if (!shortstat && files.length === 0) {
+    return `${title}:\n  none`;
+  }
+  return [
+    `${title}:`,
+    shortstat ? `  ${shortstat}` : undefined,
+    ...files.map((file) => `  ${file}`)
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join("\n");
 }
 
 function clampSessionLimit(value: number) {

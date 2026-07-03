@@ -60,7 +60,7 @@ Implemented:
 - Markdown rendering for assistant responses, with Shiki-highlighted fenced code blocks and per-block copy controls.
 - Default TUI built with `blessed`.
 - One-shot mode via `arivu "task"`.
-- `sessions`, `resume <session-id>`, and `config get|set`; inside the TUI, `/sessions [n]` lists recent saved sessions and `/resume <session-id>` switches the live TUI into that saved session.
+- `sessions`, `resume <session-id>`, and `config get|set`; inside the TUI, `/sessions [n]` lists recent saved sessions, `/resume <session-id>` switches the live TUI into that saved session, and `/diff` shows a read-only staged/unstaged/untracked git summary for the active workspace.
 - OpenAI-compatible `/chat/completions` client.
 - Agent tool-call loop plus desktop bounded agent-loop mode for multi-iteration tasks.
 - Harness foundation docs in `docs/HARNESS.md`, with task runs plus opt-in task worktrees and local worktree lifecycle actions implemented; sandbox execution remains a future milestone.

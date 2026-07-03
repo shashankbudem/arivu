@@ -249,6 +249,9 @@ Inside the TUI:
 
 - `/help` shows commands.
 - `/status` shows workspace/model state.
+- `/diff` shows staged, unstaged, and untracked git changes without sending anything to the model.
+- `/sessions [n]` lists recent saved sessions.
+- `/resume <session-id>` switches the live TUI into that session.
 - `/clear` clears visible conversation.
 - `/exit` exits.
 
@@ -261,7 +264,7 @@ The TUI is in `src/tui/TuiApp.ts`. Keep these behaviors intact:
 - Default `arivu` opens the TUI.
 - One-shot mode stays non-interactive.
 - `sessions` prints recent saved sessions newest first, and `resume <session-id>` opens the TUI with session history.
-- Inside the TUI, `/sessions [n]` lists recent saved sessions and `/resume <session-id>` switches the live TUI into that session.
+- Inside the TUI, `/sessions [n]` lists recent saved sessions, `/resume <session-id>` switches the live TUI into that session, and `/diff` shows a local git change summary.
 - Narrow terminals remain usable.
 - Approval prompts still resolve the same permission promise.
 
