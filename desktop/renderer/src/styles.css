@@ -5091,6 +5091,69 @@ body.is-resizing .panel-resize-handle::after {
   color: #8ce8d4;
 }
 
+.workspace-policy-transfer {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgb(52 48 42 / 0.85);
+  border-radius: 8px;
+  background: rgb(11 14 15 / 0.72);
+}
+
+.workspace-policy-transfer-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workspace-policy-transfer-head strong {
+  color: #f6f1e8;
+  font-size: 12px;
+}
+
+.workspace-policy-transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.workspace-policy-transfer textarea {
+  min-height: 92px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid #34302a;
+  border-radius: 6px;
+  background: #080b0c;
+  color: #efede8;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  outline: none;
+}
+
+.workspace-policy-transfer textarea:focus {
+  border-color: #2bbf9f;
+}
+
+.workspace-policy-transfer-status,
+.workspace-policy-transfer-error {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.workspace-policy-transfer-status {
+  color: #8ce8d4;
+}
+
+.workspace-policy-transfer-error {
+  color: #ff9f8f;
+}
+
 .workspace-scope-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));

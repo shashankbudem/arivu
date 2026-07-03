@@ -88,6 +88,11 @@ import {
   workspacePolicyPresetMatches,
   type WorkspacePolicyPreset
 } from "../../../src/permissions/workspacePolicyPresets";
+import {
+  parseWorkspacePolicyTransfer,
+  serializeWorkspacePolicyTransfer,
+  type WorkspacePolicyTransferPayload
+} from "../../../src/permissions/workspacePolicyTransfer";
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
 
 type ViewMode = "chat" | "history" | "settings" | "ui";
@@ -6447,6 +6452,10 @@ function SettingsView({
           setWorkspacePolicyOverrides(normalizedPreset.overrides);
           setWorkspaceScopeRules(normalizedPreset.scopeRules);
         }}
+        onWorkspacePolicyImport={(policy) => {
+          setWorkspacePolicyOverrides(policy.overrides);
+          setWorkspaceScopeRules(policy.scopeRules);
+        }}
         loading={capabilityPolicyLoading}
         error={capabilityPolicyError}
         onRefresh={() => void refreshCapabilityPolicies()}
@@ -6671,6 +6680,7 @@ function CapabilityPolicyPanel({
   onWorkspaceOverrideChange,
   onWorkspaceScopeRulesChange,
   onWorkspacePresetApply,
+  onWorkspacePolicyImport,
   loading,
   error,
   onRefresh
@@ -6684,14 +6694,45 @@ function CapabilityPolicyPanel({
   onWorkspaceOverrideChange: (capability: WorkspacePolicyCapability, override: CapabilityPolicyOverrideEffect | "inherit") => void;
   onWorkspaceScopeRulesChange: (rules: WorkspaceScopePolicyRules) => void;
   onWorkspacePresetApply: (preset: WorkspacePolicyPreset) => void;
+  onWorkspacePolicyImport: (policy: WorkspacePolicyTransferPayload) => void;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
 }) {
+  const [transferText, setTransferText] = useState("");
+  const [transferStatus, setTransferStatus] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
   const activeScopeItems = scopePolicySummaryItems(workspaceScopeRules);
   const activePresetId = WORKSPACE_POLICY_PRESETS.find((preset) =>
     workspacePolicyPresetMatches(preset, workspaceOverrides, workspaceScopeRules)
   )?.id;
+
+  async function copyWorkspacePolicyJson() {
+    const text = serializeWorkspacePolicyTransfer(workspaceOverrides, workspaceScopeRules);
+    setTransferText(text);
+    setTransferError(null);
+    try {
+      await writeClipboardText(text);
+      setTransferStatus("Workspace policy JSON copied.");
+    } catch (err) {
+      setTransferStatus(null);
+      setTransferError(`Workspace policy JSON is ready below, but clipboard copy failed: ${formatError(err)}`);
+    }
+  }
+
+  function applyWorkspacePolicyJson() {
+    setTransferStatus(null);
+    setTransferError(null);
+    try {
+      const policy = parseWorkspacePolicyTransfer(transferText);
+      onWorkspacePolicyImport(policy);
+      setTransferText(serializeWorkspacePolicyTransfer(policy.overrides, policy.scopeRules));
+      setTransferStatus("Workspace policy JSON imported. Save settings to persist it.");
+    } catch (err) {
+      setTransferError(formatError(err));
+    }
+  }
+
   return (
     <section className="skills-settings-section policy-settings-section" aria-label="Capability policy">
       <div className="settings-section-heading">
@@ -6739,6 +6780,39 @@ function CapabilityPolicyPanel({
               </button>
             );
           })}
+        </div>
+        <div className="workspace-policy-transfer">
+          <div className="workspace-policy-transfer-head">
+            <strong>Workspace policy JSON</strong>
+            <div className="workspace-policy-transfer-actions">
+              <button className="secondary-command" type="button" onClick={() => void copyWorkspacePolicyJson()}>
+                <Copy size={14} />
+                Copy JSON
+              </button>
+              <button
+                className="secondary-command"
+                type="button"
+                onClick={applyWorkspacePolicyJson}
+                disabled={!transferText.trim()}
+              >
+                <FileText size={14} />
+                Apply JSON
+              </button>
+            </div>
+          </div>
+          <textarea
+            value={transferText}
+            onChange={(event) => {
+              setTransferText(event.target.value);
+              setTransferStatus(null);
+              setTransferError(null);
+            }}
+            spellCheck={false}
+            rows={4}
+            placeholder='{"kind":"arivu.workspacePolicy","version":1,"overrides":{},"scopeRules":{}}'
+          />
+          {transferStatus ? <small className="workspace-policy-transfer-status">{transferStatus}</small> : null}
+          {transferError ? <small className="workspace-policy-transfer-error">{transferError}</small> : null}
         </div>
         <div className="workspace-policy-grid">
           {WORKSPACE_POLICY_CAPABILITIES.map((capability) => {

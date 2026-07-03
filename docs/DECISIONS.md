@@ -425,3 +425,9 @@ Reason: browser work is part of Arivu's routine agent execution path, and approv
 Decision: Settings exposes workspace policy preset buttons backed by `src/permissions/workspacePolicyPresets.ts`. Presets fill the current workspace override map and scope rules for default, review-first, local-only, and locked-down postures, then reuse the existing Save settings path. Preset matching is derived from normalized overrides and normalized scope rules so refreshed Settings can show the selected preset when the saved workspace policy still matches it exactly.
 
 Reason: workspace policy is powerful but verbose. Presets give users a safe starting point for common hardening postures without adding another persistence path or weakening the underlying capability policy rules.
+
+## 2026-07-03: Workspace policy JSON transfer
+
+Decision: Settings exposes Workspace policy JSON controls backed by `src/permissions/workspacePolicyTransfer.ts`. Copy JSON serializes the current unsaved workspace overrides and scope rules into a normalized `arivu.workspacePolicy` envelope. Apply JSON accepts that envelope or a plain object with `overrides` and `scopeRules`, validates supported capabilities/effects/browser classes, normalizes the result, and updates the same unsaved Settings state used by presets and manual edits.
+
+Reason: users need a lightweight way to move hardened workspace policies between projects without editing the config file by hand. Keeping transfer as normalized JSON avoids a separate persistence path while making invalid or unsupported policy input visible before Save settings writes anything.
