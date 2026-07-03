@@ -41,6 +41,7 @@ Task-run capabilities now feed the shared capability policy table in `src/permis
 Arivu currently executes against the active local workspace:
 
 - File and search tools are workspace-contained.
+- Desktop file-context attachments are selected explicitly by the user, resolved inside the active workspace, and sent as bounded quoted prompt text.
 - Existing-file edits prefer unified patches and require read-before-replace checks.
 - Shell commands run through the local `run` tool with trust-mode approval. The tool now accepts an explicit `executionProfile` and records profile/isolation/cwd metadata on command artifacts.
 - Browser tools use isolated Electron browser targets with a persistent Arivu browser profile.

@@ -91,7 +91,7 @@ import { ApprovalManager } from "../../src/permissions/ApprovalManager.js";
 import { describeCapabilityPolicies, evaluateCapabilityPolicy } from "../../src/permissions/capabilityPolicy.js";
 import type { CapabilityPolicyOverrides } from "../../src/permissions/capabilityPolicy.js";
 import { SessionStore } from "../../src/sessions/SessionStore.js";
-import { resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
+import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
 import type { BrowserBounds, BrowserMode, BrowserState } from "../../src/tools/browserControl.js";
 import { detectWorkspace, type WorkspaceInfo } from "../../src/workspace.js";
@@ -99,6 +99,9 @@ import { DesktopBrowserController } from "./browserController.js";
 import { isExternalHttpUrl, isTrustedAppNavigationUrl } from "./navigationSafety.js";
 
 const PLAN_MODE_TOOL_NAMES = ["list", "read", "search", "git_status", "current_datetime", "current_location", "list_skills", "read_skill"];
+const MAX_CONTEXT_FILE_ATTACHMENTS = 6;
+const MAX_CONTEXT_FILE_BYTES = 256 * 1024;
+const MAX_CONTEXT_FILE_CHARS = 24_000;
 
 type PublicConfig = {
   baseUrl: string;
@@ -290,6 +293,16 @@ type LocalImageResult = {
   dataUrl: string;
 };
 
+type ContextFileAttachment = {
+  id: string;
+  path: string;
+  name: string;
+  size: number;
+  lineCount: number;
+  content: string;
+  truncated: boolean;
+};
+
 type CompactContextResult = {
   state: DesktopState;
   compacted: boolean;
@@ -416,6 +429,64 @@ class DesktopController {
       size: image.size,
       dataUrl: image.dataUrl
     };
+  }
+
+  async chooseContextFiles(): Promise<{ files: ContextFileAttachment[] }> {
+    if (!this.projectRoot) {
+      throw new Error("Open a workspace before attaching file context.");
+    }
+
+    const result = await dialog.showOpenDialog({
+      title: "Attach file context",
+      defaultPath: this.projectRoot,
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        {
+          name: "Text and code",
+          extensions: [
+            "txt",
+            "md",
+            "markdown",
+            "json",
+            "jsonc",
+            "yaml",
+            "yml",
+            "toml",
+            "js",
+            "jsx",
+            "ts",
+            "tsx",
+            "css",
+            "scss",
+            "html",
+            "xml",
+            "py",
+            "rb",
+            "go",
+            "rs",
+            "java",
+            "kt",
+            "swift",
+            "c",
+            "h",
+            "cpp",
+            "hpp",
+            "cs",
+            "sh",
+            "zsh",
+            "bash"
+          ]
+        },
+        { name: "All files", extensions: ["*"] }
+      ]
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { files: [] };
+    }
+
+    const selected = result.filePaths.slice(0, MAX_CONTEXT_FILE_ATTACHMENTS);
+    const files = await Promise.all(selected.map((filePath) => readContextFileAttachment(this.projectRoot!, filePath)));
+    return { files };
   }
 
   async createWorkspace(options: WorkspaceScaffoldOptions = {}) {
@@ -2043,6 +2114,35 @@ async function readImageAttachment(filePath: string): Promise<ImageAttachment> {
   };
 }
 
+async function readContextFileAttachment(workspaceRoot: string, filePath: string): Promise<ContextFileAttachment> {
+  const target = await resolveSafeWorkspacePath(workspaceRoot, filePath);
+  const fileStat = await stat(target);
+  if (!fileStat.isFile()) {
+    throw new Error(`${path.basename(target)} is not a file.`);
+  }
+  if (fileStat.size > MAX_CONTEXT_FILE_BYTES) {
+    throw new Error(`${path.basename(target)} is larger than ${formatBytes(MAX_CONTEXT_FILE_BYTES)}.`);
+  }
+
+  const data = await readFile(target);
+  if (data.includes(0)) {
+    throw new Error(`${path.basename(target)} looks like a binary file.`);
+  }
+
+  const fullContent = data.toString("utf8");
+  const truncated = fullContent.length > MAX_CONTEXT_FILE_CHARS;
+  const content = truncated ? fullContent.slice(0, MAX_CONTEXT_FILE_CHARS) : fullContent;
+  return {
+    id: randomUUID(),
+    path: relativeToWorkspace(workspaceRoot, target),
+    name: path.basename(target),
+    size: fileStat.size,
+    lineCount: countLines(content),
+    content,
+    truncated
+  };
+}
+
 function mimeTypeForPath(filePath: string): string | undefined {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === ".png") {
@@ -2077,7 +2177,14 @@ function isInsideDirectory(parent: string, child: string) {
 }
 
 function formatBytes(bytes: number) {
+  if (bytes < 1024 * 1024) {
+    return `${Math.ceil(bytes / 1024)} KB`;
+  }
   return `${Math.round(bytes / 1024 / 1024)} MB`;
+}
+
+function countLines(text: string) {
+  return text.length === 0 ? 0 : text.split(/\r\n|\r|\n/).length;
 }
 
 function formatError(error: unknown) {
@@ -2608,6 +2715,7 @@ handleFromMain("workspace:choose", () => controller.chooseWorkspace());
 handleFromMain("workspace:open", (_event, workspaceRoot: string) => controller.openWorkspace(workspaceRoot));
 handleFromMain("images:choose", () => controller.chooseImages());
 handleFromMain("images:readLocal", (_event, filePath: string) => controller.readLocalImage(filePath));
+handleFromMain("files:chooseContext", () => controller.chooseContextFiles());
 handleFromMain("workspace:create", (_event, options: WorkspaceScaffoldOptions) => controller.createWorkspace(options));
 handleFromMain("project:justChats", () => controller.openJustChats());
 handleFromMain("project:selectForChat", (_event, projectRoot: string | null) => controller.selectChatProject(projectRoot));

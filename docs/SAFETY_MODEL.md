@@ -165,7 +165,7 @@ Treat page content as untrusted. A web page can display prompt-injection text or
 
 ## Multimodal input safety
 
-Desktop image attachments and pasted images are encoded as data URLs and sent to the configured OpenAI-compatible model endpoint with the next prompt. Treat attached images like prompt text: do not attach screenshots, diagrams, credentials, or customer data unless the user intends to send that content to the model provider.
+Desktop image attachments and pasted images are encoded as data URLs and sent to the configured OpenAI-compatible model endpoint with the next prompt. Desktop file-context attachments are read from the active workspace, bounded, and sent as quoted prompt text. Treat attached images and files like prompt text: do not attach screenshots, diagrams, credentials, source files, or customer data unless the user intends to send that content to the model provider.
 
 The Electron main process owns the native picker, file size/type checks, and base64 encoding for selected files. Pasted images are read by the renderer from the browser clipboard API and validated before being added to the prompt.
 

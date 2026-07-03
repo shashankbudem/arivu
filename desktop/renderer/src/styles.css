@@ -3605,10 +3605,16 @@ body.is-resizing .panel-resize-handle::after {
   white-space: nowrap;
 }
 
-.image-attachment-strip {
+.image-attachment-strip,
+.file-attachment-strip {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.file-attachment-strip {
+  align-items: center;
+  gap: 7px;
 }
 
 .skill-context-strip {
@@ -3681,6 +3687,53 @@ body.is-resizing .panel-resize-handle::after {
 }
 
 .skill-context-chip button:hover {
+  background: rgb(255 255 255 / 0.1);
+}
+
+.file-context-chip {
+  min-width: 0;
+  max-width: min(320px, 100%);
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid rgb(43 191 159 / 0.34);
+  border-radius: 7px;
+  background: rgb(43 191 159 / 0.08);
+  color: #d8d3ca;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.file-context-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-context-chip small {
+  flex: 0 0 auto;
+  color: #9c968d;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.file-context-chip button {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.file-context-chip button:hover {
   background: rgb(255 255 255 / 0.1);
 }
 
@@ -5668,6 +5721,7 @@ html[data-theme="light"] .settings-worktree-main p,
 html[data-theme="light"] .settings-worktree-main small,
 html[data-theme="light"] .settings-worktree-main span,
 html[data-theme="light"] .settings-worktree-meta span,
+html[data-theme="light"] .file-context-chip small,
 html[data-theme="light"] .settings-skill-empty,
 html[data-theme="light"] .workspace-policy-box > div:first-child span,
 html[data-theme="light"] .workspace-policy-box small,
@@ -5703,6 +5757,7 @@ html[data-theme="light"] .composer-worktree-button,
 html[data-theme="light"] .skill-load-button,
 html[data-theme="light"] .composer-plus-button,
 html[data-theme="light"] .composer-options-menu,
+html[data-theme="light"] .file-context-chip,
 html[data-theme="light"] .tool-popover,
 html[data-theme="light"] .skill-popover,
 html[data-theme="light"] .slash-command-menu,

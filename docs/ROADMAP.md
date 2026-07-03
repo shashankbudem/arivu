@@ -42,7 +42,7 @@ This roadmap is ordered by development leverage for the current MVP.
 - Add rollback helpers and broader patch preview for non-worktree edits. Direct edit artifacts now have draft-revert prompts; a pre-apply review boundary for larger non-worktree edits remains.
 - Make the capability policy more explainable/configurable in the UI without weakening the default local safety posture. Read-scope enforcement for `list`, `read`, `search`, and `git_status` is implemented through `read_repo` workspace overrides.
 - Add richer TUI change inspection beyond the implemented `/diff` staged/unstaged/untracked summary.
-- Add file mention/context commands.
+- Add richer file mention/context commands beyond the implemented desktop file-context picker and `/files` command.
 - Add richer multimodal composer workflows beyond the implemented picker, paste, and drag-and-drop image attachment paths.
 - Add safer command parsing instead of broad shell execution.
 

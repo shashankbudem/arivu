@@ -694,6 +694,20 @@ type ImagePickerResult = {
   images: ImageAttachment[];
 };
 
+type ContextFileAttachment = {
+  id: string;
+  path: string;
+  name: string;
+  size: number;
+  lineCount: number;
+  content: string;
+  truncated: boolean;
+};
+
+type ContextFilePickerResult = {
+  files: ContextFileAttachment[];
+};
+
 type LocalImageResult = {
   mimeType: string;
   size: number;
@@ -725,6 +739,7 @@ type DesktopApi = {
   openWorkspace(workspaceRoot: string): Promise<DesktopState>;
   chooseImages(): Promise<ImagePickerResult>;
   readLocalImage(filePath: string): Promise<LocalImageResult>;
+  chooseContextFiles(): Promise<ContextFilePickerResult>;
   createWorkspace(options?: WorkspaceScaffoldOptions): Promise<DesktopState>;
   openJustChats(): Promise<DesktopState>;
   selectChatProject(projectRoot: string | null): Promise<DesktopState>;

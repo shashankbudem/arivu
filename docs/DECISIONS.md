@@ -78,6 +78,12 @@ Decision: saved sessions can store optional `title` and `pinnedAt` metadata. Des
 
 Reason: a harness-style coding agent needs named, durable work items that can survive handoff and later review. Keeping labels and pins as metadata avoids rewriting transcript content or misrepresenting when model/tool activity last happened.
 
+## 2026-07-03: File context attachments are quoted prompt text
+
+Decision: desktop file-context attachments are selected through an active-workspace file picker or `/files`, bounded by count and size, read as UTF-8 text in the main process, rendered as removable composer chips, included in the composer token estimate, and sent as quoted `<workspace_file>` prompt context.
+
+Reason: file context should be explicit user-selected input, not hidden filesystem access. Quoting the contents with path metadata helps the model use nearby code while preserving the harness boundary that files are context, not higher-priority instructions.
+
 ## 2026-06-23: One-shot task worktrees
 
 Decision: add opt-in desktop task worktree mode. When armed for a prompt, Arivu creates a git branch/worktree under app data, runs tools against that isolated checkout, and records the worktree metadata on the task run while keeping the saved chat attached to the original project.

@@ -6,6 +6,7 @@ const desktopApi = {
   openWorkspace: (workspaceRoot: string) => ipcRenderer.invoke("workspace:open", workspaceRoot),
   chooseImages: () => ipcRenderer.invoke("images:choose"),
   readLocalImage: (filePath: string) => ipcRenderer.invoke("images:readLocal", filePath),
+  chooseContextFiles: () => ipcRenderer.invoke("files:chooseContext"),
   createWorkspace: (options: unknown) => ipcRenderer.invoke("workspace:create", options),
   openJustChats: () => ipcRenderer.invoke("project:justChats"),
   selectChatProject: (projectRoot: string | null) => ipcRenderer.invoke("project:selectForChat", projectRoot),

@@ -68,6 +68,7 @@ import {
   buildTaskRunVerificationReplayPrompt,
   buildTaskRunVerificationRerunPrompt
 } from "../../../src/agent/reportRemediation";
+import { promptTextWithFileContext } from "../../../src/agent/fileContext";
 import {
   buildTaskRunDiffComparison,
   buildTaskRunPlanSourceReview,
@@ -111,6 +112,7 @@ const COMPOSER_TOKEN_BUDGET = 8_000;
 const DEFAULT_AGENT_LOOP_MAX_ITERATIONS = 5;
 const MAX_IMAGE_ATTACHMENTS = 6;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_CONTEXT_FILE_ATTACHMENTS = 6;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const SUPPORTED_IMAGE_EXTENSIONS: Record<string, string> = {
   gif: "image/gif",
@@ -387,7 +389,7 @@ type TaskWorktreeActionOptions = {
   conflictPath?: string;
 };
 
-type SlashCommandId = "compact" | "session" | "tools" | "skills" | "browser" | "plan" | "loop" | "worktree";
+type SlashCommandId = "compact" | "session" | "tools" | "skills" | "files" | "browser" | "plan" | "loop" | "worktree";
 
 type SlashCommandDefinition = {
   id: SlashCommandId;
@@ -443,6 +445,13 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
     keywords: ["load", "local", "workflow", "skill"]
   },
   {
+    id: "files",
+    command: "files",
+    title: "File context",
+    description: "Attach workspace text files to the next prompt.",
+    keywords: ["attach", "context", "file", "code", "mention"]
+  },
+  {
     id: "browser",
     command: "browser",
     title: "Browser window",
@@ -479,6 +488,7 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState("");
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<ContextFileAttachment[]>([]);
   const [composerDragActive, setComposerDragActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Starting");
@@ -771,7 +781,7 @@ export function App() {
     lastActivity?.status,
     state?.sessionId
   ]);
-  const promptTokens = useMemo(() => estimateTokenCount(prompt), [prompt]);
+  const promptTokens = useMemo(() => estimateTokenCount(promptTextWithFileContext(prompt, fileAttachments)), [fileAttachments, prompt]);
   const nonSystemMessageCount = useMemo(() => messages.filter((message) => message.role !== "system").length, [messages]);
   const estimatedContextTokens = useMemo(() => estimateContextTokens(messages), [messages]);
   const loadedSkillNames = useMemo(() => loadedSkillNamesFromMessages(messages), [messages]);
@@ -797,7 +807,8 @@ export function App() {
         pendingSkillCount: pendingSkillNames.length,
         agentPlanModeEnabled,
         agentLoopEnabled,
-        agentWorktreeEnabled: agentWorktreeEnabled || Boolean(worktreeContinuation) || Boolean(worktreePlanSource)
+        agentWorktreeEnabled: agentWorktreeEnabled || Boolean(worktreeContinuation) || Boolean(worktreePlanSource),
+        fileAttachmentCount: fileAttachments.length
       }),
     [
       agentPlanModeEnabled,
@@ -811,6 +822,7 @@ export function App() {
       compactingContext,
       nonSystemMessageCount,
       pendingSkillNames.length,
+      fileAttachments.length,
       state
     ]
   );
@@ -1204,6 +1216,37 @@ export function App() {
     }
   }
 
+  async function chooseContextFiles() {
+    if (busy) {
+      return;
+    }
+    const slots = Math.max(0, MAX_CONTEXT_FILE_ATTACHMENTS - fileAttachments.length);
+    if (slots === 0) {
+      setError(`You can attach up to ${MAX_CONTEXT_FILE_ATTACHMENTS} files.`);
+      setStatus("File context limit reached");
+      return;
+    }
+
+    try {
+      const result = await window.arivu.chooseContextFiles();
+      if (result.files.length === 0) {
+        return;
+      }
+      const merged = mergeFileAttachments(fileAttachments, result.files);
+      setFileAttachments(merged);
+      const addedCount = Math.max(0, merged.length - fileAttachments.length);
+      if (addedCount > 0) {
+        setStatus(addedCount === 1 ? "Attached file context" : `Attached ${addedCount} files`);
+      } else {
+        setStatus("File context updated");
+      }
+      setError(null);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
+  }
+
   async function attachImageFiles(files: File[], source: "pasted" | "selected" | "dropped") {
     if (busy) {
       setStatus("Wait for current response before attaching images");
@@ -1289,6 +1332,10 @@ export function App() {
 
   function removeImageAttachment(id: string) {
     setImageAttachments((current) => current.filter((image) => image.id !== id));
+  }
+
+  function removeFileAttachment(id: string) {
+    setFileAttachments((current) => current.filter((file) => file.id !== id));
   }
 
   async function selectChatProject(projectRoot: string | null) {
@@ -1539,7 +1586,7 @@ export function App() {
   }
 
   function handleDraftRemediationPrompt(draftText: string, options: DraftPromptOptions = {}) {
-    if (prompt.trim() || imageAttachments.length > 0) {
+    if (prompt.trim() || imageAttachments.length > 0 || fileAttachments.length > 0) {
       const confirmed = window.confirm(options.confirmLabel ?? "Replace the current composer draft with a repair prompt from this report evidence?");
       if (!confirmed) {
         return;
@@ -1548,6 +1595,7 @@ export function App() {
 
     setPrompt(draftText);
     setImageAttachments([]);
+    setFileAttachments([]);
     if (options.worktreeContinuation) {
       setWorktreeContinuation(options.worktreeContinuation);
       setWorktreePlanSource(null);
@@ -1584,6 +1632,7 @@ export function App() {
     setRetryPrompt(null);
     setFailedPrompt(null);
     setImageAttachments([]);
+    setFileAttachments([]);
     setPendingSkillNames([]);
     setCommandOutput(null);
   }
@@ -1745,6 +1794,7 @@ export function App() {
     setError(null);
     setComposerOptionsOpen(false);
     setToolsPopoverOpen(false);
+    setSkillsPopoverOpen(false);
     setCommandOutput(null);
 
     if (command.id === "compact") {
@@ -1810,7 +1860,8 @@ export function App() {
           messages,
           estimatedContextTokens,
           availableToolCount: availableTools.length,
-          imageAttachmentCount: imageAttachments.length
+          imageAttachmentCount: imageAttachments.length,
+          fileAttachmentCount: fileAttachments.length
         })
       );
       setStatus("Session details ready");
@@ -1823,6 +1874,12 @@ export function App() {
       setSkillsPopoverOpen(true);
       setToolsPopoverOpen(false);
       setStatus(`Showing ${formatNumber((skills ?? availableSkills).length)} skills`);
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+
+    if (command.id === "files") {
+      await chooseContextFiles();
       requestAnimationFrame(() => promptInputRef.current?.focus());
       return;
     }
@@ -1844,7 +1901,7 @@ export function App() {
 
   async function submitPrompt(content?: ChatContent, options: SubmitPromptOptions = {}) {
     const usingComposer = content === undefined;
-    const nextContent = content ?? createPromptContent(prompt, imageAttachments);
+    const nextContent = content ?? createPromptContent(prompt, imageAttachments, fileAttachments);
     const nextSkillNames = usingComposer ? pendingSkillNames : options.skillNames ?? [];
     const nextPlanModeEnabled = options.planModeEnabled ?? (usingComposer ? agentPlanModeEnabled : false);
     const nextLoopEnabled = nextPlanModeEnabled ? false : options.loopEnabled ?? (usingComposer ? agentLoopEnabled : false);
@@ -1871,6 +1928,7 @@ export function App() {
     if (usingComposer) {
       setPrompt("");
       setImageAttachments([]);
+      setFileAttachments([]);
       setAgentPlanModeEnabled(false);
       setAgentLoopEnabled(false);
       setAgentWorktreeEnabled(false);
@@ -2060,6 +2118,7 @@ export function App() {
   function editPromptContent(content: ChatContent) {
     setPrompt(chatContentTextOnly(content));
     setImageAttachments(imageAttachmentsFromContent(content));
+    setFileAttachments([]);
     setToolsPopoverOpen(false);
     setError(null);
     setStatus("Editing query");
@@ -2612,6 +2671,9 @@ export function App() {
                   {imageAttachments.length > 0 ? (
                     <ImageAttachmentStrip images={imageAttachments} onRemove={removeImageAttachment} />
                   ) : null}
+                  {fileAttachments.length > 0 ? (
+                    <FileAttachmentStrip files={fileAttachments} onRemove={removeFileAttachment} />
+                  ) : null}
                   {toolsPopoverOpen ? <ToolPanel tools={availableTools} /> : null}
                   {skillsPopoverOpen ? (
                     <SkillPanel
@@ -2648,6 +2710,7 @@ export function App() {
                             busy={busy}
                             canSelectChatProject={canSelectChatProject}
                             selectedImageCount={imageAttachments.length}
+                            selectedFileCount={fileAttachments.length}
                             toolsOpen={toolsPopoverOpen}
                             skillsOpen={skillsPopoverOpen}
                             skillCount={availableSkills.length}
@@ -2656,6 +2719,7 @@ export function App() {
                             onSelectProject={(projectRoot) => void selectChatProject(projectRoot)}
                             onOpenWorkspace={() => void chooseWorkspace()}
                             onChooseImages={() => void chooseImages()}
+                            onChooseContextFiles={() => void chooseContextFiles()}
                             onToggleTools={() => {
                               setToolsPopoverOpen((current) => !current);
                               setSkillsPopoverOpen(false);
@@ -2787,7 +2851,7 @@ export function App() {
                     <button
                       className="composer-send-button icon-send-button"
                       type="submit"
-                      disabled={busy || slashQuery !== null || !chatContentHasRenderableContent(createPromptContent(prompt, imageAttachments))}
+                      disabled={busy || slashQuery !== null || !chatContentHasRenderableContent(createPromptContent(prompt, imageAttachments, fileAttachments))}
                       title="Send prompt"
                       aria-label="Send prompt"
                     >
@@ -3066,6 +3130,7 @@ function ComposerOptionsMenu({
   busy,
   canSelectChatProject,
   selectedImageCount,
+  selectedFileCount,
   toolsOpen,
   skillsOpen,
   skillCount,
@@ -3074,6 +3139,7 @@ function ComposerOptionsMenu({
   onSelectProject,
   onOpenWorkspace,
   onChooseImages,
+  onChooseContextFiles,
   onToggleTools,
   onToggleSkills,
   onToggleBrowser,
@@ -3084,6 +3150,7 @@ function ComposerOptionsMenu({
   busy: boolean;
   canSelectChatProject: boolean;
   selectedImageCount: number;
+  selectedFileCount: number;
   toolsOpen: boolean;
   skillsOpen: boolean;
   skillCount: number;
@@ -3092,6 +3159,7 @@ function ComposerOptionsMenu({
   onSelectProject: (projectRoot: string | null) => void;
   onOpenWorkspace: () => void;
   onChooseImages: () => void;
+  onChooseContextFiles: () => void;
   onToggleTools: () => void;
   onToggleSkills: () => void;
   onToggleBrowser: () => void;
@@ -3120,6 +3188,18 @@ function ComposerOptionsMenu({
           Images
         </span>
         <ImageAttachButton count={selectedImageCount} disabled={busy} onClick={onChooseImages} />
+      </div>
+      <div className="composer-option-row">
+        <span className="composer-option-label">
+          <FileText size={15} />
+          Files
+        </span>
+        <FileAttachButton
+          count={selectedFileCount}
+          disabled={busy || state.projectRoot === null}
+          disabledReason={busy ? "Wait for the current response before attaching file context" : "Open a workspace before attaching file context"}
+          onClick={onChooseContextFiles}
+        />
       </div>
       <div className="composer-option-row">
         <span className="composer-option-label">
@@ -3196,6 +3276,33 @@ function ImageAttachButton({
   );
 }
 
+function FileAttachButton({
+  count,
+  disabled,
+  disabledReason,
+  onClick
+}: {
+  count: number;
+  disabled: boolean;
+  disabledReason: string;
+  onClick: () => void;
+}) {
+  const label = count > 0 ? `Attach file context (${count})` : "Attach file context";
+  return (
+    <button
+      className={count > 0 ? "composer-tool-button active" : "composer-tool-button"}
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={disabled ? disabledReason : label}
+      aria-label={label}
+    >
+      <FileText size={15} />
+      Files
+    </button>
+  );
+}
+
 function ImageAttachmentStrip({
   images,
   onRemove
@@ -3212,6 +3319,33 @@ function ImageAttachmentStrip({
             <X size={12} />
           </button>
         </figure>
+      ))}
+    </div>
+  );
+}
+
+function FileAttachmentStrip({
+  files,
+  onRemove
+}: {
+  files: ContextFileAttachment[];
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="file-attachment-strip" aria-label="Attached file context">
+      <span className="skill-context-label">
+        <FileText size={13} />
+        Files
+      </span>
+      {files.map((file) => (
+        <span className="file-context-chip" key={file.id} title={`${file.path} - ${formatBytes(file.size)} - ${formatNumber(file.lineCount)} lines`}>
+          <FileText size={13} />
+          <span>{file.path}</span>
+          <small>{file.truncated ? "truncated" : `${formatNumber(file.lineCount)} lines`}</small>
+          <button type="button" onClick={() => onRemove(file.id)} title={`Remove ${file.name}`} aria-label={`Remove ${file.name}`}>
+            <X size={12} />
+          </button>
+        </span>
       ))}
     </div>
   );
@@ -7088,7 +7222,8 @@ function buildSlashCommandEntries({
   pendingSkillCount,
   agentPlanModeEnabled,
   agentLoopEnabled,
-  agentWorktreeEnabled
+  agentWorktreeEnabled,
+  fileAttachmentCount
 }: {
   state: DesktopState | null;
   busy: boolean;
@@ -7100,6 +7235,7 @@ function buildSlashCommandEntries({
   agentPlanModeEnabled: boolean;
   agentLoopEnabled: boolean;
   agentWorktreeEnabled: boolean;
+  fileAttachmentCount: number;
 }): SlashCommandEntry[] {
   return SLASH_COMMANDS.map((command) => {
     if (command.id === "compact") {
@@ -7138,6 +7274,22 @@ function buildSlashCommandEntries({
       return {
         ...command,
         detail: state?.browser.paneOpen ? "Browser window open" : "Browser window hidden"
+      };
+    }
+
+    if (command.id === "files") {
+      let disabledReason: string | undefined;
+      if (busy) {
+        disabledReason = "Agent is running.";
+      } else if (state?.projectRoot === null) {
+        disabledReason = "Open a workspace before attaching file context.";
+      } else if (fileAttachmentCount >= MAX_CONTEXT_FILE_ATTACHMENTS) {
+        disabledReason = "File context limit reached.";
+      }
+      return {
+        ...command,
+        detail: disabledReason ? undefined : `${formatNumber(fileAttachmentCount)} / ${formatNumber(MAX_CONTEXT_FILE_ATTACHMENTS)} attached`,
+        disabledReason
       };
     }
 
@@ -7184,13 +7336,15 @@ function buildSessionCommandOutput({
   messages,
   estimatedContextTokens,
   availableToolCount,
-  imageAttachmentCount
+  imageAttachmentCount,
+  fileAttachmentCount
 }: {
   state: DesktopState;
   messages: ChatMessage[];
   estimatedContextTokens: number;
   availableToolCount: number;
   imageAttachmentCount: number;
+  fileAttachmentCount: number;
 }): CommandOutput {
   const nonSystemCount = messages.filter((message) => message.role !== "system").length;
   const remainingTokens = Math.max(0, COMPOSER_TOKEN_BUDGET - estimatedContextTokens);
@@ -7246,6 +7400,7 @@ function buildSessionCommandOutput({
       { label: "Context remaining", value: `~${formatNumber(remainingTokens)} tokens` },
       { label: "Messages", value: `${formatNumber(nonSystemCount)} chat, ${formatNumber(messages.length)} total` },
       { label: "Attached images", value: `${formatNumber(imageAttachmentCount)} / ${formatNumber(MAX_IMAGE_ATTACHMENTS)}` },
+      { label: "Attached files", value: `${formatNumber(fileAttachmentCount)} / ${formatNumber(MAX_CONTEXT_FILE_ATTACHMENTS)}` },
       { label: "Tools", value: `${formatNumber(availableToolCount)} available` }
     ]
   };
@@ -7370,8 +7525,8 @@ function compareSessionsForDisplay(left: SessionSummary, right: SessionSummary) 
   return right.updatedAt.localeCompare(left.updatedAt);
 }
 
-function createPromptContent(text: string, images: ImageAttachment[]): ChatContent {
-  const trimmed = text.trim();
+function createPromptContent(text: string, images: ImageAttachment[], files: ContextFileAttachment[] = []): ChatContent {
+  const trimmed = promptTextWithFileContext(text, files);
   const parts: ChatContentPart[] = [];
   if (trimmed) {
     parts.push({ type: "text", text: trimmed });
@@ -7583,6 +7738,14 @@ function mergeImageAttachments(current: ImageAttachment[], next: ImageAttachment
     byId.set(image.id, image);
   }
   return Array.from(byId.values()).slice(0, MAX_IMAGE_ATTACHMENTS);
+}
+
+function mergeFileAttachments(current: ContextFileAttachment[], next: ContextFileAttachment[]) {
+  const byPath = new Map(current.map((file) => [file.path, file]));
+  for (const file of next) {
+    byPath.set(file.path, file);
+  }
+  return Array.from(byPath.values()).slice(0, MAX_CONTEXT_FILE_ATTACHMENTS);
 }
 
 function mimeTypeFromDataUrl(dataUrl: string) {
