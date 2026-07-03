@@ -91,7 +91,7 @@ Desktop task-run audit check:
 2. Send a prompt that uses at least one tool, for example "List top-level files and summarize them."
 3. Confirm the Activity query group shows the selected model/provider, run status, and capability chips such as `Read`.
 4. When an assistant reply includes a `Plan:`/`Approach:`/`Next steps:` checklist, confirm the Activity query group shows the captured plan and that reopening the saved chat keeps it.
-5. Send or inspect prompts that apply a patch and write a file, then confirm the Activity result rows show persisted patch/file-change summaries and diff-style previews after reopening the chat.
+5. Send or inspect prompts that apply a patch and write a file, then confirm the Activity result rows show persisted patch/file-change summaries, diff-style previews, and Draft revert actions after reopening the chat.
 6. Send or inspect a prompt that runs a command, then confirm the command result row shows command text, execution profile/isolation/cwd metadata, exit code, duration, and separated stdout/stderr details.
 7. Confirm a completed command-producing run shows a Verification panel with command count, failed exits, and parsed report counts derived from task-run artifacts.
 8. For a worktree-backed run whose verification failed, confirm Activity shows the promotion-blocked message and PR draft/Create PR/Merge controls are unavailable or disabled while Preview/Open/Refresh/Discard still work.

@@ -222,6 +222,7 @@ type ActivityItem = {
   diffPreview?: DiffPreview;
   evidenceLinks?: ActivityEvidenceLink[];
   remediationPrompt?: string;
+  rollbackPrompt?: string;
 };
 
 type ActivityEvidenceLink = {
@@ -5341,12 +5342,14 @@ function ActivityRow({
   defaultCollapsed?: boolean;
   evidenceOpenBusy?: string | null;
   onOpenEvidence?: (link: ActivityEvidenceLink) => void;
-  onDraftRemediation?: (draftText: string) => void;
+  onDraftRemediation?: (draftText: string, options?: DraftPromptOptions) => void;
 }) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed ?? item.kind === "system");
   const diff = item.diffPreview ?? buildActivityDiffPreview(item);
   const evidenceLinks = item.evidenceLinks ?? [];
-  const showEvidenceActions = (evidenceLinks.length > 0 && onOpenEvidence) || (item.remediationPrompt && onDraftRemediation);
+  const showEvidenceActions =
+    (evidenceLinks.length > 0 && onOpenEvidence) ||
+    ((item.remediationPrompt || item.rollbackPrompt) && onDraftRemediation);
 
   return (
     <article className={activityRowClassName(item, collapsed)}>
@@ -5391,6 +5394,22 @@ function ActivityRow({
                 >
                   <Wrench size={13} />
                   <span>Draft fix</span>
+                </button>
+              ) : null}
+              {item.rollbackPrompt && onDraftRemediation ? (
+                <button
+                  className="activity-evidence-button repair"
+                  type="button"
+                  title="Draft a revert prompt for this edit artifact"
+                  onClick={() =>
+                    onDraftRemediation(item.rollbackPrompt ?? "", {
+                      status: "Drafted revert prompt from edit evidence",
+                      confirmLabel: "Replace the current composer draft with a revert prompt from this edit evidence?"
+                    })
+                  }
+                >
+                  <RotateCcw size={13} />
+                  <span>Draft revert</span>
                 </button>
               ) : null}
             </div>
@@ -7600,7 +7619,8 @@ function activityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
         imagePreview,
         diffPreview,
         evidenceLinks: commandArtifact ? commandArtifactEvidenceLinks(run.id, commandArtifact) : undefined,
-        remediationPrompt: commandArtifact ? buildReportRemediationPrompt(commandArtifact) : undefined
+        remediationPrompt: commandArtifact ? buildReportRemediationPrompt(commandArtifact) : undefined,
+        rollbackPrompt: buildEditRollbackPrompt(run, patchArtifact, fileChangeArtifact)
       });
     }
   }
@@ -7759,6 +7779,61 @@ function patchArtifactDiffPreview(artifact: AgentTaskRunArtifact): DiffPreview |
     ...parseUnifiedDiffPreview(artifact.diff),
     title: artifact.diffTruncated ? "Applied patch (truncated)" : "Applied patch"
   };
+}
+
+function buildEditRollbackPrompt(
+  run: AgentTaskRun,
+  patchArtifact?: AgentTaskRunArtifact,
+  fileChangeArtifact?: AgentTaskRunArtifact
+) {
+  const artifact = patchArtifact ?? fileChangeArtifact;
+  if (!artifact || (artifact.kind !== "patch" && artifact.kind !== "file_change")) {
+    return undefined;
+  }
+
+  const paths = editArtifactPaths(artifact);
+  const intro =
+    artifact.kind === "patch"
+      ? `Review and revert the direct patch artifact from Arivu task run ${run.id}.`
+      : `Review and revert the direct file-change artifact from Arivu task run ${run.id}.`;
+  const lines = [
+    intro,
+    "Before editing, inspect the current files and preserve any later user or agent changes that are unrelated to this artifact.",
+    "Prefer the smallest safe reverse patch. If the change cannot be reverted cleanly, explain what blocks it and ask before doing anything destructive.",
+    run.promptPreview ? `Original request: ${run.promptPreview}` : undefined,
+    artifact.summary ? `Artifact summary: ${artifact.summary}` : undefined,
+    paths.length ? `Changed path${paths.length === 1 ? "" : "s"}:\n${paths.map((filePath) => `- ${filePath}`).join("\n")}` : undefined,
+    artifact.kind === "patch" && (artifact.additions !== undefined || artifact.deletions !== undefined)
+      ? `Patch stats: +${artifact.additions ?? 0} -${artifact.deletions ?? 0}`
+      : undefined,
+    artifact.kind === "file_change" && artifact.writeMode
+      ? `File-change mode: ${artifact.writeMode}${artifact.lineCount !== undefined ? `, ${artifact.lineCount} lines` : ""}`
+      : undefined,
+    "",
+    editArtifactEvidenceSection(artifact),
+    "",
+    "After reverting, run the first focused verification that fits the affected files and summarize the result."
+  ].filter((line): line is string => line !== undefined);
+  return lines.join("\n");
+}
+
+function editArtifactPaths(artifact: AgentTaskRunArtifact) {
+  if (artifact.kind === "patch") {
+    return artifact.changedPaths ?? [];
+  }
+  return artifact.path ? [artifact.path] : [];
+}
+
+function editArtifactEvidenceSection(artifact: AgentTaskRunArtifact) {
+  if (artifact.kind === "patch" && artifact.diff) {
+    const suffix = artifact.diffTruncated ? " (truncated)" : "";
+    return `Applied diff evidence${suffix}:\n\`\`\`diff\n${artifact.diff}\n\`\`\``;
+  }
+  if (artifact.kind === "file_change" && artifact.content !== undefined) {
+    const suffix = artifact.contentTruncated ? " (truncated)" : "";
+    return `Written content evidence${suffix}:\n\`\`\`\n${artifact.content}\n\`\`\``;
+  }
+  return "No bounded diff/content evidence was saved on this artifact. Use the changed paths and current git state to identify the smallest safe revert.";
 }
 
 function fileChangeArtifactSummary(artifact?: AgentTaskRunArtifact) {
