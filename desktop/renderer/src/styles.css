@@ -3984,6 +3984,7 @@ body.is-resizing .panel-resize-handle::after {
 }
 
 .activity-group {
+  position: relative;
   margin-bottom: 10px;
   overflow: hidden;
   border: 1px solid #34302a;
@@ -4018,12 +4019,34 @@ body.is-resizing .panel-resize-handle::after {
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 7px;
-  padding: 9px;
+  padding: 9px 40px 9px 9px;
   border: 0;
   background: transparent;
   color: #efede8;
   text-align: left;
   cursor: pointer;
+}
+
+.activity-group-audit-button {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #34302a;
+  border-radius: 7px;
+  background: rgb(0 0 0 / 0.16);
+  color: #d7d0c5;
+  cursor: pointer;
+}
+
+.activity-group-audit-button:hover,
+.activity-group-audit-button:focus-visible {
+  border-color: rgb(43 191 159 / 0.45);
+  color: #a8fff0;
 }
 
 .activity-group-title {
@@ -6773,6 +6796,18 @@ html[data-theme="light"] .activity-group.failed.focus-active {
 html[data-theme="light"] .activity-group-header,
 html[data-theme="light"] .activity-group-title strong {
   color: #211b14;
+}
+
+html[data-theme="light"] .activity-group-audit-button {
+  border-color: #d9d0c3;
+  background: rgb(255 255 255 / 0.72);
+  color: #756b5e;
+}
+
+html[data-theme="light"] .activity-group-audit-button:hover,
+html[data-theme="light"] .activity-group-audit-button:focus-visible {
+  border-color: rgb(28 168 137 / 0.38);
+  color: #0f6f5c;
 }
 
 html[data-theme="light"] .activity-group-title span,

@@ -79,6 +79,7 @@ import {
   type AgentTaskRunPullRequestReadiness,
   type AgentTaskRunReplayOutcomeGroup
 } from "../../../src/agent/taskHistory";
+import { buildTaskRunAuditMarkdown } from "../../../src/agent/taskRunAudit";
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
 
 type ViewMode = "chat" | "history" | "settings" | "ui";
@@ -4451,6 +4452,8 @@ function ActivityGroupCard({
   onDraftRemediation: (draftText: string, options?: DraftPromptOptions) => void;
 }) {
   const [collapsed, setCollapsed] = useState(group.status !== "running");
+  const [copiedAudit, setCopiedAudit] = useState(false);
+  const auditCopyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toolItemCount = group.items.filter((item) => item.kind !== "system").length;
   const focused = Boolean(group.run && group.run.id === focusedRunId);
   const planApprovalPrompt = group.run ? buildTaskRunPlanApprovalPrompt(group.run) : undefined;
@@ -4461,6 +4464,33 @@ function ActivityGroupCard({
       setCollapsed(false);
     }
   }, [focused]);
+
+  useEffect(() => {
+    return () => {
+      if (auditCopyResetTimeoutRef.current) {
+        clearTimeout(auditCopyResetTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  async function copyAuditSummary() {
+    if (!group.run) {
+      return;
+    }
+    try {
+      await writeClipboardText(buildTaskRunAuditMarkdown(group.run));
+      setCopiedAudit(true);
+      if (auditCopyResetTimeoutRef.current) {
+        clearTimeout(auditCopyResetTimeoutRef.current);
+      }
+      auditCopyResetTimeoutRef.current = setTimeout(() => {
+        setCopiedAudit(false);
+        auditCopyResetTimeoutRef.current = null;
+      }, 1400);
+    } catch {
+      setCopiedAudit(false);
+    }
+  }
 
   return (
     <section
@@ -4482,6 +4512,17 @@ function ActivityGroupCard({
         <span className="activity-group-count">{toolEventCountLabel(toolItemCount)}</span>
         <span className={`activity-status ${group.status}`}>{activityStatusLabel(group.status)}</span>
       </button>
+      {group.run ? (
+        <button
+          className="activity-group-audit-button"
+          type="button"
+          onClick={() => void copyAuditSummary()}
+          title={copiedAudit ? "Copied audit summary" : "Copy audit summary"}
+          aria-label={copiedAudit ? "Copied audit summary" : "Copy audit summary"}
+        >
+          {copiedAudit ? <Check size={12} /> : <Copy size={12} />}
+        </button>
+      ) : null}
       {!collapsed ? (
         <div className="activity-group-body">
           {group.run ? <TaskRunMeta run={group.run} /> : null}

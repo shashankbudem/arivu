@@ -48,7 +48,7 @@ arivu "task"
 - `desktop/main/main.ts`: Electron lifecycle, IPC handlers, workspace open/create, session history, model listing, desktop agent controller.
 - `desktop/main/browserController.ts`: hidden/background and separate tabbed visible-window isolated Electron browser targets, browser state broadcast, screenshot capture, DOM snapshot, console collection, and browser action helpers.
 - `desktop/main/preload.ts`: context-isolated renderer API.
-- `desktop/renderer/src/App.tsx`: React desktop workspace UI, compact header/sidebar chrome, resizable/collapsible side panels, expandable project chat groups, standalone chats, history browser, prompt `+` menu, browser-window launcher, direct composer model switcher, composer slash-command menu, searchable model dialog, chat search, inline tools drawer, token-aware multimodal/file-context composer, compact-context control, failed-prompt retry/edit/copy state, theme/UI concept controls, settings, approvals, Markdown/Shiki code rendering.
+- `desktop/renderer/src/App.tsx`: React desktop workspace UI, compact header/sidebar chrome, resizable/collapsible side panels, expandable project chat groups, standalone chats, history browser, prompt `+` menu, browser-window launcher, direct composer model switcher, composer slash-command menu, searchable model dialog, chat search, inline tools drawer, token-aware multimodal/file-context composer, compact-context control, failed-prompt retry/edit/copy state, Activity task-run audit copy controls, theme/UI concept controls, settings, approvals, Markdown/Shiki code rendering.
 - `desktop/renderer/src/tokenBudget.ts`: local token estimate and truncation helper for pasted composer text.
 - `src/agent/Agent.ts`: model/tool loop and session lifecycle.
 - `src/agent/content.ts`: shared text/image chat content types and text-projection helpers.
@@ -56,6 +56,7 @@ arivu "task"
 - `src/agent/OpenAICompatibleChatClient.ts`: OpenAI-compatible chat completions adapter.
 - `src/agent/reportRemediation.ts`: bounded JUnit/SARIF evidence-to-repair-prompt builder used by desktop Activity Draft fix actions, task-worktree verification/replay/PR handoffs, and loop continuation evidence injection.
 - `src/agent/skills.ts`: global skill discovery, skill reads, and skill system-message formatting.
+- `src/agent/taskRunAudit.ts`: bounded Markdown audit-summary formatter for persisted task runs, used by desktop Activity copy actions.
 - `src/agent/taskRuns.ts`: durable per-prompt run helpers for status, capability, tool-call, and artifact tracking.
 - `src/agent/taskWorktree.ts`: git worktree creation, changed-file summary, bounded patch preview, sync/conflict resolution, merge/discard/cleanup, and model instruction helpers for isolated task execution.
 - `src/tools/registry.ts`: tool definitions and execution.
