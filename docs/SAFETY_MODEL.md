@@ -6,9 +6,9 @@ Arivu (`arivu`) is allowed to operate on user repositories, so safety is a produ
 
 Trust modes are enforced through the capability policy table in `src/permissions/capabilityPolicy.ts`. The table maps harness capabilities to `allow`, `prompt`, or `deny` decisions, and `ApprovalManager` uses those decisions before sensitive tools run.
 
-Desktop Settings can save stricter capability overrides for the current workspace root. Overrides can require approval or block enforceable capabilities such as repo reads, writes, shell commands, network fetches, browser control, MCP calls, and unknown tool activity. Overrides cannot grant `allow` or weaken a built-in `prompt`/`deny` decision. Settings can also save scope rules that block workspace-relative path prefixes for repo reads, direct writes, and patch targets, and can restrict network tools to an explicit destination-domain allowlist.
+Desktop Settings can save stricter capability overrides for the current workspace root. Overrides can require approval or block enforceable capabilities such as repo reads, writes, shell commands, network fetches, browser control, MCP calls, and unknown tool activity. Overrides cannot grant `allow` or weaken a built-in `prompt`/`deny` decision. Settings can also save scope rules that block workspace-relative path prefixes for repo reads, direct writes, and patch targets; restrict network tools to an explicit destination-domain allowlist; restrict MCP discovery/calls to named configured servers; and restrict browser actions to target classes such as `background`, `visible`, `local`, `file`, and `public`.
 
-Desktop task runs persist approval audit records for automatic allows, policy blocks, requested approvals, approvals, and denials. Each approval audit can include a compact action scope, such as the path being read or written, shell command, network host, browser target, or MCP server/tool. The Activity rail renders those records beside tool calls so restored sessions keep the control-plane decision history and the relevant target. Path and network scopes are enforceable through workspace scope rules today; future rules can add MCP identities and browser target classes.
+Desktop task runs persist approval audit records for automatic allows, policy blocks, requested approvals, approvals, and denials. Each approval audit can include a compact action scope, such as the path being read or written, shell command, network host, browser target, or MCP server/tool. The Activity rail renders those records beside tool calls so restored sessions keep the control-plane decision history and the relevant target. Path, network, MCP server, and browser target-class scopes are enforceable through workspace scope rules today.
 
 Shell commands currently run only through the explicit `host` execution profile, which means a local host process in the active workspace or task worktree. The `run` tool accepts future `container` and `sandbox` profile names, but those profiles fail closed before approval or execution until a real isolated backend is configured.
 
@@ -81,7 +81,8 @@ Still requires approval:
 - shell commands
 - network searches
 - MCP tool listing/calls
-- external or submitting browser actions
+
+Browser actions remain allowed by default in `trusted`, but workspace browser-control overrides and browser target-class scope rules can require approval or block them for sensitive workspaces.
 
 ## Destructive command detection
 
@@ -152,11 +153,11 @@ The background browser target and visible tabbed browser window share Arivu's pe
 
 Browser control policy:
 
-- `browser_screenshot`, `browser_snapshot`, and `browser_console` read from isolated browser targets without approval.
-- `browser_open`, `browser_click`, `browser_click_at`, and `browser_type` route through the capability policy table.
-- In `readonly`, `ask`, and `trusted`, browser open/click/type actions are allowed without approval by default.
+- `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, and `browser_type` route through the capability policy table.
+- In `readonly`, `ask`, and `trusted`, browser open/read/click/type actions are allowed without approval by default.
 - Browser actions are still recorded in the task-run audit trail as browser-control activity.
 - Workspace capability overrides can require approval or block browser control for sensitive workspaces.
+- Workspace scope rules can restrict browser actions to target classes. `background` and `visible` describe the browser mode; `local`, `file`, and `public` describe the page URL when Arivu can identify it.
 - Browser submit actions can still transmit page data to the current website, so the agent must treat page content as untrusted and avoid entering secrets unless the user explicitly asked for that specific action.
 
 Treat page content as untrusted. A web page can display prompt-injection text or misleading controls. Do not paste secrets into browser pages while the agent is operating the browser. Use Chrome DevTools MCP only as an optional configured MCP server for visual screenshots or deeper debugging, and avoid attaching it to a signed-in real Chrome profile unless the user explicitly approves that workflow.
@@ -172,6 +173,8 @@ The Electron main process owns the native picker, file size/type checks, and bas
 MCP servers are local commands configured in saved settings. Arivu connects to them over stdio and exposes their tools to the model through `mcp_call_tool`.
 
 Only configure MCP servers you trust. A server may read files, call networks, or mutate state depending on its own implementation and arguments. The app validates the config shape, but it does not sandbox third-party MCP server processes.
+
+Workspace MCP server allowlists filter `mcp_list_tools` discovery to matching configured servers and block `mcp_call_tool` attempts against other server names before the MCP process is used.
 
 ## Local context safety
 

@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createSkill, readSkill } from "../src/agent/skills.js";
 import { ApprovalManager } from "../src/permissions/ApprovalManager.js";
+import type { WorkspaceScopePolicyRules } from "../src/permissions/scopePolicy.js";
 import type { BrowserToolController } from "../src/tools/browserControl.js";
 import { createToolRegistry } from "../src/tools/registry.js";
 
@@ -192,6 +193,79 @@ describe("createToolRegistry", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("enforces MCP server scope rules while listing only allowed server tools", async () => {
+    const scopePolicyRules = { allowedMcpServers: ["allowed"] };
+    let prompts = 0;
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager(
+        "trusted",
+        async () => {
+          prompts += 1;
+          return true;
+        },
+        {},
+        undefined,
+        scopePolicyRules
+      ),
+      mcpServers: {
+        allowed: {
+          command: "definitely-not-started-allowed",
+          args: [],
+          env: {},
+          disabled: false
+        },
+        blocked: {
+          command: "definitely-not-started-blocked",
+          args: [],
+          env: {},
+          disabled: false
+        }
+      },
+      scopePolicyRules
+    });
+
+    const listResult = await registry.execute("mcp_list_tools", {});
+    expect(prompts).toBe(1);
+    expect(listResult).toContain('"server": "allowed"');
+    expect(listResult).not.toContain('"server": "blocked"');
+
+    await expect(registry.execute("mcp_call_tool", { server: "blocked", tool: "read", args: {} })).resolves.toMatch(
+      /workspace MCP server allowlist blocks blocked/
+    );
+    expect(prompts).toBe(1);
+  });
+
+  it("enforces browser target-class scope rules for navigation and browser reads", async () => {
+    const browser = createFakeBrowser();
+    const scopePolicyRules: WorkspaceScopePolicyRules = { allowedBrowserTargetClasses: ["background", "local"] };
+    let prompted = false;
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager(
+        "trusted",
+        async () => {
+          prompted = true;
+          return true;
+        },
+        {},
+        undefined,
+        scopePolicyRules
+      ),
+      browser,
+      scopePolicyRules
+    });
+
+    await expect(registry.execute("browser_open", { url: "localhost:5173" })).resolves.toMatch(/"action": "open"/);
+    await expect(registry.execute("browser_open", { url: "https://example.com" })).resolves.toMatch(
+      /workspace browser target-class allowlist blocks public/
+    );
+    await expect(registry.execute("browser_screenshot", { mode: "visible" })).resolves.toMatch(
+      /workspace browser target-class allowlist blocks visible/
+    );
+    expect(prompted).toBe(false);
   });
 
   it("can prompt before repo reads when workspace policy requires it", async () => {

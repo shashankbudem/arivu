@@ -26,7 +26,9 @@ const WorkspacePolicyCapabilitySchema = z.enum([
 const CapabilityPolicyOverrideSchema = z.enum(["prompt", "deny"]);
 const WorkspaceScopePolicyRulesSchema = z.object({
   blockedPathPrefixes: z.array(z.string()).optional(),
-  allowedNetworkDomains: z.array(z.string()).optional()
+  allowedNetworkDomains: z.array(z.string()).optional(),
+  allowedMcpServers: z.array(z.string()).optional(),
+  allowedBrowserTargetClasses: z.array(z.enum(["background", "visible", "local", "file", "public"])).optional()
 });
 
 const McpServerSchema = z.object({

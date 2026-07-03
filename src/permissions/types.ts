@@ -1,4 +1,5 @@
 export type TrustMode = "ask" | "readonly" | "trusted";
+export type BrowserTargetClass = "background" | "visible" | "local" | "file" | "public";
 
 export type ApprovalAction =
   | {
@@ -28,6 +29,7 @@ export type ApprovalAction =
   | {
       type: "mcp";
       server: string;
+      servers?: string[];
       tool: string;
       arguments?: unknown;
       destructive?: boolean;
@@ -43,6 +45,8 @@ export type ApprovalAction =
       type: "browser";
       action: string;
       target: string;
+      url?: string;
       mode?: "visible" | "background";
+      targetClasses?: BrowserTargetClass[];
       destructive?: boolean;
     };

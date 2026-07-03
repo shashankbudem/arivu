@@ -106,6 +106,8 @@ type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapabili
 type WorkspaceScopePolicyRules = {
   blockedPathPrefixes?: string[];
   allowedNetworkDomains?: string[];
+  allowedMcpServers?: string[];
+  allowedBrowserTargetClasses?: Array<"background" | "visible" | "local" | "file" | "public">;
 };
 type WorkspaceCapabilityPolicy = {
   overrides: WorkspaceCapabilityPolicyOverrides;

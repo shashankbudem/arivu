@@ -5,6 +5,7 @@ import { execa } from "execa";
 import { z } from "zod";
 import type { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { isDestructiveCommand } from "../permissions/destructive.js";
+import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "../permissions/scopePolicy.js";
 import type { AppConfig } from "../config.js";
 import { resolveCommandExecutionProfile } from "../execution/profile.js";
 import { discoverSkills, formatSkillList, readSkill } from "../agent/skills.js";
@@ -27,6 +28,7 @@ type ToolContext = {
   approvals: ApprovalManager;
   tavilyApiKey?: string;
   mcpServers?: AppConfig["mcpServers"];
+  scopePolicyRules?: WorkspaceScopePolicyRules;
   browser?: BrowserToolController;
 };
 
@@ -41,6 +43,8 @@ const MAX_TOOL_SEARCH_OUTPUT = 60_000;
 export function createToolRegistry(context: ToolContext) {
   const state = new FileStateTracker();
   const tools = new Map<string, ToolDefinition>();
+  const scopePolicyRules = normalizeWorkspaceScopePolicyRules(context.scopePolicyRules);
+  const scopedMcpServers = mcpServersForScope(context.mcpServers, scopePolicyRules);
 
   const register = (tool: ToolDefinition) => tools.set(tool.schema.name, tool);
 
@@ -168,6 +172,7 @@ export function createToolRegistry(context: ToolContext) {
           type: "browser",
           action: "open",
           target: url,
+          url,
           mode,
           destructive: !isLocalBrowserUrl(url)
         });
@@ -192,7 +197,16 @@ export function createToolRegistry(context: ToolContext) {
             tabId: z.string().trim().min(1).optional()
           })
           .parse(args);
-        return formatBrowserToolResult("screenshot", await browser.screenshot({ mode: parsed.mode, tabId: parsed.tabId }));
+        const mode = browserActionMode(browser, parsed.mode);
+        await context.approvals.require({
+          type: "browser",
+          action: "screenshot",
+          target: "current browser page",
+          url: browserTargetUrl(browser, mode, parsed.tabId),
+          mode,
+          destructive: false
+        });
+        return formatBrowserToolResult("screenshot", await browser.screenshot({ mode, tabId: parsed.tabId }));
       }
     });
 
@@ -215,7 +229,16 @@ export function createToolRegistry(context: ToolContext) {
             maxLength: z.number().int().min(1000).max(20_000).default(12_000)
           })
           .parse(args);
-        return formatBrowserToolResult("snapshot", await browser.snapshot(parsed));
+        const mode = browserActionMode(browser, parsed.mode);
+        await context.approvals.require({
+          type: "browser",
+          action: "snapshot",
+          target: "current browser page",
+          url: browserTargetUrl(browser, mode, parsed.tabId),
+          mode,
+          destructive: false
+        });
+        return formatBrowserToolResult("snapshot", await browser.snapshot({ ...parsed, mode }));
       }
     });
 
@@ -239,7 +262,16 @@ export function createToolRegistry(context: ToolContext) {
             limit: z.number().int().min(1).max(100).default(50)
           })
           .parse(args);
-        return formatBrowserToolResult("console", await browser.console(parsed));
+        const mode = browserActionMode(browser, parsed.mode);
+        await context.approvals.require({
+          type: "browser",
+          action: "console",
+          target: "current browser page",
+          url: browserTargetUrl(browser, mode, parsed.tabId),
+          mode,
+          destructive: false
+        });
+        return formatBrowserToolResult("console", await browser.console({ ...parsed, mode }));
       }
     });
 
@@ -267,6 +299,7 @@ export function createToolRegistry(context: ToolContext) {
           type: "browser",
           action: "click",
           target: parsed.target,
+          url: browserTargetUrl(browser, mode, parsed.tabId),
           mode,
           destructive: false
         });
@@ -306,6 +339,7 @@ export function createToolRegistry(context: ToolContext) {
           type: "browser",
           action: "click coordinates",
           target: `${parsed.coordinateSpace}:${parsed.x},${parsed.y}`,
+          url: browserTargetUrl(browser, mode, parsed.tabId),
           mode,
           destructive: false
         });
@@ -341,6 +375,7 @@ export function createToolRegistry(context: ToolContext) {
           type: "browser",
           action: parsed.submit ? "type and submit" : "type",
           target: parsed.target,
+          url: browserTargetUrl(browser, mode, parsed.tabId),
           mode,
           destructive: Boolean(parsed.submit)
         });
@@ -405,15 +440,17 @@ export function createToolRegistry(context: ToolContext) {
       parameters: objectSchema({})
     },
     async execute() {
-      if (hasEnabledMcpServers(context.mcpServers)) {
+      const enabledServers = enabledMcpServerNames(scopedMcpServers);
+      if (enabledServers.length > 0) {
         await context.approvals.require({
           type: "mcp",
-          server: "*",
+          server: enabledServers.length === 1 ? enabledServers[0] ?? "*" : "*",
+          servers: enabledServers,
           tool: "list_tools",
           destructive: true
         });
       }
-      return listMcpTools(context.mcpServers);
+      return listMcpTools(scopedMcpServers);
     }
   });
 
@@ -446,7 +483,7 @@ export function createToolRegistry(context: ToolContext) {
         arguments: parsed.args,
         destructive: true
       });
-      return callMcpTool(context.mcpServers, parsed.server, parsed.tool, parsed.args);
+      return callMcpTool(scopedMcpServers, parsed.server, parsed.tool, parsed.args);
     }
   });
 
@@ -615,6 +652,18 @@ function browserActionMode(browser: BrowserToolController, requestedMode: Browse
   return requestedMode ?? browser.getState().activeMode ?? browser.getState().defaultMode ?? hiddenAgentBrowserMode();
 }
 
+function browserTargetUrl(browser: BrowserToolController, mode: BrowserMode, tabId: string | undefined) {
+  const state = browser.getState();
+  const target = mode === "visible" ? state.visible : state.background;
+  const tab = tabId ? target.tabs?.find((entry) => entry.id === tabId) : undefined;
+  return nonEmptyString(tab?.url) ?? nonEmptyString(target.url);
+}
+
+function nonEmptyString(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 async function exists(filePath: string) {
   try {
     await stat(filePath);
@@ -661,8 +710,19 @@ async function normalizeSafeBrowserToolUrl(workspaceRoot: string, rawUrl: string
   return pathToFileURL(path.resolve(filePath)).toString();
 }
 
-function hasEnabledMcpServers(servers: AppConfig["mcpServers"] | undefined) {
-  return Object.values(servers ?? {}).some((server) => !server.disabled);
+function enabledMcpServerNames(servers: AppConfig["mcpServers"] | undefined) {
+  return Object.entries(servers ?? {})
+    .filter(([, server]) => !server.disabled)
+    .map(([name]) => name);
+}
+
+function mcpServersForScope(servers: AppConfig["mcpServers"] | undefined, scopePolicyRules: WorkspaceScopePolicyRules) {
+  const allowed = scopePolicyRules.allowedMcpServers;
+  if (!allowed?.length || allowed.includes("*")) {
+    return servers;
+  }
+  const allowedSet = new Set(allowed);
+  return Object.fromEntries(Object.entries(servers ?? {}).filter(([name]) => allowedSet.has(name)));
 }
 
 function currentDateTime(now = new Date()) {

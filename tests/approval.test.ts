@@ -166,7 +166,9 @@ describe("approval manager", () => {
       },
       {
         blockedPathPrefixes: ["secrets"],
-        allowedNetworkDomains: ["api.tavily.com"]
+        allowedNetworkDomains: ["api.tavily.com"],
+        allowedMcpServers: ["github"],
+        allowedBrowserTargetClasses: ["background", "local"]
       }
     );
 
@@ -181,6 +183,27 @@ describe("approval manager", () => {
         query: "news"
       })
     ).rejects.toThrow(/workspace network allowlist blocks www\.bing\.com/);
+    await expect(approvals.require({ type: "mcp", server: "browser", tool: "snapshot" })).rejects.toThrow(
+      /workspace MCP server allowlist blocks browser/
+    );
+    await expect(
+      approvals.require({
+        type: "browser",
+        action: "open",
+        target: "https://example.com/",
+        url: "https://example.com/",
+        mode: "background"
+      })
+    ).rejects.toThrow(/workspace browser target-class allowlist blocks public/);
+    await expect(
+      approvals.require({
+        type: "browser",
+        action: "open",
+        target: "http://localhost:5173/",
+        url: "http://localhost:5173/",
+        mode: "visible"
+      })
+    ).rejects.toThrow(/workspace browser target-class allowlist blocks visible/);
 
     expect(prompted).toBe(false);
     expect(events).toEqual(
@@ -200,6 +223,30 @@ describe("approval manager", () => {
           label: "Blocked by workspace scope",
           override: "deny",
           scope: expect.objectContaining({ kind: "network", value: "www.bing.com" })
+        }),
+        expect.objectContaining({
+          actionType: "mcp",
+          status: "blocked",
+          effect: "deny",
+          label: "Blocked by workspace scope",
+          override: "deny",
+          scope: expect.objectContaining({ kind: "mcp", value: "browser/snapshot" })
+        }),
+        expect.objectContaining({
+          actionType: "browser",
+          status: "blocked",
+          effect: "deny",
+          label: "Blocked by workspace scope",
+          override: "deny",
+          scope: expect.objectContaining({ kind: "browser", value: "example.com" })
+        }),
+        expect.objectContaining({
+          actionType: "browser",
+          status: "blocked",
+          effect: "deny",
+          label: "Blocked by workspace scope",
+          override: "deny",
+          scope: expect.objectContaining({ kind: "browser", value: "localhost" })
         })
       ])
     );

@@ -31,8 +31,10 @@ export function scopeForApprovalAction(action: ApprovalAction): AgentTaskRunAppr
     case "mcp":
       return {
         kind: "mcp",
-        label: "MCP tool",
-        value: truncateScopeText(`${action.server}/${action.tool}`)
+        label: action.servers?.length ? "MCP servers" : "MCP tool",
+        value: truncateScopeText(
+          action.servers?.length ? `${summarizeScopeValues(action.servers)}/${action.tool}` : `${action.server}/${action.tool}`
+        )
       };
     case "network":
       return {
@@ -58,8 +60,8 @@ function networkScopeValue(action: Extract<ApprovalAction, { type: "network" }>)
 }
 
 function browserScopeValue(action: Extract<ApprovalAction, { type: "browser" }>) {
-  const host = hostnameFromText(action.target);
-  return host ?? action.target;
+  const host = hostnameFromText(action.url ?? action.target);
+  return host ?? action.url ?? action.target;
 }
 
 function hostnameFromText(value: string) {

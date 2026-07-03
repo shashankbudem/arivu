@@ -91,6 +91,7 @@ import { runDoctor, type DoctorReport } from "../../src/diagnostics/doctor.js";
 import { ApprovalManager } from "../../src/permissions/ApprovalManager.js";
 import { describeCapabilityPolicies, evaluateCapabilityPolicy } from "../../src/permissions/capabilityPolicy.js";
 import type { CapabilityPolicyOverrides } from "../../src/permissions/capabilityPolicy.js";
+import { scopePolicyHasRules } from "../../src/permissions/scopePolicy.js";
 import { SessionStore } from "../../src/sessions/SessionStore.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
@@ -1122,11 +1123,7 @@ class DesktopController {
     const workspaceScopeRules = workspaceScopeRulesForRoot(config, workspace.root);
     return {
       currentTrustMode: config.trustMode,
-      source:
-        Object.keys(workspaceOverrides).length > 0 ||
-        Boolean(workspaceScopeRules.blockedPathPrefixes?.length || workspaceScopeRules.allowedNetworkDomains?.length)
-          ? "workspace"
-          : "built-in",
+      source: Object.keys(workspaceOverrides).length > 0 || scopePolicyHasRules(workspaceScopeRules) ? "workspace" : "built-in",
       workspaceRoot: workspace.root,
       workspaceOverrides,
       workspaceScopeRules,
@@ -1411,6 +1408,7 @@ class DesktopController {
       baseUrl: config.baseUrl,
       tavilyApiKey: config.tavilyApiKey,
       mcpServers: config.mcpServers,
+      scopePolicyRules: scopeRules,
       browser: browserController,
       session
     });

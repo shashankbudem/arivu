@@ -139,7 +139,7 @@ function formatReadApproval(action: Extract<ApprovalAction, { type: "read" }>) {
 
 function formatMcpApproval(action: Extract<ApprovalAction, { type: "mcp" }>, destructive: boolean) {
   return [
-    `${destructive ? "MCP tool call" : "MCP tool"}: ${action.server}/${action.tool}`,
+    `${destructive ? "MCP tool call" : "MCP tool"}: ${action.servers?.length ? action.servers.join(", ") : action.server}/${action.tool}`,
     action.arguments === undefined ? "" : `Arguments: ${formatJson(action.arguments)}`
   ]
     .filter(Boolean)
@@ -160,6 +160,7 @@ function formatBrowserApproval(action: Extract<ApprovalAction, { type: "browser"
   return [
     `${destructive ? "Browser action" : "Browser read"}: ${action.action}`,
     `Target: ${action.target}`,
+    action.url && action.url !== action.target ? `URL: ${action.url}` : "",
     action.mode ? `Mode: ${action.mode}` : ""
   ]
     .filter(Boolean)

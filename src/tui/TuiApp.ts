@@ -236,6 +236,7 @@ export class TuiApp {
   }
 
   private createAgent(session?: AgentSession) {
+    const scopePolicyRules = workspaceScopeRulesForRoot(this.config, this.workspace.root);
     return new Agent({
       client: new OpenAICompatibleChatClient(this.config),
       approvals: new ApprovalManager(
@@ -243,13 +244,14 @@ export class TuiApp {
         (message) => this.confirm(message),
         workspacePolicyOverridesForRoot(this.config, this.workspace.root),
         undefined,
-        workspaceScopeRulesForRoot(this.config, this.workspace.root)
+        scopePolicyRules
       ),
       cwd: this.cwd,
       model: this.config.model,
       baseUrl: this.config.baseUrl,
       tavilyApiKey: this.config.tavilyApiKey,
       mcpServers: this.config.mcpServers,
+      scopePolicyRules,
       session
     });
   }

@@ -183,7 +183,9 @@ describe("config", () => {
         browser_control: "deny"
       }, {
         blockedPathPrefixes: [".env", "secrets", ".env"],
-        allowedNetworkDomains: ["https://api.tavily.com/search", "BING.com"]
+        allowedNetworkDomains: ["https://api.tavily.com/search", "BING.com"],
+        allowedMcpServers: ["github", "github", "chrome-devtools"],
+        allowedBrowserTargetClasses: ["public", "background", "public"]
       })
     });
 
@@ -195,7 +197,9 @@ describe("config", () => {
     });
     expect(workspaceScopeRulesForRoot(loaded, workspaceRoot)).toEqual({
       blockedPathPrefixes: [".env", "secrets"],
-      allowedNetworkDomains: ["api.tavily.com", "bing.com"]
+      allowedNetworkDomains: ["api.tavily.com", "bing.com"],
+      allowedMcpServers: ["chrome-devtools", "github"],
+      allowedBrowserTargetClasses: ["background", "public"]
     });
     expect(workspacePolicyOverridesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
     expect(workspaceScopeRulesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
@@ -215,12 +219,22 @@ describe("config", () => {
       "read_repo"
     ]);
     expect(
-      updateWorkspacePolicy(policies, workspaceRoot, {}, { blockedPathPrefixes: ["private", "private"], allowedNetworkDomains: ["Example.com"] })[
-        path.resolve(workspaceRoot)
-      ]?.scopeRules
+      updateWorkspacePolicy(
+        policies,
+        workspaceRoot,
+        {},
+        {
+          blockedPathPrefixes: ["private", "private"],
+          allowedNetworkDomains: ["Example.com"],
+          allowedMcpServers: ["github", "github"],
+          allowedBrowserTargetClasses: ["visible", "public", "visible"]
+        }
+      )[path.resolve(workspaceRoot)]?.scopeRules
     ).toEqual({
       blockedPathPrefixes: ["private"],
-      allowedNetworkDomains: ["example.com"]
+      allowedNetworkDomains: ["example.com"],
+      allowedMcpServers: ["github"],
+      allowedBrowserTargetClasses: ["public", "visible"]
     });
     expect(updateWorkspacePolicy(policies, workspaceRoot, {})).toEqual({});
   });

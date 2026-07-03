@@ -202,7 +202,13 @@ Reason: coarse capabilities explain the category of risk, but users also need to
 
 Decision: workspace policies now include `scopeRules` beside capability overrides. `blockedPathPrefixes` deny matching repo reads, direct writes, and unified-patch targets before execution. `allowedNetworkDomains` denies network actions whose destination host is outside the allowlist. Settings exposes both as line-based workspace controls, and CLI/TUI/desktop runtimes pass the same rules to `ApprovalManager`.
 
-Reason: the harness needs parameter-level policy, not just coarse capability gates. Starting with path prefixes and network domains gives users immediate control over high-risk target classes while keeping the policy editor understandable. MCP server identity rules and browser target classes can build on the same scope-rule path.
+Reason: the harness needs parameter-level policy, not just coarse capability gates. Starting with path prefixes and network domains gives users immediate control over high-risk target classes while keeping the policy editor understandable.
+
+## 2026-07-03: Workspace scope rules enforce MCP and browser target classes
+
+Decision: workspace `scopeRules` now include `allowedMcpServers` and `allowedBrowserTargetClasses`. MCP allowlists filter `mcp_list_tools` discovery to matching configured servers and block direct `mcp_call_tool` calls to other servers. Browser target-class allowlists apply through the same approval boundary to open, screenshot, snapshot, console, click, coordinate-click, and type actions. Browser classes combine mode classes (`background`, `visible`) and URL classes (`local`, `file`, `public`) when Arivu has URL evidence.
+
+Reason: MCP servers and browser pages are privileged tool targets, not generic capabilities. Adding identity/class checks on top of the existing capability table lets sensitive workspaces constrain which local integrations and browser surfaces the agent may use without changing the global trust-mode posture.
 
 ## 2026-06-25: Durable approval audit on task runs
 

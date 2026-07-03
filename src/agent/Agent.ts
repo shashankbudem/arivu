@@ -25,6 +25,7 @@ export class Agent {
       baseUrl?: string;
       tavilyApiKey?: string;
       mcpServers?: AppConfig["mcpServers"];
+      scopePolicyRules?: AppConfig["workspacePolicies"][string]["scopeRules"];
       browser?: BrowserToolController;
       session?: AgentSession;
     }
@@ -66,6 +67,7 @@ export class Agent {
       approvals: this.options.approvals,
       tavilyApiKey: this.options.tavilyApiKey,
       mcpServers: this.options.mcpServers,
+      scopePolicyRules: this.options.scopePolicyRules,
       browser: this.options.browser
     });
 

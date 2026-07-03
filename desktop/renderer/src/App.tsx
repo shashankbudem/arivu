@@ -6746,6 +6746,36 @@ function CapabilityPolicyPanel({
             />
             <small>Optional allowlist. When set, network tools are denied unless the destination host matches.</small>
           </label>
+          <label className="workspace-scope-field">
+            <span>Allowed MCP servers</span>
+            <textarea
+              value={scopeListToText(workspaceScopeRules.allowedMcpServers)}
+              onChange={(event) =>
+                onWorkspaceScopeRulesChange({
+                  ...workspaceScopeRules,
+                  allowedMcpServers: scopeTextToList(event.target.value)
+                })
+              }
+              placeholder={["github", "chrome-devtools"].join("\n")}
+              rows={4}
+            />
+            <small>Optional allowlist. When set, MCP list/call tools only use matching configured servers.</small>
+          </label>
+          <label className="workspace-scope-field">
+            <span>Allowed browser target classes</span>
+            <textarea
+              value={scopeListToText(workspaceScopeRules.allowedBrowserTargetClasses)}
+              onChange={(event) =>
+                onWorkspaceScopeRulesChange({
+                  ...workspaceScopeRules,
+                  allowedBrowserTargetClasses: browserTargetClassTextToList(event.target.value)
+                })
+              }
+              placeholder={["background", "local", "public"].join("\n")}
+              rows={4}
+            />
+            <small>Optional allowlist. Valid classes: background, visible, local, file, public.</small>
+          </label>
         </div>
       </div>
 
@@ -6871,12 +6901,19 @@ function updateWorkspacePoliciesForRoot(
 function normalizeWorkspaceScopeRules(rules: WorkspaceScopePolicyRules | undefined): WorkspaceScopePolicyRules {
   return {
     blockedPathPrefixes: normalizeScopeList(rules?.blockedPathPrefixes),
-    allowedNetworkDomains: normalizeScopeList(rules?.allowedNetworkDomains)
+    allowedNetworkDomains: normalizeScopeList(rules?.allowedNetworkDomains),
+    allowedMcpServers: normalizeScopeList(rules?.allowedMcpServers),
+    allowedBrowserTargetClasses: normalizeBrowserTargetClassList(rules?.allowedBrowserTargetClasses)
   };
 }
 
 function workspaceScopeRulesHaveEntries(rules: WorkspaceScopePolicyRules) {
-  return Boolean(rules.blockedPathPrefixes?.length || rules.allowedNetworkDomains?.length);
+  return Boolean(
+    rules.blockedPathPrefixes?.length ||
+      rules.allowedNetworkDomains?.length ||
+      rules.allowedMcpServers?.length ||
+      rules.allowedBrowserTargetClasses?.length
+  );
 }
 
 function scopeListToText(values: string[] | undefined) {
@@ -6887,8 +6924,22 @@ function scopeTextToList(value: string) {
   return normalizeScopeList(value.split(/\r?\n/g));
 }
 
+function browserTargetClassTextToList(value: string) {
+  return normalizeBrowserTargetClassList(value.split(/\r?\n/g));
+}
+
 function normalizeScopeList(values: string[] | undefined) {
   return Array.from(new Set((values ?? []).map((entry) => entry.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right));
+}
+
+function normalizeBrowserTargetClassList(values: string[] | undefined): WorkspaceScopePolicyRules["allowedBrowserTargetClasses"] {
+  const normalized = normalizeScopeList(values)
+    .map((entry) => entry.toLowerCase())
+    .filter(
+      (entry): entry is NonNullable<WorkspaceScopePolicyRules["allowedBrowserTargetClasses"]>[number] =>
+        entry === "background" || entry === "visible" || entry === "local" || entry === "file" || entry === "public"
+    );
+  return Array.from(new Set(normalized)).sort((left, right) => left.localeCompare(right));
 }
 
 function capabilityPolicySummary(

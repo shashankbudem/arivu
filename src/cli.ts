@@ -163,12 +163,13 @@ async function runOneShot(task: string, config: AppConfig) {
   const cwd = process.cwd();
   const workspace = await detectWorkspace(cwd);
   const client = new OpenAICompatibleChatClient(config);
+  const scopePolicyRules = workspaceScopeRulesForRoot(config, workspace.root);
   const approvals = new ApprovalManager(
     config.trustMode,
     undefined,
     workspacePolicyOverridesForRoot(config, workspace.root),
     undefined,
-    workspaceScopeRulesForRoot(config, workspace.root)
+    scopePolicyRules
   );
   const agent = new Agent({
     client,
@@ -177,7 +178,8 @@ async function runOneShot(task: string, config: AppConfig) {
     model: config.model,
     baseUrl: config.baseUrl,
     tavilyApiKey: config.tavilyApiKey,
-    mcpServers: config.mcpServers
+    mcpServers: config.mcpServers,
+    scopePolicyRules
   });
   const store = new SessionStore();
 
