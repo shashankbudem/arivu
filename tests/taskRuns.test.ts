@@ -10,10 +10,23 @@ import {
   recordTaskRunApproval,
   recordTaskRunAssistantCompletion,
   recordTaskRunAssistantPlan,
-  recordTaskRunEvent
+  recordTaskRunEvent,
+  capabilityForToolName
 } from "../src/agent/taskRuns.js";
 
 describe("agent task runs", () => {
+  it("classifies tool names into task-run capabilities", () => {
+    expect(capabilityForToolName("read")).toBe("read_repo");
+    expect(capabilityForToolName("write_file")).toBe("write_workspace");
+    expect(capabilityForToolName("run")).toBe("run_command");
+    expect(capabilityForToolName("web_search")).toBe("network_fetch");
+    expect(capabilityForToolName("browser_click")).toBe("browser_control");
+    expect(capabilityForToolName("mcp_call_tool")).toBe("mcp_call");
+    expect(capabilityForToolName("read_skill")).toBe("skill_context");
+    expect(capabilityForToolName("current_datetime")).toBe("local_context");
+    expect(capabilityForToolName("future_tool")).toBe("unknown");
+  });
+
   it("records tool capabilities and browser screenshot artifacts", () => {
     const run = createAgentTaskRun({
       userMessageIndex: 2,

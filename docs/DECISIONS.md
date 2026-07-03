@@ -186,6 +186,12 @@ Decision: `describeCapabilityPolicies()` now returns examples, risk notes, and d
 
 Reason: policy explanation should not become a separate UI copy layer that can drift from enforcement. Keeping examples and risk notes beside the table makes Settings more understandable while preserving the rule that workspace overrides can only tighten decisions to `prompt` or `deny`.
 
+## 2026-07-03: Activity rows show governing policy details
+
+Decision: Activity tool rows now carry policy detail alongside the tool summary. Persisted task-run rows join each tool capability to the closest matching approval audit record when available, and restored transcript-only rows use the shared tool-name capability classifier while marking the policy as inferred. Copied audit summaries include the per-tool policy line as well.
+
+Reason: users need to understand not just what the agent did, but why that action was allowed, approval-gated, blocked, or merely inferred from old transcript protocol. Keeping the classifier shared between task-run recording and renderer recovery avoids drift between saved run data and restored UI explanations.
+
 ## 2026-06-25: Durable approval audit on task runs
 
 Decision: `ApprovalManager` emits audit events for automatic allows, policy blocks, approval requests, approvals, and denials. Desktop runs persist those events on the active task run and render them in Activity.

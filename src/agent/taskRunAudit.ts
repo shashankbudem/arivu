@@ -114,6 +114,7 @@ function toolLines(run: AgentTaskRun) {
       if (tool.arguments !== undefined) {
         lines.push(`   - Arguments: \`${inlineText(safeJson(tool.arguments), MAX_ARGUMENT_TEXT)}\``);
       }
+      lines.push(`   - Policy: ${toolPolicyLine(run, tool)}`);
       if (tool.resultPreview) {
         lines.push(`   - Result: ${inlineText(tool.resultPreview)}`);
       }
@@ -123,6 +124,49 @@ function toolLines(run: AgentTaskRun) {
       return lines.join("\n");
     })
   );
+}
+
+function toolPolicyLine(run: AgentTaskRun, tool: AgentTaskRun["tools"][number]) {
+  const approval = matchingApprovalForTool(run, tool);
+  if (!approval) {
+    return `${capabilityLabel(tool.capability)} capability recorded; no matching approval audit`;
+  }
+  const details = [
+    approvalStatusLabel(approval.status),
+    approval.effect,
+    approval.trustMode,
+    approval.override ? `workspace override ${approval.override}` : undefined,
+    approval.risky ? "risky" : undefined
+  ].filter((item): item is string => Boolean(item));
+  return `${details.join(" - ")}: ${inlineText(approval.reason)}`;
+}
+
+function matchingApprovalForTool(run: AgentTaskRun, tool: AgentTaskRun["tools"][number]) {
+  const approvals = (run.approvals ?? []).filter((approval) => approval.capability === tool.capability);
+  if (approvals.length === 0) {
+    return undefined;
+  }
+  return approvals
+    .slice()
+    .sort((left, right) => {
+      const leftRank = approvalMatchRank(left.status);
+      const rightRank = approvalMatchRank(right.status);
+      if (leftRank !== rightRank) {
+        return rightRank - leftRank;
+      }
+      return approvalTimestamp(right).localeCompare(approvalTimestamp(left));
+    })[0];
+}
+
+function approvalMatchRank(status: AgentTaskRunApprovalStatus) {
+  if (status === "allowed" || status === "approved" || status === "blocked" || status === "denied") {
+    return 2;
+  }
+  return 1;
+}
+
+function approvalTimestamp(approval: AgentTaskRun["approvals"][number]) {
+  return approval.updatedAt ?? approval.decidedAt ?? approval.requestedAt ?? approval.createdAt;
 }
 
 function approvalLines(run: AgentTaskRun) {

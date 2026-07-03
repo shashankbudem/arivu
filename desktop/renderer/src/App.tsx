@@ -80,6 +80,7 @@ import {
   type AgentTaskRunReplayOutcomeGroup
 } from "../../../src/agent/taskHistory";
 import { buildTaskRunAuditMarkdown } from "../../../src/agent/taskRunAudit";
+import { capabilityForToolName } from "../../../src/agent/toolCapabilities";
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
 
 type ViewMode = "chat" | "history" | "settings" | "ui";
@@ -236,6 +237,21 @@ type ActivityItem = {
   evidenceLinks?: ActivityEvidenceLink[];
   remediationPrompt?: string;
   rollbackPrompt?: string;
+  policy?: ActivityPolicyDetail;
+};
+
+type ActivityPolicyDetail = {
+  capability: AgentTaskRunCapability;
+  capabilityLabel: string;
+  source: "approval" | "tool" | "inferred";
+  label?: string;
+  reason?: string;
+  effect?: AgentTaskRunApprovalEffect;
+  status?: AgentTaskRunApprovalStatus;
+  trustMode?: TrustMode;
+  risky?: boolean;
+  override?: AgentTaskRunApprovalOverride;
+  summary?: string;
 };
 
 type ActivityEvidenceLink = {
@@ -4407,6 +4423,7 @@ function ToolRunSummary({ group }: { group: ActivityGroup }) {
                 <strong>{item.title}</strong>
                 {item.status ? <span className={`activity-status ${item.status}`}>{activityStatusLabel(item.status)}</span> : null}
                 {item.imagePreview ? <span className="tool-run-chip">Screenshot</span> : null}
+                {item.policy ? <ActivityPolicyChip policy={item.policy} compact /> : null}
                 {item.summary ? <p>{item.summary}</p> : null}
                 {detailPreview ? <pre>{detailPreview}</pre> : null}
               </div>
@@ -5706,11 +5723,13 @@ function ActivityRow({
         {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         <span>{item.kind}</span>
         <strong>{item.title}</strong>
+        {item.policy ? <ActivityPolicyChip policy={item.policy} /> : null}
         {item.status ? <span className={`activity-status ${item.status}`}>{activityStatusLabel(item.status)}</span> : null}
       </button>
       {!collapsed ? (
         <div className="activity-body">
           {item.summary ? <p className="activity-summary">{item.summary}</p> : null}
+          {item.policy ? <ActivityPolicyDetails policy={item.policy} /> : null}
           {showEvidenceActions ? (
             <div className="activity-evidence-actions" aria-label="Task-run evidence actions">
               {onOpenEvidence
@@ -5763,6 +5782,86 @@ function ActivityRow({
       ) : null}
     </article>
   );
+}
+
+function ActivityPolicyChip({ policy, compact = false }: { policy: ActivityPolicyDetail; compact?: boolean }) {
+  const label = compact ? activityPolicyShortLabel(policy) : activityPolicyLabel(policy);
+  return (
+    <span className={`activity-policy-chip ${policy.effect ?? "inferred"}`} title={activityPolicyTitle(policy)}>
+      <Shield size={compact ? 10 : 11} />
+      {label}
+    </span>
+  );
+}
+
+function ActivityPolicyDetails({ policy }: { policy: ActivityPolicyDetail }) {
+  const metadata = [
+    policy.trustMode ? `Trust: ${trustModeLabel(policy.trustMode)}` : undefined,
+    policy.status ? `Audit: ${approvalStatusLabel(policy.status)}` : undefined,
+    policy.effect ? `Effect: ${policyEffectLabel(policy.effect)}` : undefined,
+    policy.override ? `Override: ${policy.override}` : undefined,
+    policy.risky !== undefined ? `Risk: ${policy.risky ? "risky action" : "standard action"}` : undefined
+  ].filter((item): item is string => Boolean(item));
+  return (
+    <div className={`activity-policy-detail ${policy.effect ?? "inferred"}`}>
+      <div>
+        <Shield size={13} />
+        <span>{policy.capabilityLabel}</span>
+        <strong>{activityPolicyLabel(policy)}</strong>
+      </div>
+      {policy.reason ? <p>{policy.reason}</p> : <p>{activityPolicyFallbackReason(policy)}</p>}
+      {policy.summary ? <small>{policy.summary}</small> : null}
+      {metadata.length > 0 ? (
+        <div className="activity-policy-meta">
+          {metadata.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function activityPolicyShortLabel(policy: ActivityPolicyDetail) {
+  if (policy.effect) {
+    return `${policy.capabilityLabel} · ${policyEffectLabel(policy.effect)}`;
+  }
+  return policy.capabilityLabel;
+}
+
+function activityPolicyLabel(policy: ActivityPolicyDetail) {
+  if (policy.label && policy.effect) {
+    return `${policy.label} · ${policyEffectLabel(policy.effect)}`;
+  }
+  if (policy.label) {
+    return policy.label;
+  }
+  if (policy.effect) {
+    return policyEffectLabel(policy.effect);
+  }
+  return policy.source === "inferred" ? "Inferred capability" : "Recorded capability";
+}
+
+function activityPolicyTitle(policy: ActivityPolicyDetail) {
+  const lines = [
+    `Capability: ${policy.capabilityLabel}`,
+    policy.effect ? `Effect: ${policyEffectLabel(policy.effect)}` : undefined,
+    policy.status ? `Audit: ${approvalStatusLabel(policy.status)}` : undefined,
+    policy.trustMode ? `Trust mode: ${trustModeLabel(policy.trustMode)}` : undefined,
+    policy.override ? `Workspace override: ${policy.override}` : undefined,
+    policy.reason
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n");
+}
+
+function activityPolicyFallbackReason(policy: ActivityPolicyDetail) {
+  if (policy.source === "inferred") {
+    return "Capability was inferred from the tool name because this row was restored from transcript protocol.";
+  }
+  if (policy.source === "tool") {
+    return "Capability was recorded on the task run; no matching approval audit was found for this tool call.";
+  }
+  return "Policy audit details were recorded on the task run.";
 }
 
 function LatestActivityScreenshot({ item }: { item: ActivityItem }) {
@@ -7936,26 +8035,30 @@ function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null
       const group = activeGroup();
       for (const call of message.toolCalls) {
         const complete = completedToolCallIds.has(call.id);
+        const policy = activityPolicyForToolActivity(group.run, call.id, call.name);
         group.items.push({
           id: `call-${index}-${call.id}`,
           kind: "call",
           title: call.name,
           detail: safeJson(call.arguments),
           summary: summarizeToolCall(call),
-          status: complete ? "done" : currentSessionRunning ? "running" : "waiting"
+          status: complete ? "done" : currentSessionRunning ? "running" : "waiting",
+          policy
         });
       }
     }
     if (message.role === "tool") {
       const group = activeGroup();
       const toolResult = buildToolResultActivity(message);
+      const policy = message.name ? activityPolicyForToolActivity(group.run, message.toolCallId, message.name) : undefined;
       group.items.push({
         id: `tool-${index}-${message.toolCallId ?? message.name}`,
         kind: "result",
         title: message.name ?? "tool",
         detail: toolResult.detail,
         summary: toolResult.summary,
-        imagePreview: toolResult.imagePreview
+        imagePreview: toolResult.imagePreview,
+        policy
       });
     }
   });
@@ -8073,6 +8176,7 @@ function activityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
       : fileChangeArtifact?.content !== undefined
         ? fileChangeArtifactDiffPreview(fileChangeArtifact)
         : undefined;
+    const policy = activityPolicyForRunTool(run, tool);
 
     items.push({
       id: `run-call-${run.id}-${tool.toolCallId}`,
@@ -8080,7 +8184,8 @@ function activityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
       title: tool.name,
       detail: safeJson(tool.arguments ?? {}),
       summary: capabilityLabel(tool.capability),
-      status: tool.status === "done" ? "done" : tool.status === "failed" ? "failed" : "running"
+      status: tool.status === "done" ? "done" : tool.status === "failed" ? "failed" : "running",
+      policy
     });
     if (tool.resultPreview || artifact) {
       items.push({
@@ -8094,7 +8199,8 @@ function activityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
         diffPreview,
         evidenceLinks: commandArtifact ? commandArtifactEvidenceLinks(run.id, commandArtifact) : undefined,
         remediationPrompt: commandArtifact ? buildReportRemediationPrompt(commandArtifact) : undefined,
-        rollbackPrompt: buildEditRollbackPrompt(run, patchArtifact, fileChangeArtifact)
+        rollbackPrompt: buildEditRollbackPrompt(run, patchArtifact, fileChangeArtifact),
+        policy
       });
     }
   }
@@ -8108,8 +8214,101 @@ function approvalActivityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
     title: approvalTitle(approval),
     detail: approvalDetail(approval),
     summary: approvalSummary(approval),
-    status: approvalActivityStatus(approval.status)
+    status: approvalActivityStatus(approval.status),
+    policy: activityPolicyFromApproval(approval)
   }));
+}
+
+function activityPolicyForToolActivity(run: AgentTaskRun | undefined, toolCallId: string | undefined, name: string): ActivityPolicyDetail {
+  const tool = taskRunToolForActivity(run, toolCallId, name);
+  if (run && tool) {
+    return activityPolicyForRunTool(run, tool);
+  }
+  return inferredActivityPolicyForTool(name);
+}
+
+function taskRunToolForActivity(run: AgentTaskRun | undefined, toolCallId: string | undefined, name: string) {
+  if (!run) {
+    return undefined;
+  }
+  if (toolCallId) {
+    const byId = run.tools.find((tool) => tool.toolCallId === toolCallId);
+    if (byId) {
+      return byId;
+    }
+  }
+  return run.tools.find((tool) => tool.name === name);
+}
+
+function activityPolicyForRunTool(run: AgentTaskRun, tool: AgentTaskRunToolCall): ActivityPolicyDetail {
+  const approval = matchingApprovalForTool(run, tool);
+  if (approval) {
+    return activityPolicyFromApproval(approval);
+  }
+  return {
+    capability: tool.capability,
+    capabilityLabel: capabilityLabel(tool.capability),
+    source: "tool",
+    label: "Recorded capability",
+    reason: "This tool call has a saved capability record, but no matching approval audit was recorded on the task run.",
+    summary: `Tool ${tool.name} was classified as ${capabilityLabel(tool.capability)}.`
+  };
+}
+
+function matchingApprovalForTool(run: AgentTaskRun, tool: AgentTaskRunToolCall) {
+  const approvals = (run.approvals ?? []).filter((approval) => approval.capability === tool.capability);
+  if (approvals.length === 0) {
+    return undefined;
+  }
+  return approvals
+    .slice()
+    .sort((left, right) => {
+      const leftRank = approvalMatchRank(left.status);
+      const rightRank = approvalMatchRank(right.status);
+      if (leftRank !== rightRank) {
+        return rightRank - leftRank;
+      }
+      return approvalTimestamp(right).localeCompare(approvalTimestamp(left));
+    })[0];
+}
+
+function approvalMatchRank(status: AgentTaskRunApprovalStatus) {
+  if (status === "allowed" || status === "approved" || status === "blocked" || status === "denied") {
+    return 2;
+  }
+  return 1;
+}
+
+function approvalTimestamp(approval: AgentTaskRunApproval) {
+  return approval.updatedAt ?? approval.decidedAt ?? approval.requestedAt ?? approval.createdAt;
+}
+
+function activityPolicyFromApproval(approval: AgentTaskRunApproval): ActivityPolicyDetail {
+  return {
+    capability: approval.capability,
+    capabilityLabel: capabilityLabel(approval.capability),
+    source: "approval",
+    label: approval.label,
+    reason: approval.reason,
+    effect: approval.effect,
+    status: approval.status,
+    trustMode: approval.trustMode,
+    risky: approval.risky,
+    override: approval.override,
+    summary: approval.summary
+  };
+}
+
+function inferredActivityPolicyForTool(name: string): ActivityPolicyDetail {
+  const capability = capabilityForToolName(name);
+  return {
+    capability,
+    capabilityLabel: capabilityLabel(capability),
+    source: "inferred",
+    label: "Inferred capability",
+    reason: "This row was restored from transcript tool protocol, so Arivu inferred the capability from the tool name.",
+    summary: `Tool ${name} maps to ${capabilityLabel(capability)}.`
+  };
 }
 
 function approvalTitle(approval: AgentTaskRunApproval) {

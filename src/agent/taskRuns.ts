@@ -3,6 +3,7 @@ import { realpathSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import type { CommandExecutionProfile } from "../execution/profile.js";
 import { chatContentToText, type ChatContent } from "./content.js";
+import { capabilityForToolName } from "./toolCapabilities.js";
 import type {
   AgentLoopState,
   AgentRunEvent,
@@ -22,6 +23,8 @@ import type {
   AgentTaskRunTestReport,
   AgentTaskRunStatus
 } from "./types.js";
+
+export { capabilityForToolName } from "./toolCapabilities.js";
 
 export const MAX_TASK_RUNS_PER_SESSION = 100;
 const MAX_COMMAND_STREAM_LENGTH = 8_000;
@@ -310,34 +313,6 @@ export function parseAgentTaskRunCompletion(
     };
   }
   return undefined;
-}
-
-export function capabilityForToolName(name: string): AgentTaskRunCapability {
-  if (["list", "read", "search", "git_status"].includes(name)) {
-    return "read_repo";
-  }
-  if (["apply_patch", "write_file"].includes(name)) {
-    return "write_workspace";
-  }
-  if (name === "run") {
-    return "run_command";
-  }
-  if (name === "web_search") {
-    return "network_fetch";
-  }
-  if (name.startsWith("browser_")) {
-    return "browser_control";
-  }
-  if (name.startsWith("mcp_")) {
-    return "mcp_call";
-  }
-  if (name.endsWith("_skill") || name.includes("skills")) {
-    return "skill_context";
-  }
-  if (name.startsWith("current_")) {
-    return "local_context";
-  }
-  return "unknown";
 }
 
 function parsePlanHeading(line: string | undefined): { summary?: string } | undefined {

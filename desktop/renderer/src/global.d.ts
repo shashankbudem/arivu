@@ -123,17 +123,19 @@ type AgentTaskRunToolCall = {
 };
 
 type AgentTaskRunApprovalStatus = "allowed" | "requested" | "approved" | "denied" | "blocked";
+type AgentTaskRunApprovalEffect = "allow" | "prompt" | "deny";
+type AgentTaskRunApprovalOverride = "prompt" | "deny";
 type AgentTaskRunApproval = {
   id: string;
   actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
   capability: AgentTaskRunCapability;
   status: AgentTaskRunApprovalStatus;
   trustMode: TrustMode;
-  effect: "allow" | "prompt" | "deny";
+  effect: AgentTaskRunApprovalEffect;
   label: string;
   reason: string;
   risky: boolean;
-  override?: "prompt" | "deny";
+  override?: AgentTaskRunApprovalOverride;
   summary: string;
   message?: string;
   createdAt: string;

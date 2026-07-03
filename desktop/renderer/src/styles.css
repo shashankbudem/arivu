@@ -3196,7 +3196,7 @@ body.is-resizing .panel-resize-handle::after {
 
 .tool-run-item {
   display: grid;
-  grid-template-columns: 22px auto minmax(0, 1fr) auto auto;
+  grid-template-columns: 22px auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 6px 8px;
   padding: 8px;
@@ -3258,6 +3258,49 @@ body.is-resizing .panel-resize-handle::after {
   color: #9ce4d5;
   font-size: 10px;
   font-weight: 800;
+}
+
+.activity-policy-chip {
+  min-width: 0;
+  max-width: 190px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px solid rgb(156 150 141 / 0.28);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.04);
+  color: #bdb6ac;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-policy-chip svg {
+  flex: 0 0 auto;
+}
+
+.activity-policy-chip.allow {
+  border-color: rgb(75 211 154 / 0.38);
+  background: rgb(47 180 139 / 0.12);
+  color: #71e3b6;
+}
+
+.activity-policy-chip.prompt {
+  border-color: rgb(224 182 82 / 0.4);
+  background: rgb(205 153 48 / 0.12);
+  color: #e9bf64;
+}
+
+.activity-policy-chip.deny {
+  border-color: rgb(231 101 83 / 0.38);
+  background: rgb(180 65 55 / 0.13);
+  color: #f0a093;
 }
 
 .tool-run-item pre {
@@ -4212,6 +4255,88 @@ body.is-resizing .panel-resize-handle::after {
   color: #d7d0c5;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.activity-policy-detail {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgb(156 150 141 / 0.2);
+  border-radius: 7px;
+  background: rgb(255 255 255 / 0.026);
+}
+
+.activity-policy-detail.allow {
+  border-color: rgb(75 211 154 / 0.28);
+  background: rgb(47 180 139 / 0.08);
+}
+
+.activity-policy-detail.prompt {
+  border-color: rgb(224 182 82 / 0.3);
+  background: rgb(205 153 48 / 0.08);
+}
+
+.activity-policy-detail.deny {
+  border-color: rgb(231 101 83 / 0.3);
+  background: rgb(180 65 55 / 0.09);
+}
+
+.activity-policy-detail > div:first-child {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.activity-policy-detail > div:first-child svg {
+  flex: 0 0 auto;
+  color: #e5b95c;
+}
+
+.activity-policy-detail > div:first-child span {
+  flex: 0 0 auto;
+  color: #9c968d;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.activity-policy-detail > div:first-child strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #efede8;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-policy-detail p,
+.activity-policy-detail small {
+  margin: 0;
+  color: #bdb6ac;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.activity-policy-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.activity-policy-meta span {
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 6px;
+  overflow: hidden;
+  border: 1px solid rgb(67 61 52 / 0.72);
+  border-radius: 999px;
+  color: #d8d2c8;
+  font-size: 10px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .activity-evidence-actions {
@@ -6723,6 +6848,30 @@ html[data-theme="light"] .tool-run-chip {
   color: #0f6f5c;
 }
 
+html[data-theme="light"] .activity-policy-chip {
+  border-color: #d9d0c3;
+  background: #fff7ec;
+  color: #5f5549;
+}
+
+html[data-theme="light"] .activity-policy-chip.allow {
+  border-color: rgb(28 168 137 / 0.34);
+  background: rgb(28 168 137 / 0.1);
+  color: #0f6f5c;
+}
+
+html[data-theme="light"] .activity-policy-chip.prompt {
+  border-color: rgb(184 125 28 / 0.34);
+  background: rgb(219 151 42 / 0.12);
+  color: #8a5a00;
+}
+
+html[data-theme="light"] .activity-policy-chip.deny {
+  border-color: rgb(184 63 54 / 0.34);
+  background: rgb(184 63 54 / 0.1);
+  color: #983529;
+}
+
 html[data-theme="light"] .tool-run-item pre {
   border-color: #d9d0c3;
   background: #f7f1e8;
@@ -6918,6 +7067,8 @@ html[data-theme="light"] .shell-command-text {
 
 html[data-theme="light"] .activity-row pre,
 html[data-theme="light"] .activity-summary,
+html[data-theme="light"] .activity-policy-detail p,
+html[data-theme="light"] .activity-policy-detail small,
 html[data-theme="light"] .activity-latest-screenshot p,
 html[data-theme="light"] .activity-screenshot-loading,
 html[data-theme="light"] .activity-screenshot-missing,
@@ -6927,6 +7078,44 @@ html[data-theme="light"] .approval-dialog p,
 html[data-theme="light"] .shell-meta,
 html[data-theme="light"] .history-empty {
   color: #5f5549;
+}
+
+html[data-theme="light"] .activity-policy-detail {
+  border-color: #d9d0c3;
+  background: #fff7ec;
+}
+
+html[data-theme="light"] .activity-policy-detail.allow {
+  border-color: rgb(28 168 137 / 0.26);
+  background: rgb(28 168 137 / 0.08);
+}
+
+html[data-theme="light"] .activity-policy-detail.prompt {
+  border-color: rgb(184 125 28 / 0.28);
+  background: rgb(219 151 42 / 0.08);
+}
+
+html[data-theme="light"] .activity-policy-detail.deny {
+  border-color: rgb(184 63 54 / 0.28);
+  background: rgb(184 63 54 / 0.08);
+}
+
+html[data-theme="light"] .activity-policy-detail > div:first-child svg {
+  color: #9f7628;
+}
+
+html[data-theme="light"] .activity-policy-detail > div:first-child span {
+  color: #756b5e;
+}
+
+html[data-theme="light"] .activity-policy-detail > div:first-child strong,
+html[data-theme="light"] .activity-policy-meta span {
+  color: #211b14;
+}
+
+html[data-theme="light"] .activity-policy-meta span {
+  border-color: #d9d0c3;
+  background: #fffaf2;
 }
 
 html[data-theme="light"] .activity-evidence-button {
