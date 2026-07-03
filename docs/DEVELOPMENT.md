@@ -232,6 +232,7 @@ Desktop workflows to check manually after UI changes:
 - The Browser header action opens or hides the separate maximized browser window. Verify explicit visible URL opens in that window, default agent browser tools remain hidden/background, and the main workspace layout does not gain an embedded browser column.
 - In the visible browser window, verify the tab strip can create a new tab, select between tabs, close a tab, keep each tab's URL/title/history separate, navigate with the address bar/back/forward/reload controls, and convert non-URL address text into a Google search.
 - For browser tool QA, verify `browser_open` with `mode: "visible"` opens the active visible tab, `browser_open` with `newTab: true` creates a visible tab, `tabId` targets a specific visible tab, and `browser_screenshot` produces a fresh Activity screenshot preview for the intended tab.
+- Verify browser opens, clicks, coordinate clicks, and typing do not show approval dialogs by default, while the Activity rail still records browser-control activity. Then set the current workspace browser-control policy override to `Require approval` or `Block` in Settings and confirm the override is honored.
 - `Refresh state` reloads workspace, config, and active session state.
 - `Compact context` summarizes older saved messages locally, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.

@@ -105,9 +105,9 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     local_context: { base: "allow", label: "Local context", reason: "local context reads are allowed" },
     skill_context: { base: "allow", label: "Skill context", reason: "local skill reads are allowed" },
     network_fetch: { base: "prompt", label: "Network approval", reason: "network reads require approval" },
+    browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
     write_workspace: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
     run_command: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
-    browser_control: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
     mcp_call: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
     unknown: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" }
   },
@@ -118,7 +118,7 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     write_workspace: { base: "prompt", label: "Requires approval", reason: "workspace writes require approval" },
     run_command: { base: "prompt", label: "Requires approval", reason: "shell commands require approval" },
     network_fetch: { base: "prompt", label: "Network approval", reason: "network reads require approval" },
-    browser_control: { base: "prompt", label: "Requires approval", reason: "browser actions require approval" },
+    browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },
     unknown: { base: "prompt", label: "Requires approval", reason: "unknown capabilities require approval" }
   },
@@ -129,7 +129,7 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     write_workspace: { base: "allow", risky: "prompt", label: "Approval for risky", reason: "risky workspace writes require approval" },
     run_command: { base: "prompt", label: "Requires approval", reason: "shell commands require approval" },
     network_fetch: { base: "prompt", label: "Network approval", reason: "network reads require approval" },
-    browser_control: { base: "allow", risky: "prompt", label: "Approval for external", reason: "external or submitting browser actions require approval" },
+    browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },
     unknown: { base: "prompt", label: "Requires approval", reason: "unknown capabilities require approval" }
   }

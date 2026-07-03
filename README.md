@@ -66,9 +66,9 @@ arivu doctor --json
 
 Supported trust modes:
 
-- `ask`: reads are automatic unless the workspace policy tightens repo reads; writes, shell commands, network searches, MCP process starts, and agent-driven browser actions require confirmation.
-- `readonly`: local list/search/read/local context/git status are allowed unless the workspace policy tightens repo reads; writes, shell commands, MCP process starts, and agent-driven browser actions are blocked.
-- `trusted`: workspace writes are allowed, but shell commands, network searches, MCP process starts, and external browser actions still require confirmation.
+- `ask`: reads and isolated browser actions are automatic unless the workspace policy tightens them; writes, shell commands, network searches, and MCP process starts require confirmation.
+- `readonly`: local list/search/read/local context/git status and isolated browser actions are allowed unless the workspace policy tightens them; writes, shell commands, and MCP process starts are blocked.
+- `trusted`: reads, workspace writes, and isolated browser actions are automatic unless the workspace policy tightens them; risky workspace writes, shell commands, network searches, and MCP process starts still require confirmation.
 
 These modes are backed by Arivu's capability policy table, which maps harness capabilities such as `read_repo`, `write_workspace`, `run_command`, `network_fetch`, `browser_control`, and `mcp_call` to allow/prompt/deny decisions. Desktop Settings shows that matrix and can save stricter policy overrides for the current workspace. Workspace overrides can require approval or block enforceable capabilities, but cannot turn a built-in prompt/deny rule into allow.
 
@@ -101,7 +101,7 @@ Browser control:
 - The visible browser window has native tabs. Each visible tab keeps its own URL, title, loading state, navigation history, console log buffer, and latest screenshot metadata while sharing the same persistent Arivu browser profile for cookies/session state.
 - Browser tools are exposed to the agent as `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, and `browser_type`.
 - `browser_open` runs hidden/background by default. Follow-up browser actions without an explicit `mode` target the active browser, so a login completed in the visible browser is not accidentally ignored by later hidden-mode calls. In visible mode, `browser_open` can pass `newTab: true` to create a visible tab or `tabId` to target an existing tab; other browser tools also accept `tabId` and default to the active visible tab.
-- Agent-driven browser opens, clicks, coordinate clicks, and submitted typing require approval outside trusted local-only cases, and are blocked in `readonly` mode. Browser `file://` URLs are confined to the active workspace.
+- Agent-driven browser opens, clicks, coordinate clicks, and typing run without approval by default so browser-assisted tasks can continue smoothly. Activity still records those actions, and workspace capability policy can require approval or block browser control for sensitive workspaces. Browser `file://` URLs are confined to the active workspace.
 - The prompt `+` menu and `/browser` command can open or focus the separate browser window for the user.
 - The visible browser address field accepts URLs, localhost targets, and plain search queries. Non-URL text opens a Google search.
 - Browser snapshots inspect the main page, child frames, open shadow roots, and a best-effort Chrome accessibility tree. Screenshot results include the saved PNG plus frame-aware visual metadata with CSS viewport coordinates for visible interactive elements.

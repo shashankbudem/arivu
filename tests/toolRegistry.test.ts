@@ -55,7 +55,7 @@ describe("createToolRegistry", () => {
     expect(coordinateResult.mode).toBe("visible");
   });
 
-  it("blocks browser actions in readonly mode", async () => {
+  it("allows browser actions in readonly mode without prompting", async () => {
     const browser = createFakeBrowser();
     let prompted = false;
     const registry = createToolRegistry({
@@ -67,9 +67,29 @@ describe("createToolRegistry", () => {
       browser
     });
 
-    await expect(registry.execute("browser_open", { url: "https://example.com" })).resolves.toMatch(/readonly/);
-    await expect(registry.execute("browser_click", { target: "Sign in" })).resolves.toMatch(/readonly/);
-    await expect(registry.execute("browser_type", { target: "Search", text: "ServiceNow", submit: true })).resolves.toMatch(/readonly/);
+    await expect(registry.execute("browser_open", { url: "https://example.com" })).resolves.toMatch(/"action": "open"/);
+    await expect(registry.execute("browser_click", { target: "Sign in" })).resolves.toMatch(/"action": "click"/);
+    await expect(registry.execute("browser_type", { target: "Search", text: "ServiceNow", submit: true })).resolves.toMatch(/"action": "type"/);
+    expect(prompted).toBe(false);
+  });
+
+  it("honors workspace browser control overrides", async () => {
+    const browser = createFakeBrowser();
+    let prompted = false;
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager(
+        "readonly",
+        async () => {
+          prompted = true;
+          return false;
+        },
+        { browser_control: "deny" }
+      ),
+      browser
+    });
+
+    await expect(registry.execute("browser_open", { url: "https://example.com" })).resolves.toMatch(/workspace policy override/);
     expect(prompted).toBe(false);
   });
 

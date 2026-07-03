@@ -167,35 +167,25 @@ describe("approval manager", () => {
     await expect(approvals.require({ type: "write", summary: "delete generated output", destructive: true })).rejects.toThrow(/denied/);
   });
 
-  it("allows non-risky browser actions in trusted mode", async () => {
-    let prompted = false;
-    const approvals = new ApprovalManager("trusted", async () => {
-      prompted = true;
-      return false;
-    });
+  it("allows browser actions without prompting in default trust modes", async () => {
+    for (const mode of ["readonly", "ask", "trusted"] as const) {
+      let prompted = false;
+      const approvals = new ApprovalManager(mode, async () => {
+        prompted = true;
+        return false;
+      });
 
-    await expect(
-      approvals.require({
-        type: "browser",
-        action: "click",
-        target: "Local button",
-        mode: "background"
-      })
-    ).resolves.toBeUndefined();
-    expect(prompted).toBe(false);
-  });
-
-  it("prompts for risky browser actions in trusted mode", async () => {
-    const approvals = new ApprovalManager("trusted", async () => false);
-    await expect(
-      approvals.require({
-        type: "browser",
-        action: "open",
-        target: "https://example.com",
-        mode: "background",
-        destructive: true
-      })
-    ).rejects.toThrow(/denied/);
+      await expect(
+        approvals.require({
+          type: "browser",
+          action: "open",
+          target: "https://example.com",
+          mode: "background",
+          destructive: true
+        })
+      ).resolves.toBeUndefined();
+      expect(prompted).toBe(false);
+    }
   });
 
   it("prompts for MCP tools in trusted mode", async () => {
@@ -208,12 +198,16 @@ describe("approval manager", () => {
     await expect(approvals.require({ type: "write", summary: "edit file" })).rejects.toThrow(/readonly/);
   });
 
-  it("blocks browser actions in readonly mode", async () => {
+  it("can block browser actions in readonly mode with a workspace override", async () => {
     let prompted = false;
-    const approvals = new ApprovalManager("readonly", async () => {
-      prompted = true;
-      return false;
-    });
+    const approvals = new ApprovalManager(
+      "readonly",
+      async () => {
+        prompted = true;
+        return false;
+      },
+      { browser_control: "deny" }
+    );
 
     await expect(
       approvals.require({
@@ -223,7 +217,7 @@ describe("approval manager", () => {
         mode: "visible",
         destructive: true
       })
-    ).rejects.toThrow(/readonly/);
+    ).rejects.toThrow(/workspace policy override/);
     expect(prompted).toBe(false);
   });
 

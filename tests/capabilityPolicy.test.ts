@@ -14,19 +14,19 @@ describe("capability policy", () => {
     }
   });
 
-  it("blocks host-changing capabilities in readonly mode but still prompts for network fetches", () => {
+  it("blocks host-changing capabilities in readonly mode but allows isolated browser control", () => {
     expect(evaluateCapabilityPolicy("readonly", "write_workspace").effect).toBe("deny");
     expect(evaluateCapabilityPolicy("readonly", "run_command").effect).toBe("deny");
-    expect(evaluateCapabilityPolicy("readonly", "browser_control").effect).toBe("deny");
     expect(evaluateCapabilityPolicy("readonly", "mcp_call").effect).toBe("deny");
+    expect(evaluateCapabilityPolicy("readonly", "browser_control").effect).toBe("allow");
     expect(evaluateCapabilityPolicy("readonly", "network_fetch").effect).toBe("prompt");
   });
 
-  it("keeps trusted mode permissive only for non-risky workspace/browser actions", () => {
+  it("keeps trusted mode permissive for browser actions but not risky workspace writes", () => {
     expect(evaluateCapabilityPolicy("trusted", "write_workspace").effect).toBe("allow");
     expect(evaluateCapabilityPolicy("trusted", "write_workspace", { risky: true }).effect).toBe("prompt");
     expect(evaluateCapabilityPolicy("trusted", "browser_control").effect).toBe("allow");
-    expect(evaluateCapabilityPolicy("trusted", "browser_control", { risky: true }).effect).toBe("prompt");
+    expect(evaluateCapabilityPolicy("trusted", "browser_control", { risky: true }).effect).toBe("allow");
     expect(evaluateCapabilityPolicy("trusted", "run_command").effect).toBe("prompt");
     expect(evaluateCapabilityPolicy("trusted", "mcp_call").effect).toBe("prompt");
   });

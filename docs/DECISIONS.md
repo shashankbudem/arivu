@@ -365,3 +365,9 @@ Reason: the harness architecture needs a human-comprehensible approval boundary 
 Decision: Activity exposes a Sync action for ready task worktrees. Sync commits dirty task-worktree changes, merges the current original checkout head into the task branch, clears stale preview/PR metadata, and records conflicted files plus branch heads on `worktree.conflict` if Git stops for manual resolution. While a conflict is active, Preview, PR draft, Create PR, and Merge are blocked; Activity shows a conflict card with file-level Open actions plus Open worktree, Continue, and Abort actions. File-level Open validates the requested path against the stored conflict file list and managed worktree root before opening it. Continue stages resolved files and completes the merge commit. Abort runs `git merge --abort`.
 
 Reason: the original checkout can move while an isolated task branch is being repaired or verified. Sync makes that drift explicit without mutating the original checkout, and a persisted conflict record keeps the user-controlled resolution boundary visible after reload or context compaction.
+
+## 2026-07-03: Browser control does not prompt by default
+
+Decision: `browser_control` is allowed by default in `readonly`, `ask`, and `trusted` trust modes. Browser opens, clicks, coordinate clicks, and typing still flow through `ApprovalManager`, so task-run audit records capture them as allowed browser activity, but they no longer interrupt the user with approval dialogs. Workspace capability overrides can still require approval or block browser control for sensitive projects.
+
+Reason: browser work is part of Arivu's routine agent execution path, and approval dialogs were interrupting visible-browser workflows. Keeping browser activity audited and overrideable preserves the control-plane record while making browser-assisted tasks usable by default.
