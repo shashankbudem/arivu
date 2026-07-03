@@ -419,3 +419,9 @@ Reason: the original checkout can move while an isolated task branch is being re
 Decision: `browser_control` is allowed by default in `readonly`, `ask`, and `trusted` trust modes. Browser opens, clicks, coordinate clicks, and typing still flow through `ApprovalManager`, so task-run audit records capture them as allowed browser activity, but they no longer interrupt the user with approval dialogs. Workspace capability overrides can still require approval or block browser control for sensitive projects.
 
 Reason: browser work is part of Arivu's routine agent execution path, and approval dialogs were interrupting visible-browser workflows. Keeping browser activity audited and overrideable preserves the control-plane record while making browser-assisted tasks usable by default.
+
+## 2026-07-03: Workspace policy presets
+
+Decision: Settings exposes workspace policy preset buttons backed by `src/permissions/workspacePolicyPresets.ts`. Presets fill the current workspace override map and scope rules for default, review-first, local-only, and locked-down postures, then reuse the existing Save settings path. Preset matching is derived from normalized overrides and normalized scope rules so refreshed Settings can show the selected preset when the saved workspace policy still matches it exactly.
+
+Reason: workspace policy is powerful but verbose. Presets give users a safe starting point for common hardening postures without adding another persistence path or weakening the underlying capability policy rules.

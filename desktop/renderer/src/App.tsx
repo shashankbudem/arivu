@@ -82,6 +82,12 @@ import {
 import { buildTaskRunAuditMarkdown } from "../../../src/agent/taskRunAudit";
 import { capabilityForToolName } from "../../../src/agent/toolCapabilities";
 import { scopePolicySummaryItems } from "../../../src/permissions/scopePolicy";
+import {
+  normalizedWorkspacePolicyPreset,
+  WORKSPACE_POLICY_PRESETS,
+  workspacePolicyPresetMatches,
+  type WorkspacePolicyPreset
+} from "../../../src/permissions/workspacePolicyPresets";
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
 
 type ViewMode = "chat" | "history" | "settings" | "ui";
@@ -6436,6 +6442,11 @@ function SettingsView({
           setWorkspacePolicyOverrides((current) => updateWorkspacePolicyOverride(current, capability, override))
         }
         onWorkspaceScopeRulesChange={setWorkspaceScopeRules}
+        onWorkspacePresetApply={(preset) => {
+          const normalizedPreset = normalizedWorkspacePolicyPreset(preset);
+          setWorkspacePolicyOverrides(normalizedPreset.overrides);
+          setWorkspaceScopeRules(normalizedPreset.scopeRules);
+        }}
         loading={capabilityPolicyLoading}
         error={capabilityPolicyError}
         onRefresh={() => void refreshCapabilityPolicies()}
@@ -6659,6 +6670,7 @@ function CapabilityPolicyPanel({
   workspaceScopeRules,
   onWorkspaceOverrideChange,
   onWorkspaceScopeRulesChange,
+  onWorkspacePresetApply,
   loading,
   error,
   onRefresh
@@ -6671,11 +6683,15 @@ function CapabilityPolicyPanel({
   workspaceScopeRules: WorkspaceScopePolicyRules;
   onWorkspaceOverrideChange: (capability: WorkspacePolicyCapability, override: CapabilityPolicyOverrideEffect | "inherit") => void;
   onWorkspaceScopeRulesChange: (rules: WorkspaceScopePolicyRules) => void;
+  onWorkspacePresetApply: (preset: WorkspacePolicyPreset) => void;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
 }) {
   const activeScopeItems = scopePolicySummaryItems(workspaceScopeRules);
+  const activePresetId = WORKSPACE_POLICY_PRESETS.find((preset) =>
+    workspacePolicyPresetMatches(preset, workspaceOverrides, workspaceScopeRules)
+  )?.id;
   return (
     <section className="skills-settings-section policy-settings-section" aria-label="Capability policy">
       <div className="settings-section-heading">
@@ -6700,6 +6716,29 @@ function CapabilityPolicyPanel({
           <p>
             Tighten this workspace without changing the built-in {trustModeLabel(activeTrustMode)} posture.
           </p>
+        </div>
+        <div className="workspace-preset-grid" aria-label="Workspace policy presets">
+          {WORKSPACE_POLICY_PRESETS.map((preset) => {
+            const selected = preset.id === activePresetId;
+            return (
+              <button
+                key={preset.id}
+                className={`workspace-preset-button${selected ? " active" : ""}`}
+                type="button"
+                onClick={() => onWorkspacePresetApply(preset)}
+                aria-pressed={selected}
+              >
+                <span className="workspace-preset-icon">
+                  <Shield size={14} />
+                </span>
+                <span className="workspace-preset-copy">
+                  <strong>{preset.label}</strong>
+                  <small>{preset.description}</small>
+                </span>
+                {selected ? <Check size={14} className="workspace-preset-check" /> : null}
+              </button>
+            );
+          })}
         </div>
         <div className="workspace-policy-grid">
           {WORKSPACE_POLICY_CAPABILITIES.map((capability) => {
