@@ -238,7 +238,7 @@ Desktop workflows to check manually after UI changes:
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.
 - Browser tools appear in the Tools drawer in desktop mode. Verify `browser_open`, `browser_snapshot`, `browser_console`, `browser_screenshot`, `browser_click`, and `browser_type` are listed with hidden-browser status.
 - The `Images` item in the prompt `+` menu opens a native image picker, attaches PNG/JPEG/WebP/GIF files, renders removable thumbnails, and sends those images with the next prompt.
-- Pasting PNG/JPEG/WebP/GIF image data into the composer attaches thumbnails without inserting text.
+- Pasting or dropping PNG/JPEG/WebP/GIF image data into the composer attaches thumbnails without inserting text.
 - The send button is icon-only and remains disabled for empty prompts.
 - Search chat opens a find bar, reports match counts, and scrolls between matches.
 - `Enter` sends a message; `Shift+Enter` inserts a newline.

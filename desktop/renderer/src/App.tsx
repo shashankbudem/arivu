@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ComponentPropsWithoutRef,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type RefObject
@@ -109,6 +110,13 @@ const DEFAULT_AGENT_LOOP_MAX_ITERATIONS = 5;
 const MAX_IMAGE_ATTACHMENTS = 6;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const SUPPORTED_IMAGE_EXTENSIONS: Record<string, string> = {
+  gif: "image/gif",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp"
+};
 const NEW_PROVIDER_NAME = "New provider";
 const SIDEBAR_COLLAPSED_WIDTH = 68;
 const SIDEBAR_DEFAULT_WIDTH = 320;
@@ -468,6 +476,7 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState("");
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
+  const [composerDragActive, setComposerDragActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Starting");
   const [view, setView] = useState<ViewMode>("chat");
@@ -532,6 +541,7 @@ export function App() {
   const activityFocusResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSessionIdRef = useRef<string | undefined>(undefined);
   const activeSubmissionTokenRef = useRef<string | null>(null);
+  const composerDragDepthRef = useRef(0);
   const pullRequestWatchInFlightRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -1147,8 +1157,9 @@ export function App() {
     }
   }
 
-  async function attachImageFiles(files: File[], source: "pasted" | "selected") {
+  async function attachImageFiles(files: File[], source: "pasted" | "selected" | "dropped") {
     if (busy) {
+      setStatus("Wait for current response before attaching images");
       return;
     }
     const slots = Math.max(0, MAX_IMAGE_ATTACHMENTS - imageAttachments.length);
@@ -1167,6 +1178,66 @@ export function App() {
       setError(formatError(err));
       setStatus("Error");
     }
+  }
+
+  function resetComposerDragState() {
+    composerDragDepthRef.current = 0;
+    setComposerDragActive(false);
+  }
+
+  function handleComposerDragEnter(event: ReactDragEvent<HTMLDivElement>) {
+    if (!hasFileTransfer(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    if (!hasPotentialImageTransfer(event.dataTransfer)) {
+      resetComposerDragState();
+      return;
+    }
+    composerDragDepthRef.current += 1;
+    setComposerDragActive(true);
+  }
+
+  function handleComposerDragOver(event: ReactDragEvent<HTMLDivElement>) {
+    if (!hasFileTransfer(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    if (!hasPotentialImageTransfer(event.dataTransfer)) {
+      event.dataTransfer.dropEffect = "none";
+      resetComposerDragState();
+      return;
+    }
+    event.dataTransfer.dropEffect = busy ? "none" : "copy";
+    setComposerDragActive(true);
+  }
+
+  function handleComposerDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+    if (!composerDragActive) {
+      return;
+    }
+    event.preventDefault();
+    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1);
+    if (composerDragDepthRef.current === 0) {
+      setComposerDragActive(false);
+    }
+  }
+
+  function handleComposerDrop(event: ReactDragEvent<HTMLDivElement>) {
+    const files = imageFilesFromDataTransfer(event.dataTransfer);
+    if (files.length === 0) {
+      if (hasFileTransfer(event.dataTransfer)) {
+        event.preventDefault();
+        setError("Drop PNG, JPEG, WebP, or GIF images.");
+        setStatus("Unsupported image drop");
+      }
+      resetComposerDragState();
+      return;
+    }
+
+    event.preventDefault();
+    resetComposerDragState();
+    void attachImageFiles(files, "dropped");
   }
 
   function removeImageAttachment(id: string) {
@@ -2450,7 +2521,19 @@ export function App() {
                   handleComposerSubmit();
                 }}
               >
-                <div className="composer-surface">
+                <div
+                  className={composerDragActive ? "composer-surface drag-active" : "composer-surface"}
+                  onDragEnter={handleComposerDragEnter}
+                  onDragOver={handleComposerDragOver}
+                  onDragLeave={handleComposerDragLeave}
+                  onDrop={handleComposerDrop}
+                >
+                  {composerDragActive ? (
+                    <div className="composer-drop-overlay" aria-hidden="true">
+                      <ImageIcon size={18} />
+                      <span>{busy ? "Wait for current response" : "Drop images"}</span>
+                    </div>
+                  ) : null}
                   <textarea
                     ref={promptInputRef}
                     value={prompt}
@@ -7198,19 +7281,48 @@ function createPromptContent(text: string, images: ImageAttachment[]): ChatConte
 }
 
 function imageFilesFromClipboard(clipboard: DataTransfer) {
-  const files = Array.from(clipboard.files).filter((file) => SUPPORTED_IMAGE_TYPES.has(file.type));
+  return imageFilesFromDataTransfer(clipboard);
+}
+
+function imageFilesFromDataTransfer(dataTransfer: DataTransfer) {
+  const files = Array.from(dataTransfer.files).filter(isSupportedImageFile);
   if (files.length > 0) {
     return files;
   }
 
-  return Array.from(clipboard.items)
+  return Array.from(dataTransfer.items)
     .filter((item) => item.kind === "file" && SUPPORTED_IMAGE_TYPES.has(item.type))
     .map((item) => item.getAsFile())
-    .filter((file): file is File => Boolean(file));
+    .filter((file): file is File => Boolean(file && isSupportedImageFile(file)));
+}
+
+function hasPotentialImageTransfer(dataTransfer: DataTransfer) {
+  return (
+    Array.from(dataTransfer.files).some(isSupportedImageFile) ||
+    Array.from(dataTransfer.items).some((item) => item.kind === "file" && (item.type === "" || SUPPORTED_IMAGE_TYPES.has(item.type)))
+  );
+}
+
+function hasFileTransfer(dataTransfer: DataTransfer) {
+  return dataTransfer.files.length > 0 || Array.from(dataTransfer.items).some((item) => item.kind === "file");
+}
+
+function isSupportedImageFile(file: File) {
+  return Boolean(imageMimeTypeForFile(file));
+}
+
+function imageMimeTypeForFile(file: File) {
+  const type = file.type.toLowerCase();
+  if (SUPPORTED_IMAGE_TYPES.has(type)) {
+    return type;
+  }
+  const extension = /\.([^.]+)$/.exec(file.name)?.[1]?.toLowerCase();
+  return extension ? SUPPORTED_IMAGE_EXTENSIONS[extension] : undefined;
 }
 
 async function fileToImageAttachment(file: File): Promise<ImageAttachment> {
-  if (!SUPPORTED_IMAGE_TYPES.has(file.type)) {
+  const mimeType = imageMimeTypeForFile(file);
+  if (!mimeType) {
     throw new Error(`${file.name || "Image"} must be a PNG, JPEG, WebP, or GIF file.`);
   }
   if (file.size > MAX_IMAGE_BYTES) {
@@ -7220,11 +7332,15 @@ async function fileToImageAttachment(file: File): Promise<ImageAttachment> {
   return {
     id: randomId(),
     name: file.name || `pasted-image-${Date.now()}`,
-    mimeType: file.type,
+    mimeType,
     size: file.size,
-    dataUrl: await readFileAsDataUrl(file),
+    dataUrl: normalizeImageDataUrlMime(await readFileAsDataUrl(file), mimeType),
     detail: "auto"
   };
+}
+
+function normalizeImageDataUrlMime(dataUrl: string, mimeType: string) {
+  return dataUrl.startsWith("data:;base64,") ? dataUrl.replace("data:;base64,", `data:${mimeType};base64,`) : dataUrl;
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {

@@ -31,7 +31,7 @@ Implemented:
 - Desktop expandable project chat groups, standalone Chats section, and draft-chat project selector in the prompt `+` menu.
 - Desktop searchable model switching dialog, backed by the active OpenAI-compatible provider's `GET /models`.
 - Desktop multiple-provider settings for OpenAI-compatible LLM providers. Each saved provider has a unique name, base URL, model id, and optional API key.
-- Desktop image attachments and pasted-image upload in the composer for PNG, JPEG, WebP, and GIF prompts.
+- Desktop image attachments and pasted/dropped-image upload in the composer for PNG, JPEG, WebP, and GIF prompts.
 - Desktop compact header/sidebar chrome, icon-only header actions with tooltips, and light/dark mode.
 - Desktop prompt `+` menu for project/images/browser window/tools/skills/MCP options, plus a direct composer model switcher.
 - Desktop hidden agent browser target plus separate tabbed visible browser window, backed by isolated Electron browser targets and a persistent Arivu browser profile.
@@ -162,7 +162,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - `current_datetime` and `current_location` are local read-only tools. `current_location` intentionally uses timezone context only and avoids GPS, IP lookup, browser geolocation, and network location.
 - The desktop Tools drawer lists registry schemas from the Electron main process instead of duplicating tool metadata in renderer state.
 - Browser tools are desktop-only and route through `desktop/main/browserController.ts`. Agent calls default to the hidden isolated Electron target, while explicit visible calls use a separate maximized tabbed browser window. Visible tabs are individual `BrowserView`s, share Arivu's persistent browser partition, and can be targeted by `tabId`; `browser_open` can also create a visible tab with `newTab: true`. Chrome DevTools MCP is optional through normal MCP config and preferred for visual screenshot work or deeper diagnostics when configured.
-- The desktop image picker is owned by the Electron main process. The renderer receives data URLs plus display metadata and never gets direct Node filesystem access.
+- The desktop image picker is owned by the Electron main process. The renderer receives picker data URLs plus display metadata and never gets direct Node filesystem access. Pasted and dropped images are read by the renderer as data URLs and follow the same attachment limits.
 - Skills live globally under the app data directory's `skills/` folder, or `ARIVU_SKILLS_HOME` when set. The agent advertises discovered skills, exposes `list_skills` and `read_skill`, persists composer-loaded skills as hidden chat context, and attaches explicitly requested `$skill-name` content before that model turn.
 - MCP servers live in saved config as `mcpServers`. The desktop Settings UI edits the JSON object, and MCP tool calls use short-lived official SDK stdio clients.
 - The desktop chrome is intentionally compact: no session id in the header, icon-only header actions with CSS tooltips, and a narrower Activity rail by default.
