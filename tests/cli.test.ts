@@ -53,6 +53,39 @@ describe("cli sessions command", () => {
   });
 });
 
+describe("cli doctor command", () => {
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-cli-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("prints offline diagnostics when no API key is configured", async () => {
+    const { stdout } = await execArivu(["doctor"]);
+
+    expect(stdout).toContain("arivu doctor");
+    expect(stdout).toContain("[FAIL] API key: Missing");
+    expect(stdout).toContain("[SKIP] Chat completions: Skipped because no API key is configured.");
+    expect(stdout).toContain("[SKIP] Tavily: No Tavily API key is configured.");
+    expect(stdout).toContain("Summary:");
+  });
+
+  it("prints doctor diagnostics as JSON", async () => {
+    const { stdout } = await execArivu(["doctor", "--json"]);
+    const report = JSON.parse(stdout) as {
+      checks: Array<{ id: string; status: string }>;
+      summary: Record<string, number>;
+    };
+
+    expect(report.checks.find((check) => check.id === "api-key")?.status).toBe("fail");
+    expect(report.checks.find((check) => check.id === "chat")?.status).toBe("skip");
+    expect(report.summary.fail).toBeGreaterThanOrEqual(1);
+    expect(report.summary.skip).toBeGreaterThanOrEqual(1);
+  });
+});
+
 async function execArivu(args: string[]) {
   const tsxBin = path.join(process.cwd(), "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
   return execFileAsync(tsxBin, ["src/cli.ts", ...args], {
@@ -60,6 +93,13 @@ async function execArivu(args: string[]) {
     env: {
       ...process.env,
       ARIVU_DATA_HOME: tempDir,
+      ARIVU_CONFIG_HOME: path.join(tempDir, "config"),
+      SHANKINSTER_CONFIG_HOME: path.join(tempDir, "legacy-config"),
+      ARIVU_API_KEY: "",
+      SHANKINSTER_API_KEY: "",
+      ARIVU_TAVILY_API_KEY: "",
+      SHANKINSTER_TAVILY_API_KEY: "",
+      TAVILY_API_KEY: "",
       NO_COLOR: "1"
     }
   });

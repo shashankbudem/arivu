@@ -43,6 +43,7 @@ Implemented:
 - Desktop inline available-tools drawer, backed by the actual tool registry through IPC.
 - Desktop Capability policy matrix in Settings, backed by the same trust-mode table used by approvals and tool status labels, with stricter per-workspace overrides for enforceable capabilities including repo reads.
 - Desktop MCP server JSON config in Settings plus `mcp_list_tools` and `mcp_call_tool`.
+- Desktop Settings doctor and CLI `arivu doctor` diagnostics for API key, model listing, selected model, basic chat completions, streaming, tool calling, and Tavily.
 - Desktop browser-style chat search with match navigation.
 - Desktop collapsible/resizable left sidebar and slim Activity rail/panel.
 - Desktop collapsible sidebar sections and Activity rows.
@@ -193,7 +194,7 @@ High-value tasks:
 - Add stronger semantic plan matching from richer artifacts such as parsed reports, LSP diagnostics, PR checks, and model-authored evidence labels beyond the current completion-note checklist.
 - Make the capability policy explainable/configurable in the UI without weakening the default local safety posture.
 - Polish stale-path recovery and cleanup for recent workspace rows.
-- Add model/provider health check command.
+- Add richer remediation and provider capability persistence from doctor/fallback outcomes.
 - Add provider capability flags for tool-calling vs plain chat, using observed fallback outcomes.
 - Add first-run setup flow for base URL, model, API key, and trust mode.
 - Add tests around TUI command handling by extracting pure command logic.

@@ -55,6 +55,15 @@ arivu config set tavilyApiKey tvly-YOUR_KEY
 arivu config get
 ```
 
+Provider health check:
+
+```bash
+arivu doctor
+arivu doctor --json
+```
+
+`arivu doctor` validates the configured API key, model listing, selected model, basic chat completions, streaming, tool calling, and Tavily connectivity. When no API key is configured, network checks are skipped instead of probing a live endpoint.
+
 Supported trust modes:
 
 - `ask`: reads are automatic unless the workspace policy tightens repo reads; writes, shell commands, network searches, MCP process starts, and agent-driven browser actions require confirmation.
@@ -150,6 +159,8 @@ arivu sessions
 arivu resume <session-id>
 arivu config get
 arivu config set <key> <value>
+arivu doctor
+arivu doctor --json
 ```
 
 Inside the TUI, use `/sessions` to list recent saved sessions, `/resume <session-id>` to switch into one without leaving the terminal UI, and `/diff` to inspect local staged, unstaged, and untracked changes.

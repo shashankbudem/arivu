@@ -64,6 +64,15 @@ For Tavily, `ARIVU_TAVILY_API_KEY` takes precedence over `TAVILY_API_KEY`; both 
 
 ## Manual verification
 
+Provider health check:
+
+```bash
+arivu doctor
+arivu doctor --json
+```
+
+The doctor command checks API key presence, `GET /models`, selected model membership, chat completions, streaming, tool calling, and Tavily. Without an API key it reports skipped network checks, which is useful for offline setup validation.
+
 Basic one-shot model check:
 
 ```bash

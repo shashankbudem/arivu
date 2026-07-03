@@ -7,7 +7,7 @@ This roadmap is ordered by development leverage for the current MVP.
 - Polish approval modals for clearer risk summaries and cleaner copy.
 - Polish stale-path recovery and cleanup for recent workspace rows.
 - Expand file/diff preview panels beyond task worktrees.
-- Add `doctor` / model health-check view.
+- Polish doctor/model health-check remediation. Desktop Settings health checks and CLI `arivu doctor` are implemented.
 - Add keyboard shortcuts for common desktop actions.
 - Add optional first-run setup for model, API key, and trust mode.
 
@@ -26,10 +26,10 @@ This roadmap is ordered by development leverage for the current MVP.
 
 ## Milestone 4: Provider robustness
 
-- Add `arivu doctor` to test base URL, key, model, and tool support.
+- Add richer provider diagnostics beyond the implemented `arivu doctor` checks for API key, model listing, selected model, chat, streaming, tool calling, and Tavily.
 - Add provider capability config for tool-calling support based on observed fallback outcomes.
 - Add provider capability config for multimodal image support based on selected model/endpoint.
-- Add richer provider diagnostics for tool schemas, streaming, and no-tools fallback behavior.
+- Add clearer remediation copy for tool schema, streaming, and no-tools fallback failures.
 - Add better model error formatting.
 - Add optional per-provider presets, starting with NVIDIA and OpenAI.
 - Add web-search provider health checks and usage visibility for Tavily credits.
