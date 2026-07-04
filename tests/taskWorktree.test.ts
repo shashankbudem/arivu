@@ -795,16 +795,19 @@ describe("task worktrees", () => {
     });
 
     expect(refreshed.pullRequest?.review?.checkItems).toMatchObject([
-      {
-        name: "deploy",
-        bucket: "failed"
-      },
-      {
-        name: "lint",
-        bucket: "failed",
-        logArtifactId: "pr-check-log:lint:123456:7890:command_output",
-        logFetchedAt: "2026-07-01T00:01:00.000Z"
-      }
+        {
+          name: "deploy",
+          bucket: "failed",
+          logSource: "details_url",
+          logCommand: "curl -L --max-time 30 --silent --show-error 'https://ci.example/deploy'"
+        },
+        {
+          name: "lint",
+          bucket: "failed",
+          logSource: "github_actions",
+          logArtifactId: "pr-check-log:lint:123456:7890:command_output",
+          logFetchedAt: "2026-07-01T00:01:00.000Z"
+        }
     ]);
     expect(refreshed.pullRequest?.review?.notifications).toMatchObject([
       { level: "success", summary: "PR is ready for review", detail: "was draft" },

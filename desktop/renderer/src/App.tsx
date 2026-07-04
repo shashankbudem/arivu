@@ -5430,15 +5430,17 @@ function TaskWorktreePullRequestCard({
               Refresh PR
             </button>
           ) : null}
-          {pullRequest.review?.checkItems?.some((item) => item.logCommand && (item.bucket === "failed" || item.bucket === "cancelled")) ? (
+          {pullRequest.review?.checkItems?.some(
+            (item) => item.logCommand && (item.bucket === "failed" || item.bucket === "cancelled" || item.bucket === "unknown")
+          ) ? (
             <button
               type="button"
               disabled={busy}
-              title="Fetch failed GitHub Actions check logs and save them as task-run evidence"
+              title="Fetch failed, cancelled, or unknown PR check evidence and save it on the task run"
               onClick={() => onAction(run, "fetch_pr_check_logs")}
             >
               <TerminalSquare size={12} />
-              Fetch logs
+              Fetch evidence
             </button>
           ) : null}
           {pullRequest.url ? (
@@ -5568,9 +5570,9 @@ function TaskWorktreePullRequestChecks({ items }: { items: AgentTaskRunWorktreeP
           <li key={`${item.name}-${item.detailsUrl ?? item.completedAt ?? index}`}>
             <span>{pullRequestCheckLabel(item)}</span>
             {item.detailsUrl ? <p>{item.detailsUrl}</p> : null}
-            {item.logCommand ? <p>{item.logCommand}</p> : null}
-            {item.logArtifactId ? <p>Saved log artifact: {item.logArtifactId}</p> : null}
-            {item.logError ? <p>Log fetch issue: {item.logError}</p> : null}
+            {item.logCommand ? <p>{item.logSource === "details_url" ? "Check details capture" : "Log command"}: {item.logCommand}</p> : null}
+            {item.logArtifactId ? <p>Saved evidence artifact: {item.logArtifactId}</p> : null}
+            {item.logError ? <p>Evidence fetch issue: {item.logError}</p> : null}
           </li>
         ))}
       </ul>
@@ -9645,7 +9647,7 @@ function taskWorktreeActionStatus(action: TaskWorktreeAction) {
     case "refresh_pr":
       return "Task worktree PR status refreshed";
     case "fetch_pr_check_logs":
-      return "Task worktree PR check logs saved";
+      return "Task worktree PR check evidence saved";
     case "sync":
       return "Task worktree synced";
     case "continue_conflict":

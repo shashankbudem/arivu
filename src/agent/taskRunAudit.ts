@@ -300,9 +300,9 @@ function worktreeLines(run: AgentTaskRun) {
               .map((item) =>
                 [
                   `${item.name} ${item.bucket}`,
-                  item.logCommand ? `logs ${item.logCommand}` : undefined,
+                  item.logCommand ? `${item.logSource === "details_url" ? "details" : "logs"} ${item.logCommand}` : undefined,
                   item.logArtifactId ? `artifact ${item.logArtifactId}` : undefined,
-                  item.logError ? `log error ${item.logError}` : undefined
+                  item.logError ? `evidence error ${item.logError}` : undefined
                 ]
                   .filter(Boolean)
                   .join(" ")

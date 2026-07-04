@@ -118,6 +118,7 @@ describe("task run audit summaries", () => {
               bucket: "failed",
               status: "COMPLETED",
               conclusion: "FAILURE",
+              logSource: "github_actions",
               logCommand: "gh run view '123456' --repo 'example/repo' --job '7890' --log-failed",
               logArtifactId: "pr-check-log:lint:123456:7890:command_output"
             }

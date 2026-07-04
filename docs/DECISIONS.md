@@ -474,14 +474,14 @@ Decision: when a refreshed PR check item includes a GitHub Actions details URL, 
 
 Reason: failed check names are more useful when the next diagnostic command is already visible. Deriving the command from a trusted GitHub URL keeps the handoff actionable without adding background log downloads or large artifacts to session state.
 
-## 2026-07-05: PR check logs fetch into command artifacts
+## 2026-07-05: PR check evidence fetches into command artifacts
 
-Decision: created-PR cards expose Fetch logs when refreshed check evidence has failed or cancelled GitHub Actions log commands. The action runs those saved `gh run view ... --log-failed` commands from the managed task worktree, stores bounded stdout/stderr as normal command artifacts, and links the resulting artifact id or fetch issue back to the matching check evidence row.
+Decision: created-PR cards expose Fetch evidence when refreshed check evidence has failed, cancelled, or unknown diagnostic commands. GitHub Actions checks still derive and run saved `gh run view ... --log-failed` commands from the managed task worktree. Non-Actions checks with HTTP detail URLs derive a bounded `curl -L --max-time 30 --silent --show-error ...` capture command. Both paths store bounded stdout/stderr as normal command artifacts and link the resulting artifact id or fetch issue back to the matching check evidence row.
 
-Reason: CI logs are often the fastest route from a failed PR check to a concrete repair, but fetching them during every PR refresh would create surprising network work and oversized session records. Keeping log capture explicit preserves the review boundary while making the captured evidence durable for audits and Review PR handoff prompts.
+Reason: CI logs and external check detail pages are often the fastest route from a failed PR check to a concrete repair, but fetching them during every PR refresh would create surprising network work and oversized session records. Keeping evidence capture explicit preserves the review boundary while making the captured evidence durable for audits and Review PR handoff prompts.
 
 ## 2026-07-05: PR refresh stores compact update notifications
 
-Decision: when Refresh PR has a previous snapshot to compare against, Arivu stores bounded PR-update notifications for changed PR state, draft state, review decision, merge state, named check bucket transitions, check summary, and review feedback summary. Refresh also preserves matching fetched check-log artifact ids when the derived GitHub Actions log command is still the same.
+Decision: when Refresh PR has a previous snapshot to compare against, Arivu stores bounded PR-update notifications for changed PR state, draft state, review decision, merge state, named check bucket transitions, check summary, and review feedback summary. Refresh also preserves matching fetched check-evidence artifact ids when the derived diagnostic command is still the same.
 
 Reason: Watch PR and repeated manual refreshes should make changed review state obvious without requiring users to diff the whole card in their head. Keeping only compact latest notifications avoids a growing event log while giving Review PR handoff prompts and copied audits the important "what changed" context.

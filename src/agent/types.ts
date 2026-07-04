@@ -308,6 +308,7 @@ export type AgentTaskRunWorktreePullRequestCheckItem = {
   conclusion?: string;
   state?: string;
   detailsUrl?: string;
+  logSource?: "github_actions" | "details_url";
   logCommand?: string;
   logArtifactId?: string;
   logFetchedAt?: string;

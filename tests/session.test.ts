@@ -123,6 +123,7 @@ describe("session store", () => {
                     bucket: "failed",
                     status: "COMPLETED",
                     conclusion: "FAILURE",
+                    logSource: "github_actions",
                     logCommand: "gh run view '123456' --repo 'acme/repo' --job '7890' --log-failed",
                     logArtifactId: "pr-check-log:lint:123456:7890:command_output",
                     logFetchedAt: "2026-01-01T00:02:45.000Z",
@@ -272,6 +273,7 @@ describe("session store", () => {
                   {
                     name: "lint",
                     bucket: "failed",
+                    logSource: "github_actions",
                     logArtifactId: "pr-check-log:lint:123456:7890:command_output",
                     logFetchedAt: "2026-01-01T00:02:45.000Z",
                     logError: "Exit code 1"

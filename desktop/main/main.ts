@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -945,13 +945,13 @@ class DesktopController {
     const pullRequest = worktree.pullRequest;
     const review = pullRequest?.review;
     if (!pullRequest?.url || !review?.checkItems?.length) {
-      throw new Error("Refresh a created PR before fetching check logs.");
+      throw new Error("Refresh a created PR before fetching check evidence.");
     }
     const actionable = review.checkItems.filter(
-      (item) => item.logCommand && (item.bucket === "failed" || item.bucket === "cancelled")
+      (item) => item.logCommand && (item.bucket === "failed" || item.bucket === "cancelled" || item.bucket === "unknown")
     );
     if (actionable.length === 0) {
-      throw new Error("No failed or cancelled GitHub Actions check log commands are available.");
+      throw new Error("No failed, cancelled, or unknown PR check evidence commands are available.");
     }
 
     const cwd = await resolveTaskWorktreePath(worktree);
@@ -961,16 +961,19 @@ class DesktopController {
         continue;
       }
       const parsed = parseSavedPullRequestCheckLogCommand(logCommand);
-      const artifactInputId = `pr-check-log:${safeArtifactSegment(item.name)}:${safeArtifactSegment(parsed.runId)}${
-        parsed.jobId ? `:${safeArtifactSegment(parsed.jobId)}` : ""
-      }`;
+      const artifactInputId =
+        parsed.source === "github_actions"
+          ? `pr-check-log:${safeArtifactSegment(item.name)}:${safeArtifactSegment(parsed.runId)}${
+              parsed.jobId ? `:${safeArtifactSegment(parsed.jobId)}` : ""
+            }`
+          : `pr-check-details:${safeArtifactSegment(item.name)}:${shortHash(parsed.url)}`;
       const startedAt = Date.now();
       const now = new Date().toISOString();
       try {
-        const result = await execa("gh", parsed.args, { cwd, reject: false });
+        const result = await execa(parsed.file, parsed.args, { cwd, reject: false });
         const artifact = upsertTaskRunCommandArtifact(taskRun, {
           id: artifactInputId,
-          title: `PR check log: ${item.name}`,
+          title: parsed.source === "github_actions" ? `PR check log: ${item.name}` : `PR check details: ${item.name}`,
           command: logCommand,
           stdout: result.stdout,
           stderr: result.stderr,
@@ -989,7 +992,7 @@ class DesktopController {
         const message = formatError(error);
         const artifact = upsertTaskRunCommandArtifact(taskRun, {
           id: artifactInputId,
-          title: `PR check log: ${item.name}`,
+          title: parsed.source === "github_actions" ? `PR check log: ${item.name}` : `PR check details: ${item.name}`,
           command: logCommand,
           stderr: message,
           exitCode: 1,
@@ -2341,19 +2344,38 @@ function countLines(text: string) {
 }
 
 function parseSavedPullRequestCheckLogCommand(command: string | undefined) {
-  const match = /^gh run view '([^']+)' --repo '([^']+)'(?: --job '([^']+)')? (--log(?:-failed)?)$/.exec(command ?? "");
-  if (!match) {
-    throw new Error("Unsupported PR check log command.");
+  const ghMatch = /^gh run view '([^']+)' --repo '([^']+)'(?: --job '([^']+)')? (--log(?:-failed)?)$/.exec(command ?? "");
+  if (ghMatch) {
+    const [, runId, repo, jobId, logFlag] = ghMatch;
+    if (!runId || !/^\d+$/.test(runId) || !repo || !logFlag || (jobId !== undefined && !/^\d+$/.test(jobId))) {
+      throw new Error("Unsupported PR check evidence command.");
+    }
+    return {
+      source: "github_actions" as const,
+      file: "gh",
+      runId,
+      jobId,
+      args: ["run", "view", runId, "--repo", repo, ...(jobId ? ["--job", jobId] : []), logFlag]
+    };
   }
-  const [, runId, repo, jobId, logFlag] = match;
-  if (!runId || !/^\d+$/.test(runId) || !repo || !logFlag || (jobId !== undefined && !/^\d+$/.test(jobId))) {
-    throw new Error("Unsupported PR check log command.");
+  const curlMatch = /^curl -L --max-time 30 --silent --show-error '([^']+)'$/.exec(command ?? "");
+  if (!curlMatch?.[1]) {
+    throw new Error("Unsupported PR check evidence command.");
+  }
+  const url = curlMatch[1];
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error("Unsupported PR check evidence command.");
   }
   return {
-    runId,
-    jobId,
-    args: ["run", "view", runId, "--repo", repo, ...(jobId ? ["--job", jobId] : []), logFlag]
+    source: "details_url" as const,
+    file: "curl",
+    url,
+    args: ["-L", "--max-time", "30", "--silent", "--show-error", url]
   };
+}
+
+function shortHash(value: string) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
 
 function safeArtifactSegment(value: string) {

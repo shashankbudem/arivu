@@ -246,6 +246,7 @@ const AgentTaskRunWorktreePullRequestCheckItemSchema = z.object({
   conclusion: z.string().optional(),
   state: z.string().optional(),
   detailsUrl: z.string().optional(),
+  logSource: z.enum(["github_actions", "details_url"]).optional(),
   logCommand: z.string().optional(),
   logArtifactId: z.string().optional(),
   logFetchedAt: z.string().optional(),

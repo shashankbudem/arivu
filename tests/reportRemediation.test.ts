@@ -570,6 +570,7 @@ describe("report remediation prompts", () => {
                 status: "COMPLETED",
                 conclusion: "FAILURE",
                 detailsUrl: "https://github.com/example/repo/actions/runs/123456/job/7890",
+                logSource: "github_actions",
                 logCommand: "gh run view '123456' --repo 'example/repo' --job '7890' --log-failed",
                 logArtifactId: "pr-check-log:lint:123456:7890:command_output"
               },
@@ -681,7 +682,7 @@ describe("report remediation prompts", () => {
     expect(prompt).toContain("warning: Review decision changed (review required -> changes requested)");
     expect(prompt).toContain("Check evidence");
     expect(prompt).toContain(
-      "lint: failed, conclusion FAILURE, status COMPLETED (details https://github.com/example/repo/actions/runs/123456/job/7890; logs `gh run view '123456' --repo 'example/repo' --job '7890' --log-failed`; saved log artifact `pr-check-log:lint:123456:7890:command_output`)"
+      "lint: failed, conclusion FAILURE, status COMPLETED (details https://github.com/example/repo/actions/runs/123456/job/7890; logs `gh run view '123456' --repo 'example/repo' --job '7890' --log-failed`; saved evidence artifact `pr-check-log:lint:123456:7890:command_output`)"
     );
     expect(prompt).toContain("deploy: pending, state PENDING (details https://ci.example/deploy)");
     expect(prompt).toContain("Review feedback: 1 review, 1 comment, 1 line thread, 1 unresolved thread, 1 changes requested");

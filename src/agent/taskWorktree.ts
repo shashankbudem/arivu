@@ -1366,6 +1366,7 @@ function pullRequestCheckEvidenceItem(item: Record<string, unknown>): AgentTaskR
   }
   const bucket = pullRequestCheckBucket(item);
   const detailsUrl = optionalString(item.detailsUrl) ?? optionalString(item.targetUrl) ?? optionalString(item.url);
+  const logEvidence = pullRequestCheckLogEvidence(detailsUrl, bucket);
   return {
     name: boundedCheckText(name),
     bucket,
@@ -1373,29 +1374,42 @@ function pullRequestCheckEvidenceItem(item: Record<string, unknown>): AgentTaskR
     conclusion: optionalString(item.conclusion),
     state: optionalString(item.state),
     detailsUrl,
-    logCommand: pullRequestCheckLogCommand(detailsUrl, bucket),
+    logSource: logEvidence?.logSource,
+    logCommand: logEvidence?.logCommand,
     startedAt: optionalString(item.startedAt),
     completedAt: optionalString(item.completedAt)
   };
 }
 
-function pullRequestCheckLogCommand(detailsUrl: string | undefined, bucket: AgentTaskRunWorktreePullRequestCheckItem["bucket"]) {
+function pullRequestCheckLogEvidence(
+  detailsUrl: string | undefined,
+  bucket: AgentTaskRunWorktreePullRequestCheckItem["bucket"]
+): Pick<AgentTaskRunWorktreePullRequestCheckItem, "logCommand" | "logSource"> | undefined {
   const actions = parseGithubActionsCheckUrl(detailsUrl);
-  if (!actions) {
+  if (actions) {
+    const args = [
+      "gh",
+      "run",
+      "view",
+      shellQuote(actions.runId),
+      "--repo",
+      shellQuote(actions.repo),
+      actions.jobId ? "--job" : undefined,
+      actions.jobId ? shellQuote(actions.jobId) : undefined,
+      bucket === "failed" || bucket === "cancelled" ? "--log-failed" : "--log"
+    ].filter((part): part is string => Boolean(part));
+    return {
+      logSource: "github_actions",
+      logCommand: args.join(" ")
+    };
+  }
+  if (!detailsUrl || !["failed", "cancelled", "unknown"].includes(bucket) || !isHttpUrl(detailsUrl)) {
     return undefined;
   }
-  const args = [
-    "gh",
-    "run",
-    "view",
-    shellQuote(actions.runId),
-    "--repo",
-    shellQuote(actions.repo),
-    actions.jobId ? "--job" : undefined,
-    actions.jobId ? shellQuote(actions.jobId) : undefined,
-    bucket === "failed" || bucket === "cancelled" ? "--log-failed" : "--log"
-  ].filter((part): part is string => Boolean(part));
-  return args.join(" ");
+  return {
+    logSource: "details_url",
+    logCommand: ["curl", "-L", "--max-time", "30", "--silent", "--show-error", shellQuote(detailsUrl)].join(" ")
+  };
 }
 
 function parseGithubActionsCheckUrl(detailsUrl: string | undefined) {
@@ -1429,6 +1443,15 @@ function parseGithubActionsCheckUrl(detailsUrl: string | undefined) {
     };
   } catch {
     return undefined;
+  }
+}
+
+function isHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
   }
 }
 
