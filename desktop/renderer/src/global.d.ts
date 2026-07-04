@@ -421,6 +421,10 @@ type AgentTaskRunCompletion = {
   items: Array<{
     text: string;
     status?: "completed" | "needs_followup" | "blocked";
+    evidence?: Array<{
+      kind: "file" | "command" | "report" | "check" | "note";
+      value: string;
+    }>;
   }>;
   sourceMessageIndex?: number;
   updatedAt: string;

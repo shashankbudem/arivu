@@ -410,10 +410,17 @@ export type AgentTaskRunPlan = {
 };
 
 export type AgentTaskRunCompletionItemStatus = "completed" | "needs_followup" | "blocked";
+export type AgentTaskRunCompletionEvidenceKind = "file" | "command" | "report" | "check" | "note";
+
+export type AgentTaskRunCompletionEvidenceLabel = {
+  kind: AgentTaskRunCompletionEvidenceKind;
+  value: string;
+};
 
 export type AgentTaskRunCompletionItem = {
   text: string;
   status?: AgentTaskRunCompletionItemStatus;
+  evidence?: AgentTaskRunCompletionEvidenceLabel[];
 };
 
 export type AgentTaskRunCompletion = {

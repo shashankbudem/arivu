@@ -1,5 +1,6 @@
 import type {
   AgentTaskRun,
+  AgentTaskRunCompletionEvidenceKind,
   AgentTaskRunPlanItemStatus,
   AgentTaskRunPlanReviewStatus,
   AgentTaskRunVerificationStatus,
@@ -81,6 +82,7 @@ export type AgentTaskRunPlanCompletionNote = {
   matchedReports: string[];
   matchedChecks: string[];
   matchedCompletionNotes: string[];
+  matchedCompletionEvidence: string[];
   evidence: string[];
 };
 
@@ -354,6 +356,7 @@ function buildPlanCompletionReview(
       matchedReports: matches.reports,
       matchedChecks: matches.checks,
       matchedCompletionNotes: matches.completionNotes,
+      matchedCompletionEvidence: matches.completionEvidence,
       evidence: planCompletionNoteEvidence(runEvidence, matches, baseStatus)
     };
   });
@@ -391,6 +394,7 @@ function planCompletionItemStatus(
     reports: string[];
     checks: string[];
     completionNotes: string[];
+    completionEvidence: string[];
     completionStatus?: NonNullable<AgentTaskRun["completion"]>["items"][number]["status"];
   }
 ): AgentTaskRunPlanCompletionStatus {
@@ -407,7 +411,8 @@ function planCompletionItemStatus(
     matches.commands.length > 0 ||
     matches.reports.length > 0 ||
     matches.checks.length > 0 ||
-    matches.completionNotes.length > 0
+    matches.completionNotes.length > 0 ||
+    matches.completionEvidence.length > 0
     ? "supported"
     : "needs_evidence";
 }
@@ -477,7 +482,14 @@ function planCompletionEvidence(run: AgentTaskRun, changeSummary: AgentTaskRunCh
 
 function planCompletionNoteEvidence(
   runEvidence: string[],
-  matches: { paths: string[]; commands: string[]; reports: string[]; checks: string[]; completionNotes: string[] },
+  matches: {
+    paths: string[];
+    commands: string[];
+    reports: string[];
+    checks: string[];
+    completionNotes: string[];
+    completionEvidence: string[];
+  },
   baseStatus: AgentTaskRunPlanCompletionStatus
 ) {
   const evidence = [...runEvidence];
@@ -500,13 +512,21 @@ function planCompletionNoteEvidence(
         .join(", ")}`
     );
   }
+  if (matches.completionEvidence.length > 0) {
+    evidence.push(
+      `${matches.completionEvidence.length === 1 ? "Assistant evidence label" : "Assistant evidence labels"}: ${matches.completionEvidence
+        .slice(0, 3)
+        .join(", ")}`
+    );
+  }
   if (
     baseStatus === "supported" &&
     matches.paths.length === 0 &&
     matches.commands.length === 0 &&
     matches.reports.length === 0 &&
     matches.checks.length === 0 &&
-    matches.completionNotes.length === 0
+    matches.completionNotes.length === 0 &&
+    matches.completionEvidence.length === 0
   ) {
     evidence.push("No item-specific file, command, report, check, or completion note match yet");
   }
@@ -516,7 +536,7 @@ function planCompletionNoteEvidence(
 function matchPlanItemEvidence(itemText: string, run: AgentTaskRun, changeSummary: AgentTaskRunChangeSummary) {
   const itemTokens = planEvidenceTokens(itemText);
   if (itemTokens.length === 0) {
-    return { paths: [], commands: [], reports: [], checks: [], completionNotes: [] };
+    return { paths: [], commands: [], reports: [], checks: [], completionNotes: [], completionEvidence: [] };
   }
 
   const paths = changeSummary.paths.filter((changedPath) => evidenceTextMatches(itemTokens, changedPath)).slice(0, 4);
@@ -539,9 +559,18 @@ function matchPlanItemEvidence(itemText: string, run: AgentTaskRun, changeSummar
     .slice(0, 3);
   const completionItems = (run.completion?.items ?? []).filter((item) => evidenceTextMatches(itemTokens, item.text)).slice(0, 3);
   const completionNotes = completionItems.map((item) => truncateEvidenceLabel(item.text)).filter((note): note is string => Boolean(note));
+  const completionEvidence = completionItems
+    .flatMap((item) => item.evidence ?? [])
+    .map((item) => completionEvidenceLabel(item.kind, item.value))
+    .filter((label): label is string => Boolean(label))
+    .slice(0, 6);
   const completionStatus = completionStatusFromItems(completionItems);
 
-  return { paths, commands, reports, checks, completionNotes, completionStatus };
+  return { paths, commands, reports, checks, completionNotes, completionEvidence, completionStatus };
+}
+
+function completionEvidenceLabel(kind: AgentTaskRunCompletionEvidenceKind, value: string) {
+  return truncateEvidenceLabel(`${kind} ${value}`);
 }
 
 function completionStatusFromItems(

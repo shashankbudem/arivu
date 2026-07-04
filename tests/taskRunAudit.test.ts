@@ -58,6 +58,20 @@ describe("task run audit summaries", () => {
       "2026-01-01T00:00:04.000Z"
     );
     finishTaskRun(run, "completed", undefined, "2026-01-01T00:00:05.000Z");
+    run.completion = {
+      summary: "closed out",
+      items: [
+        {
+          text: "Run tests and explain the failure",
+          status: "completed",
+          evidence: [
+            { kind: "command", value: "npm test" },
+            { kind: "report", value: "reports/junit.xml" }
+          ]
+        }
+      ],
+      updatedAt: "2026-01-01T00:00:05.000Z"
+    };
 
     const audit = buildTaskRunAuditMarkdown(run);
 
@@ -71,6 +85,7 @@ describe("task run audit summaries", () => {
     expect(audit).toContain("- Approved - Run command - shell - ask - prompt - scope Command npm test: npm test");
     expect(audit).toContain("- Status: Failed");
     expect(audit).toContain("- command_output: Command output - Exit code 1 - 2.0s - exit 1 - 2.0s");
+    expect(audit).toContain("- completed: Run tests and explain the failure [evidence: command=npm test; report=reports/junit.xml]");
   });
 
   it("includes worktree and pull request state when present", () => {

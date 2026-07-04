@@ -350,7 +350,15 @@ const AgentTaskRunCompletionSchema = z.object({
   items: z.array(
     z.object({
       text: z.string(),
-      status: z.enum(["completed", "needs_followup", "blocked"]).optional()
+      status: z.enum(["completed", "needs_followup", "blocked"]).optional(),
+      evidence: z
+        .array(
+          z.object({
+            kind: z.enum(["file", "command", "report", "check", "note"]),
+            value: z.string()
+          })
+        )
+        .optional()
     })
   ),
   sourceMessageIndex: z.number().int().min(0).optional(),

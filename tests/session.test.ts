@@ -55,7 +55,14 @@ describe("session store", () => {
           completion: {
             summary: "finished against the approved plan",
             items: [
-              { text: "Inspect failure", status: "completed" },
+              {
+                text: "Inspect failure",
+                status: "completed",
+                evidence: [
+                  { kind: "command", value: "npm test" },
+                  { kind: "report", value: "reports/junit.xml" }
+                ]
+              },
               { text: "Patch code", status: "needs_followup" }
             ],
             sourceMessageIndex: 5,
@@ -236,7 +243,14 @@ describe("session store", () => {
           completion: {
             summary: "finished against the approved plan",
             items: [
-              { text: "Inspect failure", status: "completed" },
+              {
+                text: "Inspect failure",
+                status: "completed",
+                evidence: [
+                  { kind: "command", value: "npm test" },
+                  { kind: "report", value: "reports/junit.xml" }
+                ]
+              },
               { text: "Patch code", status: "needs_followup" }
             ],
             sourceMessageIndex: 5

@@ -485,3 +485,9 @@ Reason: CI logs and external check detail pages are often the fastest route from
 Decision: when Refresh PR has a previous snapshot to compare against, Arivu stores bounded PR-update notifications for changed PR state, draft state, review decision, merge state, named check bucket transitions, check summary, and review feedback summary. Refresh also preserves matching fetched check-evidence artifact ids when the derived diagnostic command is still the same.
 
 Reason: Watch PR and repeated manual refreshes should make changed review state obvious without requiring users to diff the whole card in their head. Keeping only compact latest notifications avoids a growing event log while giving Review PR handoff prompts and copied audits the important "what changed" context.
+
+## 2026-07-05: Completion notes carry evidence labels
+
+Decision: approved-plan worktree instructions now ask final `Completion notes:` bullets to use an optional bounded `[evidence: file=...; command=...; report=...; check=...]` suffix. Task runs parse and persist those model-authored evidence labels, copied audits include them, and approved-plan source reviews cite them beside matched files, commands, reports, PR checks, and completion-note text.
+
+Reason: fuzzy text matching alone is useful but brittle when a plan item is proven by a specific file, command, report, or CI check whose wording does not mirror the plan. Explicit model-authored labels give the harness a small structured bridge from final close-out prose to concrete evidence while keeping verification gates conservative.

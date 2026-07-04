@@ -721,7 +721,7 @@ boom`
       run,
       [
         "Completion notes: execution closed against the approved plan.",
-        "- Completed: Update task history evidence matching",
+        "- Completed: Update task history evidence matching [evidence: file=src/agent/taskHistory.ts; command=npm test -- tests/taskHistory.test.ts; check=plan close-out]",
         "- Needs evidence: Document packaging behavior",
         "- Blocked: Create release because signing is missing",
         "",
@@ -738,7 +738,15 @@ boom`
       updatedAt: "2026-01-01T00:02:00.000Z",
       sourceMessageIndex: 4,
       items: [
-        { text: "Update task history evidence matching", status: "completed" },
+        {
+          text: "Update task history evidence matching",
+          status: "completed",
+          evidence: [
+            { kind: "file", value: "src/agent/taskHistory.ts" },
+            { kind: "command", value: "npm test -- tests/taskHistory.test.ts" },
+            { kind: "check", value: "plan close-out" }
+          ]
+        },
         { text: "Document packaging behavior", status: "needs_followup" },
         { text: "Create release because signing is missing", status: "blocked" }
       ]

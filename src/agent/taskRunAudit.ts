@@ -67,7 +67,12 @@ export function buildTaskRunAuditMarkdown(run: AgentTaskRun) {
     }
     lines.push(
       ...bulletList(
-        run.completion.items.map((item) => `${item.status ? `${item.status}: ` : ""}${inlineText(item.text)}`)
+        run.completion.items.map((item) => {
+          const evidence = item.evidence?.length
+            ? ` [evidence: ${item.evidence.map((label) => `${label.kind}=${inlineText(label.value)}`).join("; ")}]`
+            : "";
+          return `${item.status ? `${item.status}: ` : ""}${inlineText(item.text)}${evidence}`;
+        })
       )
     );
   }

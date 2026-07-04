@@ -13,6 +13,7 @@ import type {
   AgentTaskRunArtifact,
   AgentTaskRunCapability,
   AgentTaskRunCompletion,
+  AgentTaskRunCompletionEvidenceKind,
   AgentTaskRunCompletionItem,
   AgentTaskRunCompletionItemStatus,
   AgentTaskRunPlan,
@@ -40,6 +41,8 @@ const MAX_PLAN_SUMMARY_TEXT = 280;
 const MAX_COMPLETION_ITEMS = 8;
 const MAX_COMPLETION_ITEM_TEXT = 220;
 const MAX_COMPLETION_SUMMARY_TEXT = 280;
+const MAX_COMPLETION_EVIDENCE_LABELS = 6;
+const MAX_COMPLETION_EVIDENCE_TEXT = 160;
 
 type CreateAgentTaskRunOptions = {
   userMessageIndex: number;
@@ -498,10 +501,73 @@ function parseCompletionItem(line: string): AgentTaskRunCompletionItem | undefin
     return undefined;
   }
   const markerStatus = completionStatusFromCheckbox(match[1]);
-  const cleaned = cleanPlanText(match[2] ?? "");
+  const withEvidence = extractCompletionEvidence(match[2] ?? "");
+  const cleaned = cleanPlanText(withEvidence.text);
   const status = markerStatus ?? completionStatusFromPrefix(cleaned);
   const text = truncatePlanText(cleanCompletionStatusPrefix(cleaned), MAX_COMPLETION_ITEM_TEXT);
-  return text ? { text, status } : undefined;
+  if (!text) {
+    return undefined;
+  }
+  return {
+    text,
+    status,
+    ...(withEvidence.evidence.length > 0 ? { evidence: withEvidence.evidence } : {})
+  };
+}
+
+function extractCompletionEvidence(value: string): { text: string; evidence: NonNullable<AgentTaskRunCompletionItem["evidence"]> } {
+  const match = /^(.*?)(?:\s*[\[(]\s*evidence\s*:\s*(.+?)\s*[\])])\s*$/i.exec(value.trim());
+  if (!match) {
+    return { text: value, evidence: [] };
+  }
+  const text = match[1]?.trim() ?? value;
+  const evidence = parseCompletionEvidenceLabels(match[2] ?? "");
+  return { text, evidence };
+}
+
+function parseCompletionEvidenceLabels(value: string): NonNullable<AgentTaskRunCompletionItem["evidence"]> {
+  const separator = value.includes(";") ? /\s*;\s*/ : /\s*,\s*/;
+  const labels: NonNullable<AgentTaskRunCompletionItem["evidence"]> = [];
+  for (const rawPart of value.split(separator)) {
+    const part = rawPart.trim();
+    if (!part) {
+      continue;
+    }
+    const match = /^(file|files|path|paths|command|cmd|report|reports|check|checks|pr check|pr checks|note|notes)\s*(?:=|:|\s)\s*(.+)$/i.exec(part);
+    if (!match?.[1] || !match[2]) {
+      continue;
+    }
+    const kind = completionEvidenceKind(match[1]);
+    const labelValue = truncatePlanText(cleanPlanText(match[2]), MAX_COMPLETION_EVIDENCE_TEXT);
+    if (!kind || !labelValue) {
+      continue;
+    }
+    labels.push({ kind, value: labelValue });
+    if (labels.length >= MAX_COMPLETION_EVIDENCE_LABELS) {
+      break;
+    }
+  }
+  return labels;
+}
+
+function completionEvidenceKind(value: string): AgentTaskRunCompletionEvidenceKind | undefined {
+  const normalized = value.toLowerCase().replace(/\s+/g, " ");
+  if (normalized === "file" || normalized === "files" || normalized === "path" || normalized === "paths") {
+    return "file";
+  }
+  if (normalized === "command" || normalized === "cmd") {
+    return "command";
+  }
+  if (normalized === "report" || normalized === "reports") {
+    return "report";
+  }
+  if (normalized === "check" || normalized === "checks" || normalized === "pr check" || normalized === "pr checks") {
+    return "check";
+  }
+  if (normalized === "note" || normalized === "notes") {
+    return "note";
+  }
+  return undefined;
 }
 
 function statusFromCheckbox(value: string | undefined): AgentTaskRunPlanItemStatus | undefined {

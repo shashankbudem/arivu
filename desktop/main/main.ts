@@ -1413,7 +1413,8 @@ class DesktopController {
             ? [
                 `This prompt executes approved plan task run ${plannedFromRun.id} in a new task worktree. Keep changes scoped to that approved plan.`,
                 "At the end of your final response, include a `Completion notes:` checklist with one bullet per approved plan item.",
-                "Prefix each completion bullet with `Completed:`, `Needs evidence:`, or `Blocked:` and mention the matching files or verification commands when possible."
+                "Prefix each completion bullet with `Completed:`, `Needs evidence:`, or `Blocked:`.",
+                "When possible, end each bullet with `[evidence: file=path; command=command; report=path; check=name]` using only labels that match actual work or verification evidence."
               ].join("\n")
             : undefined,
           continuedRun ? `This prompt continues existing task run ${continuedRun.id}. Keep the repair in the same task worktree.` : undefined,

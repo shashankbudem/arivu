@@ -199,6 +199,7 @@ describe("task history helpers", () => {
         matchedReports: [],
         matchedChecks: [],
         matchedCompletionNotes: [],
+        matchedCompletionEvidence: [],
         evidence: ["Verification failed: Verification failed.", "1 changed file recorded", "Patch preview ready"]
       },
       {
@@ -210,6 +211,7 @@ describe("task history helpers", () => {
         matchedReports: [],
         matchedChecks: [],
         matchedCompletionNotes: [],
+        matchedCompletionEvidence: [],
         evidence: ["Verification failed: Verification failed.", "1 changed file recorded", "Patch preview ready"]
       }
     ]);
@@ -452,8 +454,19 @@ describe("task history helpers", () => {
       completion: {
         summary: "close-out",
         items: [
-          { text: "Update task history evidence matching", status: "completed" },
-          { text: "Document packaging behavior after release scripts exist", status: "needs_followup" }
+          {
+            text: "Update task history evidence matching",
+            status: "completed",
+            evidence: [
+              { kind: "file", value: "src/agent/taskHistory.ts" },
+              { kind: "command", value: "npm test -- tests/taskHistory.test.ts" }
+            ]
+          },
+          {
+            text: "Document packaging behavior after release scripts exist",
+            status: "needs_followup",
+            evidence: [{ kind: "note", value: "release scripts are not implemented yet" }]
+          }
         ],
         updatedAt: "2026-06-27T00:04:00.000Z"
       },
@@ -483,7 +496,15 @@ describe("task history helpers", () => {
     expect(review?.completionStatus).toBe("needs_evidence");
     expect(review?.completionNotes.map((note) => note.status)).toEqual(["supported", "needs_evidence"]);
     expect(review?.completionNotes[0].matchedCompletionNotes).toEqual(["Update task history evidence matching"]);
+    expect(review?.completionNotes[0].matchedCompletionEvidence).toEqual([
+      "file src/agent/taskHistory.ts",
+      "command npm test -- tests/taskHistory.test.ts"
+    ]);
+    expect(review?.completionNotes[0].evidence).toContain(
+      "Assistant evidence labels: file src/agent/taskHistory.ts, command npm test -- tests/taskHistory.test.ts"
+    );
     expect(review?.completionNotes[1].matchedCompletionNotes).toEqual(["Document packaging behavior after release scripts exist"]);
+    expect(review?.completionNotes[1].matchedCompletionEvidence).toEqual(["note release scripts are not implemented yet"]);
     expect(review?.completionNotes[1].evidence).toContain(
       "Assistant completion note: Document packaging behavior after release scripts exist"
     );
