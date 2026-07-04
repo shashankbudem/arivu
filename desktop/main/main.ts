@@ -1436,6 +1436,7 @@ class DesktopController {
       mcpServers: config.mcpServers,
       scopePolicyRules: scopeRules,
       browser: browserController,
+      directEditReview: executionCwd === undefined,
       session
     });
 

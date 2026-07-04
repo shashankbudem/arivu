@@ -116,6 +116,7 @@ Write safety:
 - Existing-file patching checks that the file has not changed since it was read.
 - `write_file` with `create` refuses to overwrite existing files.
 - `write_file` with `replace` refuses to create missing files.
+- Large direct `apply_patch` / `write_file` changes are marked as risky write reviews, so Trusted mode still prompts before applying them unless the edit is running inside a managed task worktree review boundary.
 
 ## Session and config safety
 

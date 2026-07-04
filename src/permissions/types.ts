@@ -18,6 +18,8 @@ export type ApprovalAction =
       diff?: string;
       original?: string;
       content?: string;
+      changeSummary?: string;
+      reviewReason?: string;
       destructive?: boolean;
     }
   | {

@@ -11,6 +11,7 @@ import type { AgentTaskRunApprovalEvent } from "../agent/types.js";
 export type ApprovalAuditSink = (event: AgentTaskRunApprovalEvent) => void | Promise<void>;
 
 const MAX_APPROVAL_AUDIT_MESSAGE = 2_000;
+const MAX_APPROVAL_BODY_SECTION = 12_000;
 
 export class ApprovalManager {
   constructor(
@@ -109,7 +110,14 @@ function formatShellApproval(command: string, destructive: boolean, cwd?: string
 }
 
 function formatWriteApproval(action: Extract<ApprovalAction, { type: "write" }>, destructive: boolean) {
-  const lines = [`${destructive ? "Destructive write" : "Write"}: ${action.summary}`];
+  const heading = action.reviewReason ? "Write review" : destructive ? "Destructive write" : "Write";
+  const lines = [`${heading}: ${action.summary}`];
+  if (action.reviewReason) {
+    lines.push(`Review boundary: ${action.reviewReason}`);
+  }
+  if (action.changeSummary) {
+    lines.push(`Change summary: ${action.changeSummary}`);
+  }
   if (action.path) {
     lines.push(`Path: ${action.path}`);
   }
@@ -120,9 +128,15 @@ function formatWriteApproval(action: Extract<ApprovalAction, { type: "write" }>,
     lines.push(`Mode: ${action.mode}`);
   }
   if (action.diff) {
-    lines.push("", "Diff:", action.diff);
+    lines.push("", "Diff:", truncateApprovalBodySection(action.diff));
   } else if (action.original !== undefined || action.content !== undefined) {
-    lines.push("", "Original:", action.original ?? "", "Proposed:", action.content ?? "");
+    lines.push(
+      "",
+      "Original:",
+      truncateApprovalBodySection(action.original ?? ""),
+      "Proposed:",
+      truncateApprovalBodySection(action.content ?? "")
+    );
   }
   return lines.join("\n");
 }
@@ -189,6 +203,13 @@ function truncateApprovalAuditText(value: string) {
     return value;
   }
   return `${value.slice(0, MAX_APPROVAL_AUDIT_MESSAGE - 3).trimEnd()}...`;
+}
+
+function truncateApprovalBodySection(value: string) {
+  if (value.length <= MAX_APPROVAL_BODY_SECTION) {
+    return value;
+  }
+  return `${value.slice(0, MAX_APPROVAL_BODY_SECTION).trimEnd()}\n... truncated ${value.length - MAX_APPROVAL_BODY_SECTION} chars ...`;
 }
 
 function formatJson(value: unknown) {

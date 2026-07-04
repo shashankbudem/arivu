@@ -352,6 +352,31 @@ describe("approval manager", () => {
     await expect(approvals.require({ type: "write", summary: "delete generated output", destructive: true })).rejects.toThrow(/denied/);
   });
 
+  it("labels large direct edit reviews without calling them destructive", async () => {
+    let prompt = "";
+    const approvals = new ApprovalManager("trusted", async (message) => {
+      prompt = message;
+      return true;
+    });
+
+    await expect(
+      approvals.require({
+        type: "write",
+        summary: "large direct patch",
+        paths: ["README.md"],
+        diff: "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+        destructive: true,
+        changeSummary: "1 file, +1/-1",
+        reviewReason: "Large direct patch (120 changed lines) needs review before applying."
+      })
+    ).resolves.toBeUndefined();
+
+    expect(prompt).toContain("Write review: large direct patch");
+    expect(prompt).toContain("Review boundary: Large direct patch");
+    expect(prompt).toContain("Change summary: 1 file, +1/-1");
+    expect(prompt).not.toContain("Destructive write");
+  });
+
   it("allows browser actions without prompting in default trust modes", async () => {
     for (const mode of ["readonly", "ask", "trusted"] as const) {
       let prompted = false;

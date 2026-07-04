@@ -10,6 +10,7 @@ import type { AppConfig } from "../config.js";
 import { resolveCommandExecutionProfile } from "../execution/profile.js";
 import { discoverSkills, formatSkillList, readSkill } from "../agent/skills.js";
 import type { ToolSchema } from "../agent/types.js";
+import { reviewForFileWrite, reviewForPatch } from "./directEditReview.js";
 import { FileStateTracker } from "./fileState.js";
 import { callMcpTool, listMcpTools } from "./mcp.js";
 import { applyUnifiedDiff, changedPathsFromDiff, summarizePatch } from "./patch.js";
@@ -30,6 +31,7 @@ type ToolContext = {
   mcpServers?: AppConfig["mcpServers"];
   scopePolicyRules?: WorkspaceScopePolicyRules;
   browser?: BrowserToolController;
+  directEditReview?: boolean;
 };
 
 type ToolDefinition = {
@@ -45,6 +47,7 @@ export function createToolRegistry(context: ToolContext) {
   const tools = new Map<string, ToolDefinition>();
   const scopePolicyRules = normalizeWorkspaceScopePolicyRules(context.scopePolicyRules);
   const scopedMcpServers = mcpServersForScope(context.mcpServers, scopePolicyRules);
+  const directEditReview = context.directEditReview ?? true;
 
   const register = (tool: ToolDefinition) => tools.set(tool.schema.name, tool);
 
@@ -498,7 +501,16 @@ export function createToolRegistry(context: ToolContext) {
     async execute(args) {
       const parsed = z.object({ diff: z.string() }).parse(args);
       const summary = summarizePatch(parsed.diff);
-      await context.approvals.require({ type: "write", summary, paths: changedPathsFromDiff(parsed.diff), diff: parsed.diff });
+      const review = directEditReview ? reviewForPatch(parsed.diff) : { required: false, summary: "", reason: undefined };
+      await context.approvals.require({
+        type: "write",
+        summary,
+        paths: changedPathsFromDiff(parsed.diff),
+        diff: parsed.diff,
+        destructive: review.required,
+        changeSummary: review.summary,
+        reviewReason: review.reason
+      });
       await applyUnifiedDiff(
         parsed.diff,
         (requestedPath) => resolveSafeWorkspacePath(context.workspaceRoot, requestedPath),
@@ -533,13 +545,17 @@ export function createToolRegistry(context: ToolContext) {
       }
 
       const original = existing ? await readFile(target, "utf8") : "";
+      const review = directEditReview ? reviewForFileWrite(parsed.content) : { required: false, summary: "", reason: undefined };
       await context.approvals.require({
         type: "write",
         summary: `${parsed.mode} ${parsed.path}`,
         path: parsed.path,
         mode: parsed.mode,
         original,
-        content: parsed.content
+        content: parsed.content,
+        destructive: review.required,
+        changeSummary: review.summary,
+        reviewReason: review.reason
       });
       await mkdir(path.dirname(target), { recursive: true });
       await writeFile(target, parsed.content, "utf8");

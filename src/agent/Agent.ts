@@ -27,6 +27,7 @@ export class Agent {
       mcpServers?: AppConfig["mcpServers"];
       scopePolicyRules?: AppConfig["workspacePolicies"][string]["scopeRules"];
       browser?: BrowserToolController;
+      directEditReview?: boolean;
       session?: AgentSession;
     }
   ) {
@@ -68,7 +69,8 @@ export class Agent {
       tavilyApiKey: this.options.tavilyApiKey,
       mcpServers: this.options.mcpServers,
       scopePolicyRules: this.options.scopePolicyRules,
-      browser: this.options.browser
+      browser: this.options.browser,
+      directEditReview: this.options.directEditReview
     });
 
     const existingSystem = this.session.messages.find(

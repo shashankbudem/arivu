@@ -443,3 +443,9 @@ Reason: JSON transfer is useful for moving policies, but common local postures s
 Decision: Settings discovers `.arivu/workspace-policy.json` in the active workspace through a bounded main-process read, validates it as an `arivu.workspacePolicy` bundle with optional name/description metadata, and lets the user apply it into the current unsaved workspace policy editor. The bundle is not auto-enforced merely because it exists in the repository.
 
 Reason: checked-in policy files are useful for team defaults and reviewable configuration, but a repository file should not silently change local approval behavior. Explicit Apply plus the existing Save settings boundary keeps team policy adoption visible while preserving the same normalization and stricter-only enforcement path as presets, profiles, and JSON import.
+
+## 2026-07-04: Large direct edits require write review
+
+Decision: `apply_patch` and `write_file` classify large direct edits before applying them. Outside managed task-worktree execution, oversized patches or full-file writes pass a `reviewReason` through `ApprovalManager` and are treated as risky workspace writes, so Trusted mode prompts with a "Write review" boundary. Managed task worktrees disable the extra threshold because patch preview, PR draft, and merge gates already provide the review boundary.
+
+Reason: Trusted mode should stay ergonomic for small local fixes, but large direct edits need an explicit pause before mutating the user's active checkout. Reusing the existing approval/audit path keeps the review event visible in task-run history without inventing a separate modal or policy channel.

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,6 +7,7 @@ import { createSkill, readSkill } from "../src/agent/skills.js";
 import { ApprovalManager } from "../src/permissions/ApprovalManager.js";
 import type { WorkspaceScopePolicyRules } from "../src/permissions/scopePolicy.js";
 import type { BrowserToolController } from "../src/tools/browserControl.js";
+import { DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD } from "../src/tools/directEditReview.js";
 import { createToolRegistry } from "../src/tools/registry.js";
 
 describe("createToolRegistry", () => {
@@ -294,6 +295,62 @@ describe("createToolRegistry", () => {
     }
   });
 
+  it("requires review before large direct patches in trusted mode", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-large-patch-"));
+    const lineCount = Math.ceil(DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD / 2);
+    const original = Array.from({ length: lineCount }, (_value, index) => `old-${index}`);
+    const updated = Array.from({ length: lineCount }, (_value, index) => `new-${index}`);
+    const diff = largeReplacementDiff("README.md", original, updated);
+    const prompts: string[] = [];
+    try {
+      await writeFile(path.join(tempDir, "README.md"), `${original.join("\n")}\n`, "utf8");
+      const registry = createToolRegistry({
+        workspaceRoot: tempDir,
+        approvals: new ApprovalManager("trusted", async (message) => {
+          prompts.push(message);
+          return true;
+        })
+      });
+
+      await registry.execute("read", { path: "README.md" });
+      await expect(registry.execute("apply_patch", { diff })).resolves.toContain("Applied patch");
+      await expect(readFile(path.join(tempDir, "README.md"), "utf8")).resolves.toBe(`${updated.join("\n")}\n`);
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain("Write review:");
+      expect(prompts[0]).toContain("Large direct patch");
+      expect(prompts[0]).toContain(`${lineCount * 2} changed lines`);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("can skip large direct edit review when another execution boundary owns review", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-worktree-patch-"));
+    const lineCount = Math.ceil(DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD / 2);
+    const original = Array.from({ length: lineCount }, (_value, index) => `old-${index}`);
+    const updated = Array.from({ length: lineCount }, (_value, index) => `new-${index}`);
+    const diff = largeReplacementDiff("README.md", original, updated);
+    let prompted = false;
+    try {
+      await writeFile(path.join(tempDir, "README.md"), `${original.join("\n")}\n`, "utf8");
+      const registry = createToolRegistry({
+        workspaceRoot: tempDir,
+        approvals: new ApprovalManager("trusted", async () => {
+          prompted = true;
+          return false;
+        }),
+        directEditReview: false
+      });
+
+      await registry.execute("read", { path: "README.md" });
+      await expect(registry.execute("apply_patch", { diff })).resolves.toContain("Applied patch");
+      await expect(readFile(path.join(tempDir, "README.md"), "utf8")).resolves.toBe(`${updated.join("\n")}\n`);
+      expect(prompted).toBe(false);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("requires approval before listing configured MCP tools", async () => {
     const registry = createToolRegistry({
       workspaceRoot: process.cwd(),
@@ -467,6 +524,16 @@ function createRegistry(workspaceRoot = process.cwd()) {
     workspaceRoot,
     approvals: new ApprovalManager("trusted")
   });
+}
+
+function largeReplacementDiff(filePath: string, original: string[], updated: string[]) {
+  return [
+    `--- a/${filePath}`,
+    `+++ b/${filePath}`,
+    `@@ -1,${original.length} +1,${updated.length} @@`,
+    ...original.flatMap((line, index) => [`-${line}`, `+${updated[index] ?? ""}`]),
+    ""
+  ].join("\n");
 }
 
 function createFakeBrowser(): BrowserToolController {
