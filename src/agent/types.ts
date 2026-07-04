@@ -301,6 +301,17 @@ export type AgentTaskRunWorktreePullRequestFeedback = {
   items: AgentTaskRunWorktreePullRequestFeedbackItem[];
 };
 
+export type AgentTaskRunWorktreePullRequestCheckItem = {
+  name: string;
+  bucket: "passed" | "failed" | "pending" | "skipped" | "cancelled" | "unknown";
+  status?: string;
+  conclusion?: string;
+  state?: string;
+  detailsUrl?: string;
+  startedAt?: string;
+  completedAt?: string;
+};
+
 export type AgentTaskRunWorktreePullRequestReview = {
   state?: string;
   isDraft?: boolean;
@@ -316,6 +327,7 @@ export type AgentTaskRunWorktreePullRequestReview = {
     cancelled: number;
     unknown: number;
   };
+  checkItems?: AgentTaskRunWorktreePullRequestCheckItem[];
   summary: string;
   feedback?: AgentTaskRunWorktreePullRequestFeedback;
   updatedAt: string;

@@ -284,6 +284,12 @@ function worktreeLines(run: AgentTaskRun) {
     lines.push(`- PR: ${worktree.pullRequest.url ?? "not created"} (${worktree.pullRequest.title})`);
     if (worktree.pullRequest.review) {
       lines.push(`- PR review: ${inlineText(worktree.pullRequest.review.summary)}`);
+      const checkItems = worktree.pullRequest.review.checkItems ?? [];
+      if (checkItems.length > 0) {
+        lines.push(
+          `- PR check evidence: ${inlineText(checkItems.map((item) => `${item.name} ${item.bucket}`).join("; "))}`
+        );
+      }
     }
   }
   if (worktree.conflict) {

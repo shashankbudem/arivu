@@ -239,6 +239,17 @@ const AgentTaskRunWorktreePullRequestFeedbackSchema = z.object({
   items: z.array(AgentTaskRunWorktreePullRequestFeedbackItemSchema)
 });
 
+const AgentTaskRunWorktreePullRequestCheckItemSchema = z.object({
+  name: z.string(),
+  bucket: z.enum(["passed", "failed", "pending", "skipped", "cancelled", "unknown"]),
+  status: z.string().optional(),
+  conclusion: z.string().optional(),
+  state: z.string().optional(),
+  detailsUrl: z.string().optional(),
+  startedAt: z.string().optional(),
+  completedAt: z.string().optional()
+});
+
 const AgentTaskRunWorktreePullRequestReviewSchema = z.object({
   state: z.string().optional(),
   isDraft: z.boolean().optional(),
@@ -254,6 +265,7 @@ const AgentTaskRunWorktreePullRequestReviewSchema = z.object({
     cancelled: z.number().int().min(0),
     unknown: z.number().int().min(0)
   }),
+  checkItems: z.array(AgentTaskRunWorktreePullRequestCheckItemSchema).optional(),
   summary: z.string(),
   feedback: AgentTaskRunWorktreePullRequestFeedbackSchema.optional(),
   updatedAt: z.string()

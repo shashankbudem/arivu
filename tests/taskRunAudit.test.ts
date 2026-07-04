@@ -112,6 +112,14 @@ describe("task run audit summaries", () => {
         review: {
           checkSummary: "1 passed",
           checks: { total: 1, passed: 1, failed: 0, pending: 0, skipped: 0, cancelled: 0, unknown: 0 },
+          checkItems: [
+            {
+              name: "lint",
+              bucket: "failed",
+              status: "COMPLETED",
+              conclusion: "FAILURE"
+            }
+          ],
           summary: "Ready to merge",
           updatedAt: "2026-01-01T00:04:00.000Z"
         }
@@ -126,6 +134,7 @@ describe("task run audit summaries", () => {
     expect(audit).toContain("- Patch preview: 12 lines");
     expect(audit).toContain("- PR: https://github.com/example/repo/pull/1 (Ship harness change)");
     expect(audit).toContain("- PR review: Ready to merge");
+    expect(audit).toContain("- PR check evidence: lint failed");
   });
 
   it("includes direct write approval preview summaries", () => {

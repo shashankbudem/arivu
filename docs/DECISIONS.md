@@ -455,3 +455,9 @@ Reason: Trusted mode should stay ergonomic for small local fixes, but large dire
 Decision: write approval audit events can carry a bounded `changePreview` for proposed `apply_patch` diffs or `write_file` content. Activity renders that preview on approval rows, copied task-run audits include a compact preview summary, and saved-session validation preserves the preview payload.
 
 Reason: post-success patch/file-change artifacts are not enough for a harness review boundary because denied, blocked, and auto-allowed writes also need inspectable proposed-change evidence. Keeping the preview on the approval record ties the evidence to the policy decision that happened before mutation.
+
+## 2026-07-04: PR refresh stores bounded check evidence
+
+Decision: created-PR refresh snapshots now preserve a bounded, actionability-sorted list of named status checks from GitHub's `statusCheckRollup`. Activity renders the check evidence on the PR card, copied task-run audits summarize it, and Review PR continuation prompts include the named failed/pending/cancelled/unknown checks beside review comments.
+
+Reason: check counts alone tell the user that CI is failing, but not which check the agent should inspect or rerun. Storing a small check evidence list keeps PR handoff prompts actionable without fetching or persisting full CI logs.

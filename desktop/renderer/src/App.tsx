@@ -5485,6 +5485,7 @@ function TaskWorktreePullRequestReview({ review }: { review: AgentTaskRunWorktre
         <span>{formatDateTime(review.updatedAt)}</span>
       </div>
       <TaskWorktreePullRequestReadiness readiness={readiness} />
+      {review.checkItems?.length ? <TaskWorktreePullRequestChecks items={review.checkItems} /> : null}
       {review.feedback ? <TaskWorktreePullRequestFeedback feedback={review.feedback} /> : null}
     </div>
   );
@@ -5520,6 +5521,35 @@ function TaskWorktreePullRequestFeedback({ feedback }: { feedback: AgentTaskRunW
       ) : null}
     </div>
   );
+}
+
+function TaskWorktreePullRequestChecks({ items }: { items: AgentTaskRunWorktreePullRequestCheckItem[] }) {
+  return (
+    <div className="task-worktree-pr-feedback">
+      <div className="task-worktree-pr-feedback-heading">
+        <ListChecks size={12} />
+        <strong>Check evidence</strong>
+      </div>
+      <ul>
+        {items.map((item, index) => (
+          <li key={`${item.name}-${item.detailsUrl ?? item.completedAt ?? index}`}>
+            <span>{pullRequestCheckLabel(item)}</span>
+            {item.detailsUrl ? <p>{item.detailsUrl}</p> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function pullRequestCheckLabel(item: AgentTaskRunWorktreePullRequestCheckItem) {
+  const details = [
+    item.bucket,
+    item.conclusion ? `conclusion ${formatPrStatusToken(item.conclusion)}` : undefined,
+    item.state ? `state ${formatPrStatusToken(item.state)}` : undefined,
+    item.status ? `status ${formatPrStatusToken(item.status)}` : undefined
+  ].filter((part): part is string => Boolean(part));
+  return `${item.name} - ${details.join(", ")}`;
 }
 
 function pullRequestFeedbackLabel(item: AgentTaskRunWorktreePullRequestFeedbackItem) {

@@ -563,6 +563,21 @@ describe("report remediation prompts", () => {
               cancelled: 0,
               unknown: 0
             },
+            checkItems: [
+              {
+                name: "lint",
+                bucket: "failed",
+                status: "COMPLETED",
+                conclusion: "FAILURE",
+                detailsUrl: "https://ci.example/lint"
+              },
+              {
+                name: "deploy",
+                bucket: "pending",
+                state: "PENDING",
+                detailsUrl: "https://ci.example/deploy"
+              }
+            ],
             summary: "Open draft PR has changes requested and 1 failed check.",
             feedback: {
               total: 3,
@@ -652,6 +667,9 @@ describe("report remediation prompts", () => {
     expect(prompt).toContain("Merge state: BLOCKED");
     expect(prompt).toContain("Checks: 3 checks: 1 passed, 1 failed, 1 pending");
     expect(prompt).toContain("Check counts: 1 passed, 1 failed, 1 pending");
+    expect(prompt).toContain("Check evidence");
+    expect(prompt).toContain("lint: failed, conclusion FAILURE, status COMPLETED (https://ci.example/lint)");
+    expect(prompt).toContain("deploy: pending, state PENDING (https://ci.example/deploy)");
     expect(prompt).toContain("Review feedback: 1 review, 1 comment, 1 line thread, 1 unresolved thread, 1 changes requested");
     expect(prompt).toContain("Latest review feedback");
     expect(prompt).toContain("review CHANGES_REQUESTED by reviewer-two");

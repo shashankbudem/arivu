@@ -12,11 +12,13 @@ import type {
   AgentTaskRunWorktreePullRequest,
   AgentTaskRunWorktreePullRequestFeedback,
   AgentTaskRunWorktreePullRequestFeedbackItem,
+  AgentTaskRunWorktreePullRequestCheckItem,
   AgentTaskRunWorktreePullRequestReview
 } from "./types.js";
 
 export const DEFAULT_TASK_WORKTREE_PATCH_PREVIEW_BYTES = 80_000;
 const MAX_PULL_REQUEST_FEEDBACK_ITEMS = 5;
+const MAX_PULL_REQUEST_CHECK_ITEMS = 8;
 const MAX_PULL_REQUEST_FEEDBACK_BODY_CHARS = 240;
 const MAX_PULL_REQUEST_REVIEW_THREADS = 20;
 const PULL_REQUEST_REVIEW_THREADS_QUERY = `
@@ -904,6 +906,7 @@ function parsePullRequestReview(
   const mergeStateStatus = optionalString(parsed.mergeStateStatus);
   const isDraft = typeof parsed.isDraft === "boolean" ? parsed.isDraft : undefined;
   const checks = summarizePullRequestChecks(parsed.statusCheckRollup);
+  const checkItems = summarizePullRequestCheckItems(parsed.statusCheckRollup);
   const checkSummary = formatPullRequestCheckSummary(checks);
   const feedback = summarizePullRequestFeedback(parsed.comments, parsed.reviews, reviewThreadsValue, threadFetchError);
   const summary = [
@@ -923,6 +926,7 @@ function parsePullRequestReview(
     mergeStateStatus,
     checkSummary,
     checks,
+    checkItems,
     summary,
     feedback,
     updatedAt: now
@@ -1079,6 +1083,11 @@ function boundedFeedbackBody(value: string | undefined) {
     : normalized;
 }
 
+function boundedCheckText(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 120 ? `${normalized.slice(0, 117).trimEnd()}...` : normalized;
+}
+
 function authorName(value: unknown) {
   if (typeof value === "string" && value.trim()) {
     return value.trim();
@@ -1106,6 +1115,60 @@ function summarizePullRequestChecks(value: unknown): AgentTaskRunWorktreePullReq
     checks[bucket] += 1;
   }
   return checks;
+}
+
+function summarizePullRequestCheckItems(value: unknown): AgentTaskRunWorktreePullRequestCheckItem[] | undefined {
+  const items = pullRequestCheckItems(value)
+    .map(pullRequestCheckEvidenceItem)
+    .filter((item): item is AgentTaskRunWorktreePullRequestCheckItem => Boolean(item))
+    .sort(comparePullRequestCheckItems)
+    .slice(0, MAX_PULL_REQUEST_CHECK_ITEMS);
+  return items.length > 0 ? items : undefined;
+}
+
+function pullRequestCheckEvidenceItem(item: Record<string, unknown>): AgentTaskRunWorktreePullRequestCheckItem | undefined {
+  const name = optionalString(item.name) ?? optionalString(item.context) ?? optionalString(item.__typename);
+  if (!name) {
+    return undefined;
+  }
+  return {
+    name: boundedCheckText(name),
+    bucket: pullRequestCheckBucket(item),
+    status: optionalString(item.status),
+    conclusion: optionalString(item.conclusion),
+    state: optionalString(item.state),
+    detailsUrl: optionalString(item.detailsUrl) ?? optionalString(item.targetUrl) ?? optionalString(item.url),
+    startedAt: optionalString(item.startedAt),
+    completedAt: optionalString(item.completedAt)
+  };
+}
+
+function comparePullRequestCheckItems(
+  left: AgentTaskRunWorktreePullRequestCheckItem,
+  right: AgentTaskRunWorktreePullRequestCheckItem
+) {
+  const rankDelta = pullRequestCheckBucketRank(left.bucket) - pullRequestCheckBucketRank(right.bucket);
+  if (rankDelta !== 0) {
+    return rankDelta;
+  }
+  return left.name.localeCompare(right.name);
+}
+
+function pullRequestCheckBucketRank(bucket: AgentTaskRunWorktreePullRequestCheckItem["bucket"]) {
+  switch (bucket) {
+    case "failed":
+      return 0;
+    case "cancelled":
+      return 1;
+    case "pending":
+      return 2;
+    case "unknown":
+      return 3;
+    case "skipped":
+      return 4;
+    case "passed":
+      return 5;
+  }
 }
 
 function pullRequestCheckItems(value: unknown): Record<string, unknown>[] {

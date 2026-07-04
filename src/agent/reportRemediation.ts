@@ -301,6 +301,22 @@ function formatPullRequestReviewEvidence(review: AgentTaskRunWorktreePullRequest
     review.mergeStateStatus ? `- Merge state: ${review.mergeStateStatus}` : undefined,
     `- Checks: ${review.checkSummary}`,
     `- Check counts: ${counts.passed} passed, ${counts.failed} failed, ${counts.pending} pending, ${counts.skipped} skipped, ${counts.cancelled} cancelled, ${counts.unknown} unknown, ${counts.total} total`,
+    ...(review.checkItems?.length
+      ? [
+          "- Check evidence:",
+          ...review.checkItems.map((item) => {
+            const meta = [
+              item.bucket,
+              item.conclusion ? `conclusion ${item.conclusion}` : undefined,
+              item.state ? `state ${item.state}` : undefined,
+              item.status ? `status ${item.status}` : undefined
+            ]
+              .filter(Boolean)
+              .join(", ");
+            return `  - ${item.name}: ${meta}${item.detailsUrl ? ` (${item.detailsUrl})` : ""}`;
+          })
+        ]
+      : []),
     review.feedback ? `- ${review.feedback.summary}` : undefined,
     review.feedback?.threadFetchError ? `- Review thread fetch unavailable: ${review.feedback.threadFetchError}` : undefined,
     ...(review.feedback?.items.length

@@ -517,9 +517,9 @@ describe("task worktrees", () => {
               reviewDecision: "CHANGES_REQUESTED",
               mergeStateStatus: "BLOCKED",
               statusCheckRollup: [
-                { __typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS" },
-                { __typename: "CheckRun", name: "lint", status: "COMPLETED", conclusion: "FAILURE" },
-                { __typename: "StatusContext", context: "deploy", state: "PENDING" }
+                { __typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "https://ci.example/test" },
+                { __typename: "CheckRun", name: "lint", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://ci.example/lint" },
+                { __typename: "StatusContext", context: "deploy", state: "PENDING", targetUrl: "https://ci.example/deploy" }
               ],
               comments: [
                 {
@@ -592,6 +592,28 @@ describe("task worktrees", () => {
         cancelled: 0,
         unknown: 0
       },
+      checkItems: [
+        {
+          name: "lint",
+          bucket: "failed",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          detailsUrl: "https://ci.example/lint"
+        },
+        {
+          name: "deploy",
+          bucket: "pending",
+          state: "PENDING",
+          detailsUrl: "https://ci.example/deploy"
+        },
+        {
+          name: "test",
+          bucket: "passed",
+          status: "COMPLETED",
+          conclusion: "SUCCESS",
+          detailsUrl: "https://ci.example/test"
+        }
+      ],
       feedback: {
         total: 5,
         comments: 1,
