@@ -5091,6 +5091,68 @@ body.is-resizing .panel-resize-handle::after {
   color: #8ce8d4;
 }
 
+.workspace-policy-team-bundle {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgb(52 48 42 / 0.85);
+  border-radius: 8px;
+  background: rgb(11 14 15 / 0.72);
+}
+
+.workspace-policy-team-bundle.has-bundle {
+  border-color: rgb(43 191 159 / 0.5);
+  background: rgb(43 191 159 / 0.07);
+}
+
+.workspace-policy-team-bundle.has-error {
+  border-color: rgb(255 159 143 / 0.38);
+}
+
+.workspace-policy-team-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.workspace-policy-team-copy strong {
+  color: #f6f1e8;
+  font-size: 12px;
+}
+
+.workspace-policy-team-copy p {
+  margin: 2px 0 0;
+  color: #bdb5aa;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.workspace-policy-team-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.workspace-policy-team-status,
+.workspace-policy-team-error {
+  grid-column: 1 / -1;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.workspace-policy-team-status {
+  color: #8ce8d4;
+}
+
+.workspace-policy-team-error {
+  color: #ff9f8f;
+}
+
 .workspace-policy-profiles {
   min-width: 0;
   display: grid;
@@ -6287,6 +6349,7 @@ html[data-theme="light"] .settings-skill-row,
 html[data-theme="light"] .settings-worktree-row,
 html[data-theme="light"] .settings-skill-empty,
 html[data-theme="light"] .workspace-policy-box,
+html[data-theme="light"] .workspace-policy-team-bundle,
 html[data-theme="light"] .workspace-policy-row,
 html[data-theme="light"] .workspace-policy-row select,
 html[data-theme="light"] .policy-table-wrap,
@@ -6309,16 +6372,19 @@ html[data-theme="light"] .policy-table td {
 html[data-theme="light"] .policy-table tbody th strong,
 html[data-theme="light"] .policy-cell > span:not(.policy-effect-badge),
 html[data-theme="light"] .workspace-policy-box strong,
+html[data-theme="light"] .workspace-policy-team-copy strong,
 html[data-theme="light"] .workspace-policy-row span {
   color: #211b14;
 }
 
 html[data-theme="light"] .workspace-policy-box,
+html[data-theme="light"] .workspace-policy-team-bundle,
 html[data-theme="light"] .workspace-policy-row {
   background: #fffbf5;
 }
 
 html[data-theme="light"] .workspace-policy-heading p,
+html[data-theme="light"] .workspace-policy-team-copy p,
 html[data-theme="light"] .policy-capability-risk {
   color: #52483c;
 }
@@ -8496,6 +8562,14 @@ html[data-ui-concept="graphite"] .user-message pre {
 
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace-policy-team-bundle {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace-policy-team-actions {
+    justify-content: flex-start;
   }
 
   .activity-resize-handle,

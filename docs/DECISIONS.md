@@ -437,3 +437,9 @@ Reason: users need a lightweight way to move hardened workspace policies between
 Decision: Settings can save the current unsaved workspace policy as a named local profile, apply a saved profile back into the current workspace policy editor, or delete a profile. Profiles persist in config under `workspacePolicyProfiles` and are normalized by `src/permissions/workspacePolicyProfiles.ts`; applying a profile updates the same unsaved override/scope-rule state as presets and JSON import, so users still commit changes through Save settings.
 
 Reason: JSON transfer is useful for moving policies, but common local postures should not require repeated paste/import work. Named profiles give users reusable hardening bundles while preserving the existing per-workspace save boundary.
+
+## 2026-07-04: Team workspace policy bundles are explicit-apply
+
+Decision: Settings discovers `.arivu/workspace-policy.json` in the active workspace through a bounded main-process read, validates it as an `arivu.workspacePolicy` bundle with optional name/description metadata, and lets the user apply it into the current unsaved workspace policy editor. The bundle is not auto-enforced merely because it exists in the repository.
+
+Reason: checked-in policy files are useful for team defaults and reviewable configuration, but a repository file should not silently change local approval behavior. Explicit Apply plus the existing Save settings boundary keeps team policy adoption visible while preserving the same normalization and stricter-only enforcement path as presets, profiles, and JSON import.

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseWorkspacePolicyBundle,
+  WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH
+} from "../src/permissions/workspacePolicyBundles.js";
+import {
   parseWorkspacePolicyTransfer,
   serializeWorkspacePolicyTransfer,
   workspacePolicyTransferPayload
@@ -115,5 +119,59 @@ describe("workspace policy transfer", () => {
         })
       )
     ).toThrow(/unsupported browser target class/);
+  });
+
+  it("imports team-shared workspace policy bundles with metadata", () => {
+    expect(
+      parseWorkspacePolicyBundle(
+        JSON.stringify({
+          kind: "arivu.workspacePolicy",
+          version: 1,
+          name: "  Team   review  ",
+          description: " Ask before commands and keep browser local. ",
+          overrides: {
+            run_command: "prompt",
+            network_fetch: "deny"
+          },
+          scopeRules: {
+            allowedBrowserTargetClasses: ["local", "background", "local"]
+          }
+        }),
+        ".arivu/workspace-policy.json"
+      )
+    ).toEqual({
+      kind: "arivu.workspacePolicy",
+      version: 1,
+      name: "Team review",
+      description: "Ask before commands and keep browser local.",
+      sourcePath: ".arivu/workspace-policy.json",
+      overrides: {
+        run_command: "prompt",
+        network_fetch: "deny"
+      },
+      scopeRules: {
+        allowedBrowserTargetClasses: ["background", "local"]
+      }
+    });
+  });
+
+  it("uses stable defaults for minimal team bundles", () => {
+    expect(
+      parseWorkspacePolicyBundle(
+        JSON.stringify({
+          overrides: {
+            read_repo: "prompt"
+          }
+        })
+      )
+    ).toMatchObject({
+      name: "Workspace policy bundle",
+      sourcePath: WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH,
+      overrides: {
+        read_repo: "prompt"
+      },
+      scopeRules: {}
+    });
+    expect(() => parseWorkspacePolicyBundle("[1,2,3]")).toThrow(/JSON object/);
   });
 });

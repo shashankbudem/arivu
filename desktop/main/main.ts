@@ -92,6 +92,11 @@ import { ApprovalManager } from "../../src/permissions/ApprovalManager.js";
 import { describeCapabilityPolicies, evaluateCapabilityPolicy } from "../../src/permissions/capabilityPolicy.js";
 import type { CapabilityPolicyOverrides } from "../../src/permissions/capabilityPolicy.js";
 import { scopePolicyHasRules, scopePolicySummariesForTool } from "../../src/permissions/scopePolicy.js";
+import {
+  parseWorkspacePolicyBundle,
+  WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH,
+  type WorkspacePolicyBundle
+} from "../../src/permissions/workspacePolicyBundles.js";
 import { SessionStore } from "../../src/sessions/SessionStore.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
@@ -141,6 +146,13 @@ type ToolSummary = {
   status: ToolStatus;
   statusLabel: string;
   scopeLabels: string[];
+};
+
+type WorkspacePolicyBundleResult = {
+  path: string;
+  exists: boolean;
+  bundle: WorkspacePolicyBundle | null;
+  error?: string;
 };
 
 type CapabilityPolicyResult = {
@@ -335,6 +347,7 @@ const MODEL_LIST_CACHE_TTL_MS = 10 * 60 * 1000;
 const AUTO_MODEL_LIST_TIMEOUT_MS = 4_000;
 const MANUAL_MODEL_LIST_TIMEOUT_MS = 10_000;
 const MODEL_LIST_BODY_LIMIT_BYTES = 256 * 1024;
+const WORKSPACE_POLICY_BUNDLE_MAX_BYTES = 64 * 1024;
 let mainWindow: BrowserWindow | undefined;
 const pendingApprovals = new Map<string, (approved: boolean) => void>();
 const browserController = new DesktopBrowserController();
@@ -1137,6 +1150,11 @@ class DesktopController {
       workspaceScopeRules,
       policies: describeCapabilityPolicies(workspaceOverrides)
     };
+  }
+
+  async readWorkspacePolicyBundle(): Promise<WorkspacePolicyBundleResult> {
+    const workspace = await detectWorkspace(this.cwd);
+    return readWorkspacePolicyBundleFromRoot(workspace.root);
   }
 
   async listSkills(): Promise<SkillListResult> {
@@ -2107,6 +2125,50 @@ function toPublicProvider(provider: LlmProviderProfile): PublicLlmProviderProfil
   };
 }
 
+async function readWorkspacePolicyBundleFromRoot(workspaceRoot: string): Promise<WorkspacePolicyBundleResult> {
+  const fallbackPath = path.join(workspaceRoot, WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH);
+  let bundlePath = fallbackPath;
+  try {
+    bundlePath = await resolveSafeWorkspacePath(workspaceRoot, WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return { path: fallbackPath, exists: false, bundle: null };
+    }
+    return { path: fallbackPath, exists: true, bundle: null, error: formatError(error) };
+  }
+
+  try {
+    const bundleStat = await stat(bundlePath);
+    if (!bundleStat.isFile()) {
+      return {
+        path: bundlePath,
+        exists: true,
+        bundle: null,
+        error: "Workspace policy bundle path exists but is not a file."
+      };
+    }
+    if (bundleStat.size > WORKSPACE_POLICY_BUNDLE_MAX_BYTES) {
+      return {
+        path: bundlePath,
+        exists: true,
+        bundle: null,
+        error: `Workspace policy bundle is larger than ${formatBytes(WORKSPACE_POLICY_BUNDLE_MAX_BYTES)}.`
+      };
+    }
+    const bundleText = await readFile(bundlePath, "utf8");
+    return {
+      path: bundlePath,
+      exists: true,
+      bundle: parseWorkspacePolicyBundle(bundleText, relativeToWorkspace(workspaceRoot, bundlePath))
+    };
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return { path: bundlePath, exists: false, bundle: null };
+    }
+    return { path: bundlePath, exists: true, bundle: null, error: formatError(error) };
+  }
+}
+
 async function readImageAttachment(filePath: string): Promise<ImageAttachment> {
   const fileStat = await stat(filePath);
   if (!fileStat.isFile()) {
@@ -2207,6 +2269,10 @@ function countLines(text: string) {
 
 function formatError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isMissingPathError(error: unknown) {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }
 
 function sessionTitle(session: AgentSession) {
@@ -2760,6 +2826,7 @@ handleFromMain("models:list", (_event, patch: ConfigPatch) => controller.listMod
 handleFromMain("doctor:run", (_event, patch: ConfigPatch) => controller.doctor(patch));
 handleFromMain("tools:list", () => controller.listTools());
 handleFromMain("policy:list", () => controller.listCapabilityPolicies());
+handleFromMain("policy:readWorkspaceBundle", () => controller.readWorkspacePolicyBundle());
 handleFromMain("skills:list", () => controller.listSkills());
 handleFromMain("skills:create", (_event, input: CreateSkillInput) => controller.createSkill(input));
 handleFromMain("agent:listTaskWorktrees", () => controller.listTaskWorktrees());

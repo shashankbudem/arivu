@@ -115,6 +115,19 @@ type WorkspaceCapabilityPolicy = {
 };
 type WorkspaceCapabilityPolicies = Record<string, WorkspaceCapabilityPolicy>;
 type WorkspacePolicyProfiles = Record<string, WorkspaceCapabilityPolicy>;
+type WorkspacePolicyBundle = WorkspaceCapabilityPolicy & {
+  kind: "arivu.workspacePolicy";
+  version: 1;
+  name: string;
+  description?: string;
+  sourcePath: string;
+};
+type WorkspacePolicyBundleResult = {
+  path: string;
+  exists: boolean;
+  bundle: WorkspacePolicyBundle | null;
+  error?: string;
+};
 
 type AgentTaskRunToolCall = {
   id: string;
@@ -779,6 +792,7 @@ type DesktopApi = {
   runDoctor(patch: ConfigPatch): Promise<DoctorReport>;
   listTools(): Promise<ToolListResult>;
   listCapabilityPolicies(): Promise<CapabilityPolicyResult>;
+  readWorkspacePolicyBundle(): Promise<WorkspacePolicyBundleResult>;
   listSkills(): Promise<SkillListResult>;
   createSkill(input: SkillCreateInput): Promise<SkillCreateResult>;
   listTaskWorktrees(): Promise<TaskWorktreeInventoryResult>;

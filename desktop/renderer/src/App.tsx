@@ -92,6 +92,7 @@ import {
   normalizeWorkspacePolicyProfileName,
   normalizeWorkspacePolicyProfiles
 } from "../../../src/permissions/workspacePolicyProfiles";
+import { WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH } from "../../../src/permissions/workspacePolicyBundles";
 import {
   parseWorkspacePolicyTransfer,
   serializeWorkspacePolicyTransfer,
@@ -6162,6 +6163,9 @@ function SettingsView({
   const [workspacePolicyProfiles, setWorkspacePolicyProfiles] = useState<WorkspacePolicyProfiles>(() =>
     normalizeWorkspacePolicyProfiles(state.config.workspacePolicyProfiles)
   );
+  const [workspacePolicyBundle, setWorkspacePolicyBundle] = useState<WorkspacePolicyBundleResult | null>(null);
+  const [workspacePolicyBundleLoading, setWorkspacePolicyBundleLoading] = useState(false);
+  const [workspacePolicyBundleError, setWorkspacePolicyBundleError] = useState<string | null>(null);
   const skillsSectionRef = useRef<HTMLElement | null>(null);
   const selectedProvider = providers.find((provider) => provider.id === activeProviderId) ?? providers[0];
   const baseUrl = selectedProvider?.baseUrl ?? state.config.baseUrl;
@@ -6180,7 +6184,8 @@ function SettingsView({
   useEffect(() => {
     void refreshTaskWorktrees();
     void refreshCapabilityPolicies();
-  }, []);
+    void refreshWorkspacePolicyBundle();
+  }, [state.workspace.root]);
 
   function updateSelectedProvider(patch: Partial<ProviderFormState>) {
     setProviders((current) =>
@@ -6342,6 +6347,19 @@ function SettingsView({
     }
   }
 
+  async function refreshWorkspacePolicyBundle() {
+    setWorkspacePolicyBundleLoading(true);
+    setWorkspacePolicyBundleError(null);
+    try {
+      setWorkspacePolicyBundle(await window.arivu.readWorkspacePolicyBundle());
+    } catch (err) {
+      setWorkspacePolicyBundle(null);
+      setWorkspacePolicyBundleError(formatError(err));
+    } finally {
+      setWorkspacePolicyBundleLoading(false);
+    }
+  }
+
   async function openInventoryWorktree(item: TaskWorktreeInventoryItem) {
     await runInventoryWorktreeAction(item, "open");
   }
@@ -6454,6 +6472,9 @@ function SettingsView({
         workspaceOverrides={workspacePolicyOverrides}
         workspaceScopeRules={workspaceScopeRules}
         workspacePolicyProfiles={workspacePolicyProfiles}
+        workspacePolicyBundle={workspacePolicyBundle}
+        workspacePolicyBundleLoading={workspacePolicyBundleLoading}
+        workspacePolicyBundleError={workspacePolicyBundleError}
         onWorkspaceOverrideChange={(capability, override) =>
           setWorkspacePolicyOverrides((current) => updateWorkspacePolicyOverride(current, capability, override))
         }
@@ -6468,6 +6489,7 @@ function SettingsView({
           setWorkspacePolicyOverrides(policy.overrides);
           setWorkspaceScopeRules(policy.scopeRules);
         }}
+        onWorkspacePolicyBundleReload={() => void refreshWorkspacePolicyBundle()}
         loading={capabilityPolicyLoading}
         error={capabilityPolicyError}
         onRefresh={() => void refreshCapabilityPolicies()}
@@ -6690,11 +6712,15 @@ function CapabilityPolicyPanel({
   workspaceOverrides,
   workspaceScopeRules,
   workspacePolicyProfiles,
+  workspacePolicyBundle,
+  workspacePolicyBundleLoading,
+  workspacePolicyBundleError,
   onWorkspaceOverrideChange,
   onWorkspaceScopeRulesChange,
   onWorkspacePolicyProfilesChange,
   onWorkspacePresetApply,
   onWorkspacePolicyImport,
+  onWorkspacePolicyBundleReload,
   loading,
   error,
   onRefresh
@@ -6706,11 +6732,15 @@ function CapabilityPolicyPanel({
   workspaceOverrides: WorkspaceCapabilityPolicyOverrides;
   workspaceScopeRules: WorkspaceScopePolicyRules;
   workspacePolicyProfiles: WorkspacePolicyProfiles;
+  workspacePolicyBundle: WorkspacePolicyBundleResult | null;
+  workspacePolicyBundleLoading: boolean;
+  workspacePolicyBundleError: string | null;
   onWorkspaceOverrideChange: (capability: WorkspacePolicyCapability, override: CapabilityPolicyOverrideEffect | "inherit") => void;
   onWorkspaceScopeRulesChange: (rules: WorkspaceScopePolicyRules) => void;
   onWorkspacePolicyProfilesChange: (profiles: WorkspacePolicyProfiles) => void;
   onWorkspacePresetApply: (preset: WorkspacePolicyPreset) => void;
   onWorkspacePolicyImport: (policy: WorkspacePolicyTransferPayload) => void;
+  onWorkspacePolicyBundleReload: () => void;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
@@ -6719,6 +6749,8 @@ function CapabilityPolicyPanel({
   const [selectedProfileName, setSelectedProfileName] = useState("");
   const [profileStatus, setProfileStatus] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [teamBundleStatus, setTeamBundleStatus] = useState<string | null>(null);
+  const [teamBundleError, setTeamBundleError] = useState<string | null>(null);
   const [transferText, setTransferText] = useState("");
   const [transferStatus, setTransferStatus] = useState<string | null>(null);
   const [transferError, setTransferError] = useState<string | null>(null);
@@ -6729,6 +6761,26 @@ function CapabilityPolicyPanel({
   const activePresetId = WORKSPACE_POLICY_PRESETS.find((preset) =>
     workspacePolicyPresetMatches(preset, workspaceOverrides, workspaceScopeRules)
   )?.id;
+  const teamBundle = workspacePolicyBundle?.bundle ?? null;
+  const teamBundleProblem = workspacePolicyBundleError ?? workspacePolicyBundle?.error ?? null;
+
+  function reloadWorkspacePolicyBundle() {
+    setTeamBundleStatus(null);
+    setTeamBundleError(null);
+    onWorkspacePolicyBundleReload();
+  }
+
+  function applyWorkspacePolicyBundle() {
+    setTeamBundleStatus(null);
+    setTeamBundleError(null);
+    if (!teamBundle) {
+      setTeamBundleError(teamBundleProblem || `No team bundle found at ${WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH}.`);
+      return;
+    }
+    const policy = workspacePolicyTransferPayload(teamBundle.overrides, teamBundle.scopeRules);
+    onWorkspacePolicyImport(policy);
+    setTeamBundleStatus(`Applied "${teamBundle.name}". Save settings to persist workspace changes.`);
+  }
 
   function saveWorkspacePolicyProfile() {
     const name = normalizeWorkspacePolicyProfileName(profileName);
@@ -6852,6 +6904,35 @@ function CapabilityPolicyPanel({
               </button>
             );
           })}
+        </div>
+        <div className={`workspace-policy-team-bundle${teamBundleProblem ? " has-error" : teamBundle ? " has-bundle" : ""}`}>
+          <div className="workspace-policy-team-copy">
+            <strong>Team bundle</strong>
+            <small title={workspacePolicyBundle?.path ?? WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH}>
+              {workspacePolicyBundleLoading
+                ? "Checking workspace bundle"
+                : teamBundle
+                  ? `${teamBundle.name} · ${workspacePolicyBundle?.path ?? teamBundle.sourcePath}`
+                  : teamBundleProblem
+                    ? `Invalid ${WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH}`
+                    : `No ${WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH}`}
+            </small>
+            {teamBundle?.description ? <p>{teamBundle.description}</p> : null}
+          </div>
+          <div className="workspace-policy-team-actions">
+            <button className="secondary-command" type="button" onClick={reloadWorkspacePolicyBundle} disabled={workspacePolicyBundleLoading}>
+              <RefreshCw size={14} />
+              {workspacePolicyBundleLoading ? "Checking" : "Reload"}
+            </button>
+            <button className="secondary-command" type="button" onClick={applyWorkspacePolicyBundle} disabled={!teamBundle}>
+              <FileText size={14} />
+              Apply
+            </button>
+          </div>
+          {teamBundleStatus ? <small className="workspace-policy-team-status">{teamBundleStatus}</small> : null}
+          {teamBundleProblem || teamBundleError ? (
+            <small className="workspace-policy-team-error">{teamBundleError ?? teamBundleProblem}</small>
+          ) : null}
         </div>
         <div className="workspace-policy-profiles">
           <div className="workspace-policy-profile-save">

@@ -21,6 +21,7 @@ const desktopApi = {
   runDoctor: (patch: unknown) => ipcRenderer.invoke("doctor:run", patch),
   listTools: () => ipcRenderer.invoke("tools:list"),
   listCapabilityPolicies: () => ipcRenderer.invoke("policy:list"),
+  readWorkspacePolicyBundle: () => ipcRenderer.invoke("policy:readWorkspaceBundle"),
   listSkills: () => ipcRenderer.invoke("skills:list"),
   createSkill: (input: unknown) => ipcRenderer.invoke("skills:create", input),
   listTaskWorktrees: () => ipcRenderer.invoke("agent:listTaskWorktrees"),
