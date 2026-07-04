@@ -1,4 +1,10 @@
-import type { AgentTaskRun, AgentTaskRunPlanItemStatus, AgentTaskRunPlanReviewStatus, AgentTaskRunVerificationStatus } from "./types.js";
+import type {
+  AgentTaskRun,
+  AgentTaskRunPlanItemStatus,
+  AgentTaskRunPlanReviewStatus,
+  AgentTaskRunVerificationStatus,
+  AgentTaskRunWorktreePullRequestCheckItem
+} from "./types.js";
 
 export type AgentTaskRunChangeSummary = {
   pathCount: number;
@@ -72,6 +78,8 @@ export type AgentTaskRunPlanCompletionNote = {
   status: AgentTaskRunPlanCompletionStatus;
   matchedPaths: string[];
   matchedCommands: string[];
+  matchedReports: string[];
+  matchedChecks: string[];
   matchedCompletionNotes: string[];
   evidence: string[];
 };
@@ -343,6 +351,8 @@ function buildPlanCompletionReview(
       status,
       matchedPaths: matches.paths,
       matchedCommands: matches.commands,
+      matchedReports: matches.reports,
+      matchedChecks: matches.checks,
       matchedCompletionNotes: matches.completionNotes,
       evidence: planCompletionNoteEvidence(runEvidence, matches, baseStatus)
     };
@@ -378,6 +388,8 @@ function planCompletionItemStatus(
   matches: {
     paths: string[];
     commands: string[];
+    reports: string[];
+    checks: string[];
     completionNotes: string[];
     completionStatus?: NonNullable<AgentTaskRun["completion"]>["items"][number]["status"];
   }
@@ -391,7 +403,13 @@ function planCompletionItemStatus(
   if (matches.completionStatus === "needs_followup") {
     return "needs_evidence";
   }
-  return matches.paths.length > 0 || matches.commands.length > 0 || matches.completionNotes.length > 0 ? "supported" : "needs_evidence";
+  return matches.paths.length > 0 ||
+    matches.commands.length > 0 ||
+    matches.reports.length > 0 ||
+    matches.checks.length > 0 ||
+    matches.completionNotes.length > 0
+    ? "supported"
+    : "needs_evidence";
 }
 
 function planCompletionOverallStatus(
@@ -426,12 +444,12 @@ function planCompletionSummary(
   }
   const supportedCount = notes.filter((note) => note.status === "supported").length;
   if (status === "supported") {
-    return "All planned steps have item-specific file or command evidence, verification passed, and a patch preview is ready.";
+    return "All planned steps have item-specific evidence, verification passed, and a patch preview is ready.";
   }
   if (supportedCount > 0) {
-    return `${supportedCount}/${notes.length} planned step${notes.length === 1 ? "" : "s"} have item-specific file or command evidence. Remaining steps need a matching file or command before close-out.`;
+    return `${supportedCount}/${notes.length} planned step${notes.length === 1 ? "" : "s"} have item-specific evidence. Remaining steps need matching file, command, report, check, or completion-note evidence before close-out.`;
   }
-  return "Verification passed and the patch preview is ready, but no planned step has item-specific file or command evidence yet.";
+  return "Verification passed and the patch preview is ready, but no planned step has item-specific evidence yet.";
 }
 
 function planCompletionEvidence(run: AgentTaskRun, changeSummary: AgentTaskRunChangeSummary, patchPreviewReady: boolean) {
@@ -459,7 +477,7 @@ function planCompletionEvidence(run: AgentTaskRun, changeSummary: AgentTaskRunCh
 
 function planCompletionNoteEvidence(
   runEvidence: string[],
-  matches: { paths: string[]; commands: string[]; completionNotes: string[] },
+  matches: { paths: string[]; commands: string[]; reports: string[]; checks: string[]; completionNotes: string[] },
   baseStatus: AgentTaskRunPlanCompletionStatus
 ) {
   const evidence = [...runEvidence];
@@ -469,6 +487,12 @@ function planCompletionNoteEvidence(
   if (matches.commands.length > 0) {
     evidence.push(`${matches.commands.length === 1 ? "Matched command" : "Matched commands"}: ${matches.commands.slice(0, 2).join(", ")}`);
   }
+  if (matches.reports.length > 0) {
+    evidence.push(`${matches.reports.length === 1 ? "Matched report" : "Matched reports"}: ${matches.reports.slice(0, 2).join(", ")}`);
+  }
+  if (matches.checks.length > 0) {
+    evidence.push(`${matches.checks.length === 1 ? "Matched PR check" : "Matched PR checks"}: ${matches.checks.slice(0, 2).join(", ")}`);
+  }
   if (matches.completionNotes.length > 0) {
     evidence.push(
       `${matches.completionNotes.length === 1 ? "Assistant completion note" : "Assistant completion notes"}: ${matches.completionNotes
@@ -476,8 +500,15 @@ function planCompletionNoteEvidence(
         .join(", ")}`
     );
   }
-  if (baseStatus === "supported" && matches.paths.length === 0 && matches.commands.length === 0 && matches.completionNotes.length === 0) {
-    evidence.push("No item-specific file, command, or completion note match yet");
+  if (
+    baseStatus === "supported" &&
+    matches.paths.length === 0 &&
+    matches.commands.length === 0 &&
+    matches.reports.length === 0 &&
+    matches.checks.length === 0 &&
+    matches.completionNotes.length === 0
+  ) {
+    evidence.push("No item-specific file, command, report, check, or completion note match yet");
   }
   return evidence;
 }
@@ -485,7 +516,7 @@ function planCompletionNoteEvidence(
 function matchPlanItemEvidence(itemText: string, run: AgentTaskRun, changeSummary: AgentTaskRunChangeSummary) {
   const itemTokens = planEvidenceTokens(itemText);
   if (itemTokens.length === 0) {
-    return { paths: [], commands: [], completionNotes: [] };
+    return { paths: [], commands: [], reports: [], checks: [], completionNotes: [] };
   }
 
   const paths = changeSummary.paths.filter((changedPath) => evidenceTextMatches(itemTokens, changedPath)).slice(0, 4);
@@ -495,11 +526,22 @@ function matchPlanItemEvidence(itemText: string, run: AgentTaskRun, changeSummar
     .map((artifact) => truncateEvidenceLabel(artifact.command ?? artifact.title))
     .filter((command): command is string => Boolean(command))
     .slice(0, 3);
+  const reports = run.artifacts
+    .filter((artifact) => artifact.kind === "command_output")
+    .flatMap((artifact) => reportEvidenceCandidates(artifact))
+    .filter((candidate) => evidenceTextMatches(itemTokens, candidate.text))
+    .map((candidate) => candidate.label)
+    .slice(0, 3);
+  const checks = (run.worktree?.pullRequest?.review?.checkItems ?? [])
+    .filter((check) => evidenceTextMatches(itemTokens, pullRequestCheckEvidenceText(check)))
+    .map((check) => truncateEvidenceLabel(`${check.name}: ${check.bucket}`))
+    .filter((check): check is string => Boolean(check))
+    .slice(0, 3);
   const completionItems = (run.completion?.items ?? []).filter((item) => evidenceTextMatches(itemTokens, item.text)).slice(0, 3);
   const completionNotes = completionItems.map((item) => truncateEvidenceLabel(item.text)).filter((note): note is string => Boolean(note));
   const completionStatus = completionStatusFromItems(completionItems);
 
-  return { paths, commands, completionNotes, completionStatus };
+  return { paths, commands, reports, checks, completionNotes, completionStatus };
 }
 
 function completionStatusFromItems(
@@ -518,16 +560,28 @@ function completionStatusFromItems(
 }
 
 function commandEvidenceText(artifact: AgentTaskRun["artifacts"][number]) {
-  const reportText = (artifact.testReports ?? [])
-    .flatMap((report) => [
-      report.path,
-      report.summary,
-      ...(report.failedTests ?? []).flatMap((test) => [test.name, test.classname, test.file]),
-      ...(report.findingDetails ?? []).flatMap((finding) => [finding.ruleId, finding.message, finding.path])
-    ])
-    .filter((part): part is string => Boolean(part))
-    .join(" ");
-  return [artifact.command, artifact.title, artifact.summary, ...(artifact.reportPaths ?? []), reportText].filter(Boolean).join(" ");
+  return [artifact.command, artifact.title, artifact.summary, ...(artifact.reportPaths ?? [])].filter(Boolean).join(" ");
+}
+
+function reportEvidenceCandidates(artifact: AgentTaskRun["artifacts"][number]) {
+  return (artifact.testReports ?? [])
+    .map((report) => {
+      const details = [
+        report.path,
+        report.summary,
+        ...(report.failedTests ?? []).flatMap((test) => [test.name, test.classname, test.file, test.message]),
+        ...(report.findingDetails ?? []).flatMap((finding) => [finding.ruleId, finding.message, finding.path])
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join(" ");
+      const label = truncateEvidenceLabel(`${report.path}: ${report.summary}`);
+      return label ? { label, text: details } : undefined;
+    })
+    .filter((candidate): candidate is { label: string; text: string } => Boolean(candidate));
+}
+
+function pullRequestCheckEvidenceText(check: AgentTaskRunWorktreePullRequestCheckItem) {
+  return [check.name, check.bucket, check.status, check.conclusion, check.state, check.detailsUrl].filter(Boolean).join(" ");
 }
 
 function evidenceTextMatches(itemTokens: string[], sourceText: string) {

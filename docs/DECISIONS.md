@@ -461,3 +461,9 @@ Reason: post-success patch/file-change artifacts are not enough for a harness re
 Decision: created-PR refresh snapshots now preserve a bounded, actionability-sorted list of named status checks from GitHub's `statusCheckRollup`. Activity renders the check evidence on the PR card, copied task-run audits summarize it, and Review PR continuation prompts include the named failed/pending/cancelled/unknown checks beside review comments.
 
 Reason: check counts alone tell the user that CI is failing, but not which check the agent should inspect or rerun. Storing a small check evidence list keeps PR handoff prompts actionable without fetching or persisting full CI logs.
+
+## 2026-07-04: Plan close-out matches report and PR-check evidence
+
+Decision: Approved-plan source reviews now treat parsed JUnit/SARIF report details and refreshed PR check items as item-specific plan evidence. The derived completion notes expose matched reports and checks separately from changed files, shell commands, and assistant-authored completion bullets, and a step can be marked supported when those richer artifacts conservatively match the plan item.
+
+Reason: a plan item is often proven by the test or CI evidence, not by the exact shell command text. Separating reports and PR checks makes Activity close-out clearer and keeps plan review moving toward evidence-based workflow state instead of relying only on filenames or final prose.

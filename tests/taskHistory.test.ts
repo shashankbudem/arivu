@@ -196,6 +196,8 @@ describe("task history helpers", () => {
         status: "blocked",
         matchedPaths: [],
         matchedCommands: [],
+        matchedReports: [],
+        matchedChecks: [],
         matchedCompletionNotes: [],
         evidence: ["Verification failed: Verification failed.", "1 changed file recorded", "Patch preview ready"]
       },
@@ -205,6 +207,8 @@ describe("task history helpers", () => {
         status: "blocked",
         matchedPaths: [],
         matchedCommands: [],
+        matchedReports: [],
+        matchedChecks: [],
         matchedCompletionNotes: [],
         evidence: ["Verification failed: Verification failed.", "1 changed file recorded", "Patch preview ready"]
       }
@@ -256,7 +260,7 @@ describe("task history helpers", () => {
 
     expect(review).toMatchObject({
       completionStatus: "supported",
-      completionSummary: "All planned steps have item-specific file or command evidence, verification passed, and a patch preview is ready."
+      completionSummary: "All planned steps have item-specific evidence, verification passed, and a patch preview is ready."
     });
     expect(review?.completionNotes.map((note) => note.status)).toEqual(["supported", "supported"]);
     expect(review?.completionNotes[0].matchedPaths).toEqual(["desktop/main/browserTabs.ts", "desktop/renderer/src/BrowserTabControls.tsx"]);
@@ -322,12 +326,109 @@ describe("task history helpers", () => {
 
     expect(review?.completionStatus).toBe("needs_evidence");
     expect(review?.completionSummary).toBe(
-      "1/2 planned steps have item-specific file or command evidence. Remaining steps need a matching file or command before close-out."
+      "1/2 planned steps have item-specific evidence. Remaining steps need matching file, command, report, check, or completion-note evidence before close-out."
     );
     expect(review?.completionNotes.map((note) => note.status)).toEqual(["supported", "needs_evidence"]);
     expect(review?.completionNotes[0].matchedPaths).toEqual(["src/agent/taskHistory.ts"]);
     expect(review?.completionNotes[0].matchedCommands).toEqual(["npm test -- tests/taskHistory.test.ts"]);
-    expect(review?.completionNotes[1].evidence).toContain("No item-specific file, command, or completion note match yet");
+    expect(review?.completionNotes[1].evidence).toContain("No item-specific file, command, report, check, or completion note match yet");
+  });
+
+  it("uses parsed reports and PR checks as item-specific plan evidence", () => {
+    const source = taskRun({
+      id: "run-plan",
+      planMode: { enabled: true },
+      planReview: {
+        status: "approved",
+        updatedAt: "2026-06-27T00:01:00.000Z"
+      },
+      plan: {
+        items: [
+          { text: "Repair checkout flow test", status: "pending" },
+          { text: "Satisfy lint check", status: "pending" }
+        ],
+        updatedAt: "2026-06-27T00:00:30.000Z"
+      }
+    });
+    const worktreeRun = taskRun({
+      id: "run-worktree",
+      worktree: {
+        enabled: true,
+        status: "ready",
+        plannedFromTaskRunId: "run-plan",
+        diff: {
+          hasChanges: true,
+          files: 1,
+          changedPaths: ["src/checkout.ts"],
+          updatedAt: "2026-06-27T00:03:00.000Z"
+        },
+        patchPreview: {
+          text: "diff --git a/src/checkout.ts b/src/checkout.ts\n",
+          bytes: 68,
+          lineCount: 1,
+          truncated: false,
+          updatedAt: "2026-06-27T00:03:30.000Z"
+        },
+        pullRequest: {
+          title: "Fix checkout",
+          body: "Fix checkout",
+          branch: "arivu/task-checkout",
+          commit: "abc123",
+          preparedAt: "2026-06-27T00:04:00.000Z",
+          review: {
+            checkSummary: "2 checks: 2 passed",
+            checks: {
+              total: 2,
+              passed: 2,
+              failed: 0,
+              pending: 0,
+              skipped: 0,
+              cancelled: 0,
+              unknown: 0
+            },
+            checkItems: [{ name: "lint", bucket: "passed", status: "COMPLETED", conclusion: "SUCCESS" }],
+            summary: "checks passed",
+            updatedAt: "2026-06-27T00:05:00.000Z"
+          }
+        }
+      },
+      artifacts: [
+        {
+          id: "command",
+          kind: "command_output",
+          title: "Command output",
+          command: "npm run verify -- --reporter=junit",
+          exitCode: 0,
+          testReports: [
+            {
+              kind: "junit",
+              path: "reports/junit.xml",
+              summary: "1 failed test before repair: CheckoutFlowTest",
+              status: "passed",
+              failedTests: [
+                {
+                  name: "CheckoutFlowTest handles empty carts",
+                  classname: "CheckoutFlowTest",
+                  file: "src/checkout.test.ts"
+                }
+              ]
+            }
+          ],
+          createdAt: "2026-06-27T00:04:00.000Z"
+        }
+      ],
+      verification: verification("passed")
+    });
+
+    const review = buildTaskRunPlanSourceReview(worktreeRun, source);
+
+    expect(review?.completionStatus).toBe("supported");
+    expect(review?.completionNotes.map((note) => note.status)).toEqual(["supported", "supported"]);
+    expect(review?.completionNotes[0].matchedReports).toEqual(["reports/junit.xml: 1 failed test before repair: CheckoutFlowTest"]);
+    expect(review?.completionNotes[0].matchedCommands).toEqual([]);
+    expect(review?.completionNotes[0].evidence).toContain("Matched report: reports/junit.xml: 1 failed test before repair: CheckoutFlowTest");
+    expect(review?.completionNotes[1].matchedChecks).toEqual(["lint: passed"]);
+    expect(review?.completionNotes[1].evidence).toContain("Matched PR check: lint: passed");
   });
 
   it("uses assistant-authored completion notes as item-specific plan evidence", () => {
