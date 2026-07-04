@@ -254,6 +254,13 @@ const AgentTaskRunWorktreePullRequestCheckItemSchema = z.object({
   completedAt: z.string().optional()
 });
 
+const AgentTaskRunWorktreePullRequestReviewNotificationSchema = z.object({
+  level: z.enum(["info", "success", "warning"]),
+  summary: z.string(),
+  detail: z.string().optional(),
+  createdAt: z.string()
+});
+
 const AgentTaskRunWorktreePullRequestReviewSchema = z.object({
   state: z.string().optional(),
   isDraft: z.boolean().optional(),
@@ -270,6 +277,7 @@ const AgentTaskRunWorktreePullRequestReviewSchema = z.object({
     unknown: z.number().int().min(0)
   }),
   checkItems: z.array(AgentTaskRunWorktreePullRequestCheckItemSchema).optional(),
+  notifications: z.array(AgentTaskRunWorktreePullRequestReviewNotificationSchema).optional(),
   summary: z.string(),
   feedback: AgentTaskRunWorktreePullRequestFeedbackSchema.optional(),
   updatedAt: z.string()

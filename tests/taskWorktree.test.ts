@@ -684,6 +684,142 @@ describe("task worktrees", () => {
     });
   });
 
+  it("records pull request refresh changes and preserves fetched check log evidence", async () => {
+    const worktreesRoot = path.join(tempDir, "worktrees");
+    const worktreePath = path.join(worktreesRoot, "session-1", "run-refresh-pr-changes");
+    await mkdir(worktreePath, { recursive: true });
+    const worktree: AgentTaskRunWorktree = {
+      enabled: true,
+      status: "ready",
+      originalRoot: path.join(tempDir, "repo"),
+      path: worktreePath,
+      branch: "arivu/task-refresh",
+      pullRequest: {
+        title: "Arivu: Refresh PR",
+        body: "Summary",
+        branch: "arivu/task-refresh",
+        commit: "abc123",
+        preparedAt: "2026-06-24T00:00:00.000Z",
+        createdAt: "2026-06-24T00:01:00.000Z",
+        url: "https://github.com/acme/repo/pull/42",
+        review: {
+          state: "OPEN",
+          isDraft: true,
+          reviewDecision: "REVIEW_REQUIRED",
+          mergeStateStatus: "UNKNOWN",
+          checkSummary: "2 checks: 1 failed, 1 pending",
+          checks: { total: 2, passed: 0, failed: 1, pending: 1, skipped: 0, cancelled: 0, unknown: 0 },
+          checkItems: [
+            {
+              name: "lint",
+              bucket: "failed",
+              status: "COMPLETED",
+              conclusion: "FAILURE",
+              detailsUrl: "https://github.com/acme/repo/actions/runs/123456/job/7890",
+              logCommand: "gh run view '123456' --repo 'acme/repo' --job '7890' --log-failed",
+              logArtifactId: "pr-check-log:lint:123456:7890:command_output",
+              logFetchedAt: "2026-07-01T00:01:00.000Z"
+            },
+            {
+              name: "deploy",
+              bucket: "pending",
+              state: "PENDING",
+              detailsUrl: "https://ci.example/deploy"
+            }
+          ],
+          summary: "Draft - review review required - merge unknown - 2 checks: 1 failed, 1 pending - No review comments reported",
+          feedback: {
+            total: 0,
+            comments: 0,
+            reviews: 0,
+            threads: 0,
+            unresolvedThreads: 0,
+            resolvedThreads: 0,
+            changesRequested: 0,
+            approved: 0,
+            commented: 0,
+            summary: "No review comments reported",
+            items: []
+          },
+          updatedAt: "2026-07-01T00:00:00.000Z"
+        }
+      }
+    };
+
+    const refreshed = await refreshTaskWorktreePullRequest(worktree, {
+      worktreesRoot,
+      now: "2026-07-01T00:02:00.000Z",
+      commandRunner: async (_file, args) => {
+        if (args[0] === "api") {
+          return {
+            stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }),
+            stderr: "",
+            exitCode: 0
+          };
+        }
+        return {
+          stdout: JSON.stringify({
+            state: "OPEN",
+            isDraft: false,
+            reviewDecision: "CHANGES_REQUESTED",
+            mergeStateStatus: "BLOCKED",
+            statusCheckRollup: [
+              {
+                __typename: "CheckRun",
+                name: "lint",
+                status: "COMPLETED",
+                conclusion: "FAILURE",
+                detailsUrl: "https://github.com/acme/repo/actions/runs/123456/job/7890"
+              },
+              {
+                __typename: "StatusContext",
+                context: "deploy",
+                state: "FAILURE",
+                targetUrl: "https://ci.example/deploy"
+              }
+            ],
+            comments: [],
+            reviews: [
+              {
+                author: { login: "reviewer-two" },
+                state: "CHANGES_REQUESTED",
+                body: "Please fix deploy.",
+                submittedAt: "2026-07-01T00:01:30.000Z"
+              }
+            ]
+          }),
+          stderr: "",
+          exitCode: 0
+        };
+      }
+    });
+
+    expect(refreshed.pullRequest?.review?.checkItems).toMatchObject([
+      {
+        name: "deploy",
+        bucket: "failed"
+      },
+      {
+        name: "lint",
+        bucket: "failed",
+        logArtifactId: "pr-check-log:lint:123456:7890:command_output",
+        logFetchedAt: "2026-07-01T00:01:00.000Z"
+      }
+    ]);
+    expect(refreshed.pullRequest?.review?.notifications).toMatchObject([
+      { level: "success", summary: "PR is ready for review", detail: "was draft" },
+      { level: "warning", summary: "Review decision changed", detail: "review required -> changes requested" },
+      { level: "warning", summary: "Merge state changed", detail: "unknown -> blocked" },
+      { level: "warning", summary: "Check deploy changed", detail: "pending -> failed" },
+      { level: "warning", summary: "Check summary changed", detail: "2 checks: 1 failed, 1 pending -> 2 checks: 2 failed" },
+      {
+        level: "warning",
+        summary: "Review feedback changed",
+        detail: "No review comments reported -> Review feedback: 1 review, 1 changes requested"
+      }
+    ]);
+  });
+
   it("keeps pull request refresh usable when review thread lookup fails", async () => {
     const worktreesRoot = path.join(tempDir, "worktrees");
     const worktreePath = path.join(worktreesRoot, "session-1", "run-refresh-pr-thread-failure");

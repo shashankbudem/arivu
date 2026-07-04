@@ -580,6 +580,14 @@ describe("report remediation prompts", () => {
                 detailsUrl: "https://ci.example/deploy"
               }
             ],
+            notifications: [
+              {
+                level: "warning",
+                summary: "Review decision changed",
+                detail: "review required -> changes requested",
+                createdAt: "2026-06-27T00:06:00.000Z"
+              }
+            ],
             summary: "Open draft PR has changes requested and 1 failed check.",
             feedback: {
               total: 3,
@@ -669,6 +677,8 @@ describe("report remediation prompts", () => {
     expect(prompt).toContain("Merge state: BLOCKED");
     expect(prompt).toContain("Checks: 3 checks: 1 passed, 1 failed, 1 pending");
     expect(prompt).toContain("Check counts: 1 passed, 1 failed, 1 pending");
+    expect(prompt).toContain("Recent PR updates");
+    expect(prompt).toContain("warning: Review decision changed (review required -> changes requested)");
     expect(prompt).toContain("Check evidence");
     expect(prompt).toContain(
       "lint: failed, conclusion FAILURE, status COMPLETED (details https://github.com/example/repo/actions/runs/123456/job/7890; logs `gh run view '123456' --repo 'example/repo' --job '7890' --log-failed`; saved log artifact `pr-check-log:lint:123456:7890:command_output`)"

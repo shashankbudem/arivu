@@ -129,6 +129,14 @@ describe("session store", () => {
                     logError: "Exit code 1"
                   }
                 ],
+                notifications: [
+                  {
+                    level: "warning",
+                    summary: "Review decision changed",
+                    detail: "review required -> changes requested",
+                    createdAt: "2026-01-01T00:02:40.000Z"
+                  }
+                ],
                 summary: "1 failed check.",
                 updatedAt: "2026-01-01T00:02:40.000Z"
               }
@@ -267,6 +275,14 @@ describe("session store", () => {
                     logArtifactId: "pr-check-log:lint:123456:7890:command_output",
                     logFetchedAt: "2026-01-01T00:02:45.000Z",
                     logError: "Exit code 1"
+                  }
+                ],
+                notifications: [
+                  {
+                    level: "warning",
+                    summary: "Review decision changed",
+                    detail: "review required -> changes requested",
+                    createdAt: "2026-01-01T00:02:40.000Z"
                   }
                 ]
               }

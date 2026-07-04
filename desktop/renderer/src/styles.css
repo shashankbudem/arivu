@@ -3067,6 +3067,69 @@ body.is-resizing .panel-resize-handle::after {
   color: #f0d77d;
 }
 
+.task-worktree-pr-notifications {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid rgb(232 197 99 / 0.16);
+  border-radius: 6px;
+  background: rgb(232 197 99 / 0.055);
+}
+
+.task-worktree-pr-notifications ul {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-worktree-pr-notifications li {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 5px;
+  background: rgb(17 16 15 / 0.52);
+}
+
+.task-worktree-pr-notifications li.warning {
+  border: 1px solid rgb(237 117 100 / 0.22);
+}
+
+.task-worktree-pr-notifications li.success {
+  border: 1px solid rgb(43 191 159 / 0.22);
+}
+
+.task-worktree-pr-notifications li > span {
+  min-width: 0;
+  overflow: hidden;
+  color: #e6c96b;
+  font-size: 9px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-worktree-pr-notifications li.warning > span {
+  color: #ffc4bc;
+}
+
+.task-worktree-pr-notifications li.success > span {
+  color: #9ce4d5;
+}
+
+.task-worktree-pr-notifications p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #dcd7ce;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
 .task-worktree-pr-feedback {
   min-width: 0;
   display: grid;
@@ -7125,6 +7188,39 @@ html[data-theme="light"] .task-worktree-pr-readiness.waiting {
 
 html[data-theme="light"] .task-worktree-pr-readiness.waiting strong {
   color: #926c08;
+}
+
+html[data-theme="light"] .task-worktree-pr-notifications {
+  border-color: rgb(183 139 24 / 0.24);
+  background: rgb(183 139 24 / 0.07);
+}
+
+html[data-theme="light"] .task-worktree-pr-notifications li {
+  background: #f5efe5;
+}
+
+html[data-theme="light"] .task-worktree-pr-notifications li.warning {
+  border-color: rgb(198 70 55 / 0.26);
+}
+
+html[data-theme="light"] .task-worktree-pr-notifications li.success {
+  border-color: rgb(28 168 137 / 0.26);
+}
+
+html[data-theme="light"] .task-worktree-pr-notifications li > span {
+  color: #926c08;
+}
+
+html[data-theme="light"] .task-worktree-pr-notifications li.warning > span {
+  color: #a93b2f;
+}
+
+html[data-theme="light"] .task-worktree-pr-notifications li.success > span {
+  color: #0f6f5c;
+}
+
+html[data-theme="light"] .task-worktree-pr-notifications p {
+  color: #211b14;
 }
 
 html[data-theme="light"] .task-worktree-pr-feedback {

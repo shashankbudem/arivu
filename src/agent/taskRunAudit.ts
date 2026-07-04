@@ -284,6 +284,14 @@ function worktreeLines(run: AgentTaskRun) {
     lines.push(`- PR: ${worktree.pullRequest.url ?? "not created"} (${worktree.pullRequest.title})`);
     if (worktree.pullRequest.review) {
       lines.push(`- PR review: ${inlineText(worktree.pullRequest.review.summary)}`);
+      const notifications = worktree.pullRequest.review.notifications ?? [];
+      if (notifications.length > 0) {
+        lines.push(
+          `- PR updates: ${inlineText(
+            notifications.map((item) => `${item.level} ${item.summary}${item.detail ? ` (${item.detail})` : ""}`).join("; ")
+          )}`
+        );
+      }
       const checkItems = worktree.pullRequest.review.checkItems ?? [];
       if (checkItems.length > 0) {
         lines.push(

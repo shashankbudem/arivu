@@ -122,6 +122,14 @@ describe("task run audit summaries", () => {
               logArtifactId: "pr-check-log:lint:123456:7890:command_output"
             }
           ],
+          notifications: [
+            {
+              level: "warning",
+              summary: "Review decision changed",
+              detail: "review required -> changes requested",
+              createdAt: "2026-01-01T00:04:00.000Z"
+            }
+          ],
           summary: "Ready to merge",
           updatedAt: "2026-01-01T00:04:00.000Z"
         }
@@ -136,6 +144,7 @@ describe("task run audit summaries", () => {
     expect(audit).toContain("- Patch preview: 12 lines");
     expect(audit).toContain("- PR: https://github.com/example/repo/pull/1 (Ship harness change)");
     expect(audit).toContain("- PR review: Ready to merge");
+    expect(audit).toContain("- PR updates: warning Review decision changed (review required -> changes requested)");
     expect(audit).toContain(
       "- PR check evidence: lint failed logs gh run view '123456' --repo 'example/repo' --job '7890' --log-failed artifact pr-check-log:lint:123456:7890:command_output"
     );

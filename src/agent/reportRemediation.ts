@@ -301,6 +301,12 @@ function formatPullRequestReviewEvidence(review: AgentTaskRunWorktreePullRequest
     review.mergeStateStatus ? `- Merge state: ${review.mergeStateStatus}` : undefined,
     `- Checks: ${review.checkSummary}`,
     `- Check counts: ${counts.passed} passed, ${counts.failed} failed, ${counts.pending} pending, ${counts.skipped} skipped, ${counts.cancelled} cancelled, ${counts.unknown} unknown, ${counts.total} total`,
+    ...(review.notifications?.length
+      ? [
+          "- Recent PR updates:",
+          ...review.notifications.map((item) => `  - ${item.level}: ${item.summary}${item.detail ? ` (${item.detail})` : ""}`)
+        ]
+      : []),
     ...(review.checkItems?.length
       ? [
           "- Check evidence:",

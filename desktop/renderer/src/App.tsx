@@ -17,6 +17,7 @@ import remarkGfm from "remark-gfm";
 import {
   Activity,
   AlertTriangle,
+  Bell,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -5497,6 +5498,7 @@ function TaskWorktreePullRequestReview({ review }: { review: AgentTaskRunWorktre
         <span>{formatDateTime(review.updatedAt)}</span>
       </div>
       <TaskWorktreePullRequestReadiness readiness={readiness} />
+      {review.notifications?.length ? <TaskWorktreePullRequestNotifications items={review.notifications} /> : null}
       {review.checkItems?.length ? <TaskWorktreePullRequestChecks items={review.checkItems} /> : null}
       {review.feedback ? <TaskWorktreePullRequestFeedback feedback={review.feedback} /> : null}
     </div>
@@ -5509,6 +5511,25 @@ function TaskWorktreePullRequestReadiness({ readiness }: { readiness: AgentTaskR
       {pullRequestReadinessIcon(readiness.status)}
       <strong>{readiness.label}</strong>
       <span>{readiness.summary}</span>
+    </div>
+  );
+}
+
+function TaskWorktreePullRequestNotifications({ items }: { items: AgentTaskRunWorktreePullRequestReviewNotification[] }) {
+  return (
+    <div className="task-worktree-pr-notifications">
+      <div className="task-worktree-pr-feedback-heading">
+        <Bell size={12} />
+        <strong>PR updates</strong>
+      </div>
+      <ul>
+        {items.map((item, index) => (
+          <li key={`${item.summary}-${item.detail ?? ""}-${item.createdAt}-${index}`} className={item.level}>
+            <span>{item.summary}</span>
+            {item.detail ? <p>{item.detail}</p> : null}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

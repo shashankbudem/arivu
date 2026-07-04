@@ -13,12 +13,14 @@ import type {
   AgentTaskRunWorktreePullRequestFeedback,
   AgentTaskRunWorktreePullRequestFeedbackItem,
   AgentTaskRunWorktreePullRequestCheckItem,
-  AgentTaskRunWorktreePullRequestReview
+  AgentTaskRunWorktreePullRequestReview,
+  AgentTaskRunWorktreePullRequestReviewNotification
 } from "./types.js";
 
 export const DEFAULT_TASK_WORKTREE_PATCH_PREVIEW_BYTES = 80_000;
 const MAX_PULL_REQUEST_FEEDBACK_ITEMS = 5;
 const MAX_PULL_REQUEST_CHECK_ITEMS = 8;
+const MAX_PULL_REQUEST_REVIEW_NOTIFICATIONS = 8;
 const MAX_PULL_REQUEST_FEEDBACK_BODY_CHARS = 240;
 const MAX_PULL_REQUEST_REVIEW_THREADS = 20;
 const PULL_REQUEST_REVIEW_THREADS_QUERY = `
@@ -341,11 +343,11 @@ export async function refreshTaskWorktreePullRequest(
     { cwd: prepared.path }
   );
   const reviewThreads = await fetchPullRequestReviewThreads(pullRequest.url, prepared.path, run);
-  const review = parsePullRequestReview(
-    result.stdout,
-    options.now ?? new Date().toISOString(),
-    reviewThreads?.threads,
-    reviewThreads?.error
+  const refreshedAt = options.now ?? new Date().toISOString();
+  const review = enrichPullRequestReview(
+    pullRequest.review,
+    parsePullRequestReview(result.stdout, refreshedAt, reviewThreads?.threads, reviewThreads?.error),
+    refreshedAt
   );
   return {
     status: worktree.status,
@@ -931,6 +933,237 @@ function parsePullRequestReview(
     feedback,
     updatedAt: now
   };
+}
+
+function enrichPullRequestReview(
+  previous: AgentTaskRunWorktreePullRequestReview | undefined,
+  current: AgentTaskRunWorktreePullRequestReview,
+  now: string
+): AgentTaskRunWorktreePullRequestReview {
+  const checkItems = preservePullRequestCheckLogArtifacts(previous?.checkItems, current.checkItems);
+  const notifications = pullRequestReviewNotifications(previous, { ...current, checkItems }, now);
+  return {
+    ...current,
+    checkItems,
+    notifications: notifications.length > 0 ? notifications : undefined
+  };
+}
+
+function preservePullRequestCheckLogArtifacts(
+  previousItems: AgentTaskRunWorktreePullRequestCheckItem[] | undefined,
+  currentItems: AgentTaskRunWorktreePullRequestCheckItem[] | undefined
+) {
+  if (!currentItems?.length || !previousItems?.length) {
+    return currentItems;
+  }
+  const previousByLogCommand = new Map(
+    previousItems.filter((item) => item.logCommand).map((item) => [item.logCommand, item] as const)
+  );
+  return currentItems.map((item) => {
+    const previous = item.logCommand ? previousByLogCommand.get(item.logCommand) : undefined;
+    if (!previous?.logArtifactId && !previous?.logFetchedAt && !previous?.logError) {
+      return item;
+    }
+    return {
+      ...item,
+      logArtifactId: item.logArtifactId ?? previous.logArtifactId,
+      logFetchedAt: item.logFetchedAt ?? previous.logFetchedAt,
+      logError: item.logError ?? previous.logError
+    };
+  });
+}
+
+function pullRequestReviewNotifications(
+  previous: AgentTaskRunWorktreePullRequestReview | undefined,
+  current: AgentTaskRunWorktreePullRequestReview,
+  now: string
+): AgentTaskRunWorktreePullRequestReviewNotification[] {
+  if (!previous) {
+    return [];
+  }
+
+  const notifications: AgentTaskRunWorktreePullRequestReviewNotification[] = [];
+  addPullRequestReviewChangeNotification(notifications, now, {
+    previous: previous.state,
+    current: current.state,
+    summary: "PR state changed",
+    level: "info"
+  });
+  if (previous.isDraft !== current.isDraft && previous.isDraft !== undefined && current.isDraft !== undefined) {
+    notifications.push({
+      level: current.isDraft ? "warning" : "success",
+      summary: current.isDraft ? "PR moved back to draft" : "PR is ready for review",
+      detail: `was ${previous.isDraft ? "draft" : "ready for review"}`,
+      createdAt: now
+    });
+  }
+  addPullRequestReviewChangeNotification(notifications, now, {
+    previous: previous.reviewDecision,
+    current: current.reviewDecision,
+    summary: "Review decision changed",
+    level: reviewDecisionNotificationLevel(current.reviewDecision)
+  });
+  addPullRequestReviewChangeNotification(notifications, now, {
+    previous: previous.mergeStateStatus,
+    current: current.mergeStateStatus,
+    summary: "Merge state changed",
+    level: mergeStateNotificationLevel(current.mergeStateStatus)
+  });
+  notifications.push(...pullRequestCheckNotifications(previous.checkItems, current.checkItems, now));
+  if (previous.checkSummary !== current.checkSummary) {
+    notifications.push({
+      level: checkSummaryNotificationLevel(previous.checks, current.checks),
+      summary: "Check summary changed",
+      detail: `${previous.checkSummary} -> ${current.checkSummary}`,
+      createdAt: now
+    });
+  }
+  if (previous.feedback?.summary !== current.feedback?.summary && (previous.feedback || current.feedback)) {
+    notifications.push({
+      level: feedbackNotificationLevel(previous.feedback, current.feedback),
+      summary: "Review feedback changed",
+      detail: `${previous.feedback?.summary ?? "No review feedback"} -> ${current.feedback?.summary ?? "No review feedback"}`,
+      createdAt: now
+    });
+  }
+
+  return notifications.slice(0, MAX_PULL_REQUEST_REVIEW_NOTIFICATIONS);
+}
+
+function addPullRequestReviewChangeNotification(
+  notifications: AgentTaskRunWorktreePullRequestReviewNotification[],
+  now: string,
+  options: {
+    previous: string | undefined;
+    current: string | undefined;
+    summary: string;
+    level: AgentTaskRunWorktreePullRequestReviewNotification["level"];
+  }
+) {
+  if (normalizedOptionalToken(options.previous) === normalizedOptionalToken(options.current)) {
+    return;
+  }
+  notifications.push({
+    level: options.level,
+    summary: options.summary,
+    detail: `${formatNotificationToken(options.previous)} -> ${formatNotificationToken(options.current)}`,
+    createdAt: now
+  });
+}
+
+function pullRequestCheckNotifications(
+  previousItems: AgentTaskRunWorktreePullRequestCheckItem[] | undefined,
+  currentItems: AgentTaskRunWorktreePullRequestCheckItem[] | undefined,
+  now: string
+): AgentTaskRunWorktreePullRequestReviewNotification[] {
+  const notifications: AgentTaskRunWorktreePullRequestReviewNotification[] = [];
+  const previousByName = new Map((previousItems ?? []).map((item) => [item.name, item] as const));
+  const currentByName = new Map((currentItems ?? []).map((item) => [item.name, item] as const));
+
+  for (const item of currentItems ?? []) {
+    const previous = previousByName.get(item.name);
+    if (!previous) {
+      if (item.bucket !== "passed" && item.bucket !== "skipped") {
+        notifications.push({
+          level: checkBucketNotificationLevel(undefined, item.bucket),
+          summary: `New ${item.bucket} check: ${item.name}`,
+          createdAt: now
+        });
+      }
+      continue;
+    }
+    if (previous.bucket !== item.bucket) {
+      notifications.push({
+        level: checkBucketNotificationLevel(previous.bucket, item.bucket),
+        summary: `Check ${item.name} changed`,
+        detail: `${previous.bucket} -> ${item.bucket}`,
+        createdAt: now
+      });
+    }
+  }
+
+  for (const item of previousItems ?? []) {
+    if (currentByName.has(item.name) || (item.bucket !== "failed" && item.bucket !== "cancelled" && item.bucket !== "pending")) {
+      continue;
+    }
+    notifications.push({
+      level: item.bucket === "pending" ? "info" : "success",
+      summary: `Check no longer reported: ${item.name}`,
+      detail: `was ${item.bucket}`,
+      createdAt: now
+    });
+  }
+
+  return notifications;
+}
+
+function normalizedOptionalToken(value: string | undefined) {
+  return value ? value.trim().toUpperCase() : "";
+}
+
+function formatNotificationToken(value: string | undefined) {
+  return value ? formatPrToken(value) : "none";
+}
+
+function reviewDecisionNotificationLevel(value: string | undefined): AgentTaskRunWorktreePullRequestReviewNotification["level"] {
+  const normalized = normalizedOptionalToken(value);
+  if (normalized === "APPROVED") {
+    return "success";
+  }
+  if (normalized === "CHANGES_REQUESTED" || normalized === "REVIEW_REQUIRED") {
+    return "warning";
+  }
+  return "info";
+}
+
+function mergeStateNotificationLevel(value: string | undefined): AgentTaskRunWorktreePullRequestReviewNotification["level"] {
+  const normalized = normalizedOptionalToken(value);
+  if (normalized === "CLEAN" || normalized === "HAS_HOOKS") {
+    return "success";
+  }
+  if (normalized === "BLOCKED" || normalized === "DIRTY" || normalized === "BEHIND" || normalized === "UNSTABLE") {
+    return "warning";
+  }
+  return "info";
+}
+
+function checkSummaryNotificationLevel(
+  previous: AgentTaskRunWorktreePullRequestReview["checks"],
+  current: AgentTaskRunWorktreePullRequestReview["checks"]
+): AgentTaskRunWorktreePullRequestReviewNotification["level"] {
+  if (current.failed > previous.failed || current.cancelled > previous.cancelled || current.unknown > previous.unknown) {
+    return "warning";
+  }
+  if (current.failed < previous.failed || current.cancelled < previous.cancelled || current.passed > previous.passed) {
+    return "success";
+  }
+  return "info";
+}
+
+function checkBucketNotificationLevel(
+  previous: AgentTaskRunWorktreePullRequestCheckItem["bucket"] | undefined,
+  current: AgentTaskRunWorktreePullRequestCheckItem["bucket"]
+): AgentTaskRunWorktreePullRequestReviewNotification["level"] {
+  if (current === "failed" || current === "cancelled" || current === "unknown") {
+    return "warning";
+  }
+  if (current === "passed" && previous && previous !== "passed") {
+    return "success";
+  }
+  return "info";
+}
+
+function feedbackNotificationLevel(
+  previous: AgentTaskRunWorktreePullRequestFeedback | undefined,
+  current: AgentTaskRunWorktreePullRequestFeedback | undefined
+): AgentTaskRunWorktreePullRequestReviewNotification["level"] {
+  if ((current?.changesRequested ?? 0) > (previous?.changesRequested ?? 0) || (current?.unresolvedThreads ?? 0) > (previous?.unresolvedThreads ?? 0)) {
+    return "warning";
+  }
+  if ((current?.approved ?? 0) > (previous?.approved ?? 0) || (current?.unresolvedThreads ?? 0) < (previous?.unresolvedThreads ?? 0)) {
+    return "success";
+  }
+  return "info";
 }
 
 function summarizePullRequestFeedback(

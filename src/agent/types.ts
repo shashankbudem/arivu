@@ -316,6 +316,13 @@ export type AgentTaskRunWorktreePullRequestCheckItem = {
   completedAt?: string;
 };
 
+export type AgentTaskRunWorktreePullRequestReviewNotification = {
+  level: "info" | "success" | "warning";
+  summary: string;
+  detail?: string;
+  createdAt: string;
+};
+
 export type AgentTaskRunWorktreePullRequestReview = {
   state?: string;
   isDraft?: boolean;
@@ -332,6 +339,7 @@ export type AgentTaskRunWorktreePullRequestReview = {
     unknown: number;
   };
   checkItems?: AgentTaskRunWorktreePullRequestCheckItem[];
+  notifications?: AgentTaskRunWorktreePullRequestReviewNotification[];
   summary: string;
   feedback?: AgentTaskRunWorktreePullRequestFeedback;
   updatedAt: string;

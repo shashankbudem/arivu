@@ -479,3 +479,9 @@ Reason: failed check names are more useful when the next diagnostic command is a
 Decision: created-PR cards expose Fetch logs when refreshed check evidence has failed or cancelled GitHub Actions log commands. The action runs those saved `gh run view ... --log-failed` commands from the managed task worktree, stores bounded stdout/stderr as normal command artifacts, and links the resulting artifact id or fetch issue back to the matching check evidence row.
 
 Reason: CI logs are often the fastest route from a failed PR check to a concrete repair, but fetching them during every PR refresh would create surprising network work and oversized session records. Keeping log capture explicit preserves the review boundary while making the captured evidence durable for audits and Review PR handoff prompts.
+
+## 2026-07-05: PR refresh stores compact update notifications
+
+Decision: when Refresh PR has a previous snapshot to compare against, Arivu stores bounded PR-update notifications for changed PR state, draft state, review decision, merge state, named check bucket transitions, check summary, and review feedback summary. Refresh also preserves matching fetched check-log artifact ids when the derived GitHub Actions log command is still the same.
+
+Reason: Watch PR and repeated manual refreshes should make changed review state obvious without requiring users to diff the whole card in their head. Keeping only compact latest notifications avoids a growing event log while giving Review PR handoff prompts and copied audits the important "what changed" context.
