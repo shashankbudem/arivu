@@ -114,6 +114,7 @@ type WorkspaceCapabilityPolicy = {
   scopeRules: WorkspaceScopePolicyRules;
 };
 type WorkspaceCapabilityPolicies = Record<string, WorkspaceCapabilityPolicy>;
+type WorkspacePolicyProfiles = Record<string, WorkspaceCapabilityPolicy>;
 
 type AgentTaskRunToolCall = {
   id: string;
@@ -464,6 +465,7 @@ type DesktopState = {
     tavilyApiKeyPresent: boolean;
     mcpServers: McpServersConfig;
     workspacePolicies: WorkspaceCapabilityPolicies;
+    workspacePolicyProfiles: WorkspacePolicyProfiles;
   };
   sessionId?: string;
   messages: ChatMessage[];
@@ -594,6 +596,7 @@ type ConfigPatch = {
   trustMode?: TrustMode;
   mcpServers?: McpServersConfig;
   workspacePolicies?: WorkspaceCapabilityPolicies;
+  workspacePolicyProfiles?: WorkspacePolicyProfiles;
 };
 
 type WorkspaceScaffoldOptions = {

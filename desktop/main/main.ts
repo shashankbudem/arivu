@@ -115,6 +115,7 @@ type PublicConfig = {
   tavilyApiKeyPresent: boolean;
   mcpServers: AppConfig["mcpServers"];
   workspacePolicies: AppConfig["workspacePolicies"];
+  workspacePolicyProfiles: AppConfig["workspacePolicyProfiles"];
 };
 
 type DesktopState = {
@@ -275,6 +276,7 @@ type ConfigPatch = {
   trustMode?: AppConfig["trustMode"];
   mcpServers?: AppConfig["mcpServers"];
   workspacePolicies?: AppConfig["workspacePolicies"];
+  workspacePolicyProfiles?: AppConfig["workspacePolicyProfiles"];
 };
 
 type PublicLlmProviderProfile = Omit<LlmProviderProfile, "apiKey"> & {
@@ -1039,6 +1041,9 @@ class DesktopController {
     }
     if (patch.workspacePolicies) {
       next.workspacePolicies = patch.workspacePolicies;
+    }
+    if (patch.workspacePolicyProfiles) {
+      next.workspacePolicyProfiles = patch.workspacePolicyProfiles;
     }
     if (activeProviderId && next.providers?.some((provider) => provider.id === activeProviderId)) {
       next.providers = updateProviderRuntime(next.providers, activeProviderId, patch);
@@ -2087,7 +2092,8 @@ function toPublicConfig(config: AppConfig): PublicConfig {
     apiKeyPresent: Boolean(config.apiKey),
     tavilyApiKeyPresent: Boolean(config.tavilyApiKey),
     mcpServers: redactMcpServers(config.mcpServers),
-    workspacePolicies: config.workspacePolicies
+    workspacePolicies: config.workspacePolicies,
+    workspacePolicyProfiles: config.workspacePolicyProfiles
   };
 }
 
@@ -2460,7 +2466,8 @@ function applyConfigPatch(config: AppConfig, patch: ConfigPatch): AppConfig {
     model: patch.model?.trim() || config.model,
     trustMode: patch.trustMode ?? config.trustMode,
     mcpServers: patch.mcpServers ? mergeRedactedMcpServers(patch.mcpServers, config.mcpServers) : config.mcpServers,
-    workspacePolicies: patch.workspacePolicies ?? config.workspacePolicies
+    workspacePolicies: patch.workspacePolicies ?? config.workspacePolicies,
+    workspacePolicyProfiles: patch.workspacePolicyProfiles ?? config.workspacePolicyProfiles
   };
 }
 

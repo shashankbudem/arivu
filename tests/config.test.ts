@@ -10,6 +10,7 @@ import {
   loadConfig,
   mergeRedactedMcpServers,
   normalizeWorkspacePolicyOverrides,
+  normalizeWorkspacePolicyProfiles,
   redactConfigForDisplay,
   saveConfig,
   updateWorkspacePolicy,
@@ -203,6 +204,37 @@ describe("config", () => {
     });
     expect(workspacePolicyOverridesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
     expect(workspaceScopeRulesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
+  });
+
+  it("saves reusable workspace policy profiles", async () => {
+    await saveConfig({
+      workspacePolicyProfiles: normalizeWorkspacePolicyProfiles({
+        "  Sensitive   repo  ": {
+          overrides: {
+            read_repo: "prompt",
+            network_fetch: "deny"
+          },
+          scopeRules: {
+            blockedPathPrefixes: ["secrets", ".env", ".env"],
+            allowedBrowserTargetClasses: ["public", "background", "public"]
+          }
+        }
+      })
+    });
+
+    const loaded = await loadConfig({ includeEnv: false });
+    expect(loaded.workspacePolicyProfiles).toEqual({
+      "Sensitive repo": {
+        overrides: {
+          read_repo: "prompt",
+          network_fetch: "deny"
+        },
+        scopeRules: {
+          blockedPathPrefixes: [".env", "secrets"],
+          allowedBrowserTargetClasses: ["background", "public"]
+        }
+      }
+    });
   });
 
   it("normalizes workspace capability policy overrides", () => {

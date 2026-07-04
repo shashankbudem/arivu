@@ -89,8 +89,13 @@ import {
   type WorkspacePolicyPreset
 } from "../../../src/permissions/workspacePolicyPresets";
 import {
+  normalizeWorkspacePolicyProfileName,
+  normalizeWorkspacePolicyProfiles
+} from "../../../src/permissions/workspacePolicyProfiles";
+import {
   parseWorkspacePolicyTransfer,
   serializeWorkspacePolicyTransfer,
+  workspacePolicyTransferPayload,
   type WorkspacePolicyTransferPayload
 } from "../../../src/permissions/workspacePolicyTransfer";
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
@@ -6154,6 +6159,9 @@ function SettingsView({
   const [workspaceScopeRules, setWorkspaceScopeRules] = useState<WorkspaceScopePolicyRules>(() =>
     workspaceScopeRulesFromConfig(state.config.workspacePolicies, state.workspace.root)
   );
+  const [workspacePolicyProfiles, setWorkspacePolicyProfiles] = useState<WorkspacePolicyProfiles>(() =>
+    normalizeWorkspacePolicyProfiles(state.config.workspacePolicyProfiles)
+  );
   const skillsSectionRef = useRef<HTMLElement | null>(null);
   const selectedProvider = providers.find((provider) => provider.id === activeProviderId) ?? providers[0];
   const baseUrl = selectedProvider?.baseUrl ?? state.config.baseUrl;
@@ -6220,7 +6228,8 @@ function SettingsView({
           state.workspace.root,
           workspacePolicyOverrides,
           workspaceScopeRules
-        )
+        ),
+        workspacePolicyProfiles
       };
       if (providerPatch.activeProvider.apiKey?.trim()) {
         patch.apiKey = providerPatch.activeProvider.apiKey.trim();
@@ -6235,6 +6244,7 @@ function SettingsView({
       setCapabilityPolicySource(policyResult.source);
       setWorkspacePolicyOverrides(policyResult.workspaceOverrides);
       setWorkspaceScopeRules(policyResult.workspaceScopeRules);
+      setWorkspacePolicyProfiles(normalizeWorkspacePolicyProfiles(next.config.workspacePolicyProfiles));
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -6443,10 +6453,12 @@ function SettingsView({
         workspaceRoot={state.workspace.root}
         workspaceOverrides={workspacePolicyOverrides}
         workspaceScopeRules={workspaceScopeRules}
+        workspacePolicyProfiles={workspacePolicyProfiles}
         onWorkspaceOverrideChange={(capability, override) =>
           setWorkspacePolicyOverrides((current) => updateWorkspacePolicyOverride(current, capability, override))
         }
         onWorkspaceScopeRulesChange={setWorkspaceScopeRules}
+        onWorkspacePolicyProfilesChange={setWorkspacePolicyProfiles}
         onWorkspacePresetApply={(preset) => {
           const normalizedPreset = normalizedWorkspacePolicyPreset(preset);
           setWorkspacePolicyOverrides(normalizedPreset.overrides);
@@ -6677,8 +6689,10 @@ function CapabilityPolicyPanel({
   workspaceRoot,
   workspaceOverrides,
   workspaceScopeRules,
+  workspacePolicyProfiles,
   onWorkspaceOverrideChange,
   onWorkspaceScopeRulesChange,
+  onWorkspacePolicyProfilesChange,
   onWorkspacePresetApply,
   onWorkspacePolicyImport,
   loading,
@@ -6691,21 +6705,79 @@ function CapabilityPolicyPanel({
   workspaceRoot: string;
   workspaceOverrides: WorkspaceCapabilityPolicyOverrides;
   workspaceScopeRules: WorkspaceScopePolicyRules;
+  workspacePolicyProfiles: WorkspacePolicyProfiles;
   onWorkspaceOverrideChange: (capability: WorkspacePolicyCapability, override: CapabilityPolicyOverrideEffect | "inherit") => void;
   onWorkspaceScopeRulesChange: (rules: WorkspaceScopePolicyRules) => void;
+  onWorkspacePolicyProfilesChange: (profiles: WorkspacePolicyProfiles) => void;
   onWorkspacePresetApply: (preset: WorkspacePolicyPreset) => void;
   onWorkspacePolicyImport: (policy: WorkspacePolicyTransferPayload) => void;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
 }) {
+  const [profileName, setProfileName] = useState("");
+  const [selectedProfileName, setSelectedProfileName] = useState("");
+  const [profileStatus, setProfileStatus] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [transferText, setTransferText] = useState("");
   const [transferStatus, setTransferStatus] = useState<string | null>(null);
   const [transferError, setTransferError] = useState<string | null>(null);
   const activeScopeItems = scopePolicySummaryItems(workspaceScopeRules);
+  const profileEntries = Object.entries(normalizeWorkspacePolicyProfiles(workspacePolicyProfiles));
+  const selectedProfile = selectedProfileName ? workspacePolicyProfiles[selectedProfileName] : undefined;
+  const selectedProfileValue = selectedProfile ? selectedProfileName : "";
   const activePresetId = WORKSPACE_POLICY_PRESETS.find((preset) =>
     workspacePolicyPresetMatches(preset, workspaceOverrides, workspaceScopeRules)
   )?.id;
+
+  function saveWorkspacePolicyProfile() {
+    const name = normalizeWorkspacePolicyProfileName(profileName);
+    setProfileStatus(null);
+    setProfileError(null);
+    if (!name) {
+      setProfileError("Enter a profile name before saving.");
+      return;
+    }
+    const policy = workspacePolicyTransferPayload(workspaceOverrides, workspaceScopeRules);
+    onWorkspacePolicyProfilesChange(
+      normalizeWorkspacePolicyProfiles({
+        ...workspacePolicyProfiles,
+        [name]: {
+          overrides: policy.overrides,
+          scopeRules: policy.scopeRules
+        }
+      })
+    );
+    setProfileName(name);
+    setSelectedProfileName(name);
+    setProfileStatus(`Saved "${name}" as a profile. Save settings to persist it.`);
+  }
+
+  function applyWorkspacePolicyProfile() {
+    setProfileStatus(null);
+    setProfileError(null);
+    if (!selectedProfile) {
+      setProfileError("Choose a profile before applying.");
+      return;
+    }
+    const policy = workspacePolicyTransferPayload(selectedProfile.overrides, selectedProfile.scopeRules);
+    onWorkspacePolicyImport(policy);
+    setProfileStatus(`Applied "${selectedProfileName}". Save settings to persist workspace changes.`);
+  }
+
+  function deleteWorkspacePolicyProfile() {
+    setProfileStatus(null);
+    setProfileError(null);
+    if (!selectedProfile) {
+      setProfileError("Choose a profile before deleting.");
+      return;
+    }
+    const next = { ...workspacePolicyProfiles };
+    delete next[selectedProfileName];
+    onWorkspacePolicyProfilesChange(normalizeWorkspacePolicyProfiles(next));
+    setSelectedProfileName("");
+    setProfileStatus(`Deleted "${selectedProfileName}". Save settings to persist it.`);
+  }
 
   async function copyWorkspacePolicyJson() {
     const text = serializeWorkspacePolicyTransfer(workspaceOverrides, workspaceScopeRules);
@@ -6780,6 +6852,54 @@ function CapabilityPolicyPanel({
               </button>
             );
           })}
+        </div>
+        <div className="workspace-policy-profiles">
+          <div className="workspace-policy-profile-save">
+            <label>
+              <span>Policy profile</span>
+              <input
+                value={profileName}
+                onChange={(event) => {
+                  setProfileName(event.target.value);
+                  setProfileStatus(null);
+                  setProfileError(null);
+                }}
+                placeholder="Sensitive repo"
+              />
+            </label>
+            <button className="secondary-command" type="button" onClick={saveWorkspacePolicyProfile}>
+              <Save size={14} />
+              Save profile
+            </button>
+          </div>
+          <div className="workspace-policy-profile-actions">
+            <select
+              value={selectedProfileValue}
+              onChange={(event) => {
+                setSelectedProfileName(event.target.value);
+                setProfileName(event.target.value || profileName);
+                setProfileStatus(null);
+                setProfileError(null);
+              }}
+            >
+              <option value="">No saved profile</option>
+              {profileEntries.map(([name]) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            <button className="secondary-command" type="button" onClick={applyWorkspacePolicyProfile} disabled={!selectedProfile}>
+              <FileText size={14} />
+              Apply
+            </button>
+            <button className="secondary-command danger-command" type="button" onClick={deleteWorkspacePolicyProfile} disabled={!selectedProfile}>
+              <Trash2 size={14} />
+              Delete
+            </button>
+          </div>
+          {profileStatus ? <small className="workspace-policy-profile-status">{profileStatus}</small> : null}
+          {profileError ? <small className="workspace-policy-profile-error">{profileError}</small> : null}
         </div>
         <div className="workspace-policy-transfer">
           <div className="workspace-policy-transfer-head">

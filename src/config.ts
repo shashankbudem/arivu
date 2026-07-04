@@ -9,6 +9,12 @@ import {
   scopePolicyHasRules,
   type WorkspaceScopePolicyRules
 } from "./permissions/scopePolicy.js";
+import {
+  normalizeWorkspacePolicyProfileName,
+  normalizeWorkspacePolicyProfiles
+} from "./permissions/workspacePolicyProfiles.js";
+
+export { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
 
 const APP_SLUG = "arivu";
 const LEGACY_APP_SLUG = "shankinster";
@@ -60,7 +66,8 @@ const ConfigSchema = z.object({
   providers: z.array(LlmProviderSchema).default([]),
   trustMode: TrustModeSchema.default("ask"),
   mcpServers: z.record(McpServerSchema).default({}),
-  workspacePolicies: z.record(WorkspaceCapabilityPolicySchema).default({})
+  workspacePolicies: z.record(WorkspaceCapabilityPolicySchema).default({}),
+  workspacePolicyProfiles: z.record(WorkspaceCapabilityPolicySchema).default({})
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
@@ -68,6 +75,8 @@ export type LlmProviderProfile = z.infer<typeof LlmProviderSchema>;
 export type WorkspacePolicyCapability = z.infer<typeof WorkspacePolicyCapabilitySchema>;
 export type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapability, CapabilityPolicyOverrideEffect>>;
 export type WorkspaceCapabilityPolicyScopeRules = WorkspaceScopePolicyRules;
+export type WorkspaceCapabilityPolicy = z.infer<typeof WorkspaceCapabilityPolicySchema>;
+export type WorkspacePolicyProfiles = Record<string, WorkspaceCapabilityPolicy>;
 export type ConfigKey = Exclude<keyof AppConfig, "mcpServers" | "providers" | "activeProviderId">;
 export const REDACTED_SECRET_VALUE = "********";
 
@@ -90,11 +99,11 @@ export async function loadConfig(options: { includeEnv?: boolean } = {}): Promis
       }
     : {};
 
-  return ConfigSchema.parse({ ...fileConfig, ...removeUnsetEnv(envConfig) });
+  return normalizeLoadedConfig(ConfigSchema.parse({ ...fileConfig, ...removeUnsetEnv(envConfig) }));
 }
 
 export async function saveConfig(config: Partial<AppConfig>) {
-  const parsed = ConfigSchema.partial().parse(config);
+  const parsed = normalizeConfigPatch(ConfigSchema.partial().parse(config));
   const file = configPath();
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   await writeFile(file, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -226,6 +235,23 @@ export function normalizeWorkspacePolicyOverrides(overrides: WorkspaceCapability
 
 function isWorkspacePolicyCapability(value: string): value is keyof WorkspaceCapabilityPolicyOverrides {
   return WorkspacePolicyCapabilitySchema.safeParse(value).success;
+}
+
+function normalizeLoadedConfig(config: AppConfig): AppConfig {
+  return {
+    ...config,
+    workspacePolicyProfiles: normalizeWorkspacePolicyProfiles(config.workspacePolicyProfiles)
+  };
+}
+
+function normalizeConfigPatch(config: Partial<AppConfig>): Partial<AppConfig> {
+  if (!config.workspacePolicyProfiles) {
+    return config;
+  }
+  return {
+    ...config,
+    workspacePolicyProfiles: normalizeWorkspacePolicyProfiles(config.workspacePolicyProfiles)
+  };
 }
 
 async function readSavedConfig(): Promise<Partial<AppConfig>> {

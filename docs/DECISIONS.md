@@ -431,3 +431,9 @@ Reason: workspace policy is powerful but verbose. Presets give users a safe star
 Decision: Settings exposes Workspace policy JSON controls backed by `src/permissions/workspacePolicyTransfer.ts`. Copy JSON serializes the current unsaved workspace overrides and scope rules into a normalized `arivu.workspacePolicy` envelope. Apply JSON accepts that envelope or a plain object with `overrides` and `scopeRules`, validates supported capabilities/effects/browser classes, normalizes the result, and updates the same unsaved Settings state used by presets and manual edits.
 
 Reason: users need a lightweight way to move hardened workspace policies between projects without editing the config file by hand. Keeping transfer as normalized JSON avoids a separate persistence path while making invalid or unsupported policy input visible before Save settings writes anything.
+
+## 2026-07-04: Named workspace policy profiles
+
+Decision: Settings can save the current unsaved workspace policy as a named local profile, apply a saved profile back into the current workspace policy editor, or delete a profile. Profiles persist in config under `workspacePolicyProfiles` and are normalized by `src/permissions/workspacePolicyProfiles.ts`; applying a profile updates the same unsaved override/scope-rule state as presets and JSON import, so users still commit changes through Save settings.
+
+Reason: JSON transfer is useful for moving policies, but common local postures should not require repeated paste/import work. Named profiles give users reusable hardening bundles while preserving the existing per-workspace save boundary.

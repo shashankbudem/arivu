@@ -5091,6 +5091,75 @@ body.is-resizing .panel-resize-handle::after {
   color: #8ce8d4;
 }
 
+.workspace-policy-profiles {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgb(52 48 42 / 0.85);
+  border-radius: 8px;
+  background: rgb(11 14 15 / 0.72);
+}
+
+.workspace-policy-profile-save,
+.workspace-policy-profile-actions {
+  min-width: 0;
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.workspace-policy-profile-save label {
+  min-width: 180px;
+  flex: 1;
+  display: grid;
+  gap: 6px;
+}
+
+.workspace-policy-profile-save span {
+  color: #f6f1e8;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.workspace-policy-profile-save input,
+.workspace-policy-profile-actions select {
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #34302a;
+  border-radius: 6px;
+  background: #080b0c;
+  color: #efede8;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.workspace-policy-profile-save input:focus,
+.workspace-policy-profile-actions select:focus {
+  border-color: #2bbf9f;
+}
+
+.workspace-policy-profile-actions select {
+  flex: 1;
+}
+
+.workspace-policy-profile-status,
+.workspace-policy-profile-error {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.workspace-policy-profile-status {
+  color: #8ce8d4;
+}
+
+.workspace-policy-profile-error {
+  color: #ff9f8f;
+}
+
 .workspace-policy-transfer {
   min-width: 0;
   display: grid;

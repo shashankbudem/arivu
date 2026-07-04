@@ -99,7 +99,8 @@ function config(patch: Partial<AppConfig> = {}): AppConfig {
     trustMode: "ask",
     mcpServers: {},
     workspacePolicies: {},
-    ...patch
+    ...patch,
+    workspacePolicyProfiles: patch.workspacePolicyProfiles ?? {}
   };
 }
 
