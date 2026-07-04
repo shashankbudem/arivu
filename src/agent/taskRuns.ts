@@ -213,6 +213,7 @@ export function recordTaskRunApproval(run: AgentTaskRun, event: AgentTaskRunAppr
     existing.risky = event.risky;
     existing.override = event.override;
     existing.scope = event.scope;
+    existing.changePreview = event.changePreview;
     existing.summary = event.summary;
     existing.message = event.message;
     if (event.status === "requested") {

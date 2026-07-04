@@ -8683,6 +8683,7 @@ function approvalActivityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
     detail: approvalDetail(approval),
     summary: approvalSummary(approval),
     status: approvalActivityStatus(approval.status),
+    diffPreview: approvalChangePreviewDiffPreview(approval.changePreview),
     policy: activityPolicyFromApproval(approval)
   }));
 }
@@ -8801,9 +8802,54 @@ function approvalDetail(approval: AgentTaskRunApproval) {
     approval.requestedAt ? `requested: ${formatDateTime(approval.requestedAt)}` : undefined,
     approval.decidedAt ? `decided: ${formatDateTime(approval.decidedAt)}` : undefined,
     `summary: ${approval.summary}`,
+    approval.changePreview ? `change preview:\n${approvalChangePreviewDetail(approval.changePreview)}` : undefined,
     approval.message ? `prompt:\n${approval.message}` : undefined
   ].filter((line): line is string => Boolean(line));
   return lines.join("\n");
+}
+
+function approvalChangePreviewDetail(preview: AgentTaskRunApprovalChangePreview) {
+  const lines = [
+    `kind: ${preview.kind}`,
+    `title: ${preview.title}`,
+    preview.summary ? `summary: ${preview.summary}` : undefined,
+    preview.path ? `path: ${preview.path}` : undefined,
+    preview.writeMode ? `mode: ${preview.writeMode}` : undefined,
+    preview.changedPaths?.length ? `changedPaths:\n${preview.changedPaths.map((changedPath) => `- ${changedPath}`).join("\n")}` : undefined,
+    preview.additions !== undefined || preview.deletions !== undefined ? `stats: +${preview.additions ?? 0} -${preview.deletions ?? 0}` : undefined,
+    preview.lineCount !== undefined ? `lines: ${preview.lineCount}` : undefined,
+    preview.bytes !== undefined ? `bytes: ${preview.bytes}` : undefined,
+    preview.diffTruncated ? "diff: truncated" : undefined,
+    preview.contentTruncated ? "content: truncated" : undefined,
+    preview.originalTruncated ? "original: truncated" : undefined
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n");
+}
+
+function approvalChangePreviewDiffPreview(preview?: AgentTaskRunApprovalChangePreview): DiffPreview | undefined {
+  if (!preview) {
+    return undefined;
+  }
+  if (preview.kind === "patch" && preview.diff) {
+    return {
+      ...parseUnifiedDiffPreview(preview.diff),
+      title: preview.diffTruncated ? "Proposed patch (truncated)" : "Proposed patch"
+    };
+  }
+  if (preview.kind === "file_change" && preview.content !== undefined) {
+    const title = preview.path
+      ? `${preview.writeMode === "replace" ? "Proposed replacement" : "Proposed file"} ${preview.path}`
+      : "Proposed file write";
+    return {
+      title: preview.contentTruncated ? `${title} (truncated)` : title,
+      lines: splitLines(preview.content).map((text, index) => ({
+        kind: "add",
+        newNumber: index + 1,
+        text
+      }))
+    };
+  }
+  return undefined;
 }
 
 function approvalScopeDetail(scope: AgentTaskRunApprovalScope) {

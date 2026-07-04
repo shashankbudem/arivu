@@ -80,6 +80,25 @@ const AgentTaskRunApprovalScopeSchema = z.object({
   detail: z.string().optional()
 });
 
+const AgentTaskRunApprovalChangePreviewSchema = z.object({
+  kind: z.enum(["patch", "file_change"]),
+  title: z.string(),
+  summary: z.string().optional(),
+  path: z.string().optional(),
+  writeMode: z.enum(["create", "replace"]).optional(),
+  diff: z.string().optional(),
+  diffTruncated: z.boolean().optional(),
+  content: z.string().optional(),
+  contentTruncated: z.boolean().optional(),
+  original: z.string().optional(),
+  originalTruncated: z.boolean().optional(),
+  changedPaths: z.array(z.string()).optional(),
+  additions: z.number().int().min(0).optional(),
+  deletions: z.number().int().min(0).optional(),
+  lineCount: z.number().int().min(0).optional(),
+  bytes: z.number().int().min(0).optional()
+});
+
 const AgentTaskRunApprovalSchema = z.object({
   id: z.string(),
   actionType: z.enum(["read", "write", "shell", "mcp", "network", "browser"]),
@@ -92,6 +111,7 @@ const AgentTaskRunApprovalSchema = z.object({
   risky: z.boolean(),
   override: z.enum(["prompt", "deny"]).optional(),
   scope: AgentTaskRunApprovalScopeSchema.optional(),
+  changePreview: AgentTaskRunApprovalChangePreviewSchema.optional(),
   summary: z.string(),
   message: z.string().optional(),
   createdAt: z.string(),

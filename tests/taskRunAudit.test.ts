@@ -127,4 +127,48 @@ describe("task run audit summaries", () => {
     expect(audit).toContain("- PR: https://github.com/example/repo/pull/1 (Ship harness change)");
     expect(audit).toContain("- PR review: Ready to merge");
   });
+
+  it("includes direct write approval preview summaries", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 2,
+      prompt: "edit config",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+
+    recordTaskRunApproval(
+      run,
+      {
+        id: "approval-preview",
+        actionType: "write",
+        capability: "write_workspace",
+        status: "approved",
+        trustMode: "trusted",
+        effect: "prompt",
+        label: "Approval for risky",
+        reason: "risky workspace writes require approval",
+        risky: true,
+        scope: {
+          kind: "path",
+          label: "Write paths",
+          value: "src/app.ts"
+        },
+        summary: "patch file",
+        changePreview: {
+          kind: "patch",
+          title: "Patch review preview",
+          summary: "1 file, +1/-1",
+          changedPaths: ["src/app.ts"],
+          additions: 1,
+          deletions: 1,
+          diff: "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n"
+        }
+      },
+      "2026-01-01T00:00:01.000Z"
+    );
+
+    const audit = buildTaskRunAuditMarkdown(run);
+
+    expect(run.approvals[0]?.changePreview?.changedPaths).toEqual(["src/app.ts"]);
+    expect(audit).toContain("preview: Patch review preview - 1 file, +1/-1 - paths `src/app.ts`");
+  });
 });

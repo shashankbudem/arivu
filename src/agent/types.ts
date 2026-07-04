@@ -138,6 +138,25 @@ export type AgentTaskRunApprovalScope = {
   detail?: string;
 };
 
+export type AgentTaskRunApprovalChangePreview = {
+  kind: "patch" | "file_change";
+  title: string;
+  summary?: string;
+  path?: string;
+  writeMode?: "create" | "replace";
+  diff?: string;
+  diffTruncated?: boolean;
+  content?: string;
+  contentTruncated?: boolean;
+  original?: string;
+  originalTruncated?: boolean;
+  changedPaths?: string[];
+  additions?: number;
+  deletions?: number;
+  lineCount?: number;
+  bytes?: number;
+};
+
 export type AgentTaskRunApproval = {
   id: string;
   actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
@@ -150,6 +169,7 @@ export type AgentTaskRunApproval = {
   risky: boolean;
   override?: AgentTaskRunApprovalOverride;
   scope?: AgentTaskRunApprovalScope;
+  changePreview?: AgentTaskRunApprovalChangePreview;
   summary: string;
   message?: string;
   createdAt: string;

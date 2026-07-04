@@ -187,7 +187,8 @@ function approvalLines(run: AgentTaskRun) {
         approval.risky ? "risky" : undefined,
         approvalScopeSummary(approval.scope)
       ].filter((item): item is string => Boolean(item));
-      return `- ${details.join(" - ")}: ${inlineText(approval.summary)} (${inlineText(approval.reason)})`;
+      const preview = approvalChangePreviewSummary(approval.changePreview);
+      return `- ${details.join(" - ")}: ${inlineText(approval.summary)} (${inlineText(approval.reason)})${preview ? `; preview: ${preview}` : ""}`;
     })
   );
 }
@@ -197,6 +198,20 @@ function approvalScopeSummary(scope: AgentTaskRun["approvals"][number]["scope"])
     return undefined;
   }
   return ["scope", scope.label, scope.value].filter(Boolean).join(" ");
+}
+
+function approvalChangePreviewSummary(preview: AgentTaskRun["approvals"][number]["changePreview"]) {
+  if (!preview) {
+    return undefined;
+  }
+  const parts = [
+    preview.title,
+    preview.summary,
+    preview.path ? `path \`${preview.path}\`` : undefined,
+    preview.changedPaths?.length ? `paths ${preview.changedPaths.map((changedPath) => `\`${changedPath}\``).join(", ")}` : undefined,
+    preview.diffTruncated || preview.contentTruncated || preview.originalTruncated ? "truncated" : undefined
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" - ") : preview.kind;
 }
 
 function artifactLines(run: AgentTaskRun) {

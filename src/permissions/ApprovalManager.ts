@@ -6,12 +6,14 @@ import { evaluateApprovalPolicy, type CapabilityPolicyOverrides } from "./capabi
 import { isDestructiveCommand } from "./destructive.js";
 import { evaluateScopePolicy, type WorkspaceScopePolicyRules } from "./scopePolicy.js";
 import type { ApprovalAction, TrustMode } from "./types.js";
-import type { AgentTaskRunApprovalEvent } from "../agent/types.js";
+import type { AgentTaskRunApprovalChangePreview, AgentTaskRunApprovalEvent } from "../agent/types.js";
+import { unifiedDiffStats } from "../tools/patch.js";
 
 export type ApprovalAuditSink = (event: AgentTaskRunApprovalEvent) => void | Promise<void>;
 
 const MAX_APPROVAL_AUDIT_MESSAGE = 2_000;
 const MAX_APPROVAL_BODY_SECTION = 12_000;
+const MAX_APPROVAL_CHANGE_PREVIEW_TEXT = 40_000;
 
 export class ApprovalManager {
   constructor(
@@ -47,6 +49,7 @@ export class ApprovalManager {
       risky: destructive,
       override: decision.override,
       scope: scopeForApprovalAction(action),
+      changePreview: changePreviewForApprovalAction(action),
       summary: summarizeApprovalAction(action)
     };
     if (decision.effect === "deny") {
@@ -198,6 +201,78 @@ function summarizeApprovalAction(action: ApprovalAction) {
   }
 }
 
+function changePreviewForApprovalAction(action: ApprovalAction): AgentTaskRunApprovalChangePreview | undefined {
+  if (action.type !== "write") {
+    return undefined;
+  }
+  if (action.diff !== undefined) {
+    return patchChangePreview(action);
+  }
+  if (action.content !== undefined || action.original !== undefined) {
+    return fileChangePreview(action);
+  }
+  return undefined;
+}
+
+function patchChangePreview(action: Extract<ApprovalAction, { type: "write" }>): AgentTaskRunApprovalChangePreview {
+  const boundedDiff = boundApprovalPreviewText(action.diff ?? "");
+  const stats = safeUnifiedDiffStats(action.diff ?? "");
+  const lineCount = countPreviewLines(action.diff ?? "");
+  const bytes = Buffer.byteLength(action.diff ?? "", "utf8");
+  const changedPaths = stats?.changedPaths.length ? stats.changedPaths : action.paths;
+  const summaryParts = [
+    changedPaths?.length ? `${changedPaths.length} file${changedPaths.length === 1 ? "" : "s"}` : undefined,
+    stats ? `+${stats.additions}/-${stats.deletions}` : undefined,
+    `${lineCount} diff line${lineCount === 1 ? "" : "s"}`,
+    formatPreviewBytes(bytes)
+  ].filter((part): part is string => Boolean(part));
+  return {
+    kind: "patch",
+    title: action.reviewReason ? "Patch review preview" : "Patch preview",
+    summary: summaryParts.join(", "),
+    diff: boundedDiff.text,
+    diffTruncated: boundedDiff.truncated || undefined,
+    changedPaths,
+    additions: stats?.additions,
+    deletions: stats?.deletions,
+    lineCount,
+    bytes
+  };
+}
+
+function fileChangePreview(action: Extract<ApprovalAction, { type: "write" }>): AgentTaskRunApprovalChangePreview {
+  const boundedContent = action.content === undefined ? undefined : boundApprovalPreviewText(action.content);
+  const boundedOriginal = action.original === undefined ? undefined : boundApprovalPreviewText(action.original);
+  const lineCount = action.content === undefined ? undefined : countPreviewLines(action.content);
+  const bytes = action.content === undefined ? undefined : Buffer.byteLength(action.content, "utf8");
+  const summaryParts = [
+    action.mode ? action.mode : undefined,
+    lineCount !== undefined ? `${lineCount} line${lineCount === 1 ? "" : "s"}` : undefined,
+    bytes !== undefined ? formatPreviewBytes(bytes) : undefined
+  ].filter((part): part is string => Boolean(part));
+  return {
+    kind: "file_change",
+    title: action.mode === "replace" ? "File replacement preview" : action.mode === "create" ? "File creation preview" : "File write preview",
+    summary: summaryParts.join(", "),
+    path: action.path,
+    writeMode: action.mode,
+    content: boundedContent?.text,
+    contentTruncated: boundedContent?.truncated || undefined,
+    original: boundedOriginal?.text,
+    originalTruncated: boundedOriginal?.truncated || undefined,
+    lineCount,
+    bytes
+  };
+}
+
+function safeUnifiedDiffStats(diff: string) {
+  try {
+    return unifiedDiffStats(diff);
+  } catch {
+    return undefined;
+  }
+}
+
 function truncateApprovalAuditText(value: string) {
   if (value.length <= MAX_APPROVAL_AUDIT_MESSAGE) {
     return value;
@@ -210,6 +285,33 @@ function truncateApprovalBodySection(value: string) {
     return value;
   }
   return `${value.slice(0, MAX_APPROVAL_BODY_SECTION).trimEnd()}\n... truncated ${value.length - MAX_APPROVAL_BODY_SECTION} chars ...`;
+}
+
+function boundApprovalPreviewText(value: string) {
+  if (value.length <= MAX_APPROVAL_CHANGE_PREVIEW_TEXT) {
+    return { text: value, truncated: false };
+  }
+  return {
+    text: Buffer.from(value, "utf8").subarray(0, MAX_APPROVAL_CHANGE_PREVIEW_TEXT).toString("utf8"),
+    truncated: true
+  };
+}
+
+function countPreviewLines(value: string) {
+  if (value.length === 0) {
+    return 0;
+  }
+  return value.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n").length;
+}
+
+function formatPreviewBytes(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${Math.ceil(bytes / 1024)} KB`;
+  }
+  return `${Math.round(bytes / 1024 / 1024)} MB`;
 }
 
 function formatJson(value: unknown) {

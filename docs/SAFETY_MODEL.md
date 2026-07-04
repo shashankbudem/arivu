@@ -116,6 +116,7 @@ Write safety:
 - Existing-file patching checks that the file has not changed since it was read.
 - `write_file` with `create` refuses to overwrite existing files.
 - `write_file` with `replace` refuses to create missing files.
+- Direct write approval records keep bounded pre-apply previews for proposed `apply_patch` diffs or `write_file` content, so Activity can show the proposed edit even if the approval is denied or blocked.
 - Large direct `apply_patch` / `write_file` changes are marked as risky write reviews, so Trusted mode still prompts before applying them unless the edit is running inside a managed task worktree review boundary.
 
 ## Session and config safety

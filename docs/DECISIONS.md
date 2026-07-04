@@ -449,3 +449,9 @@ Reason: checked-in policy files are useful for team defaults and reviewable conf
 Decision: `apply_patch` and `write_file` classify large direct edits before applying them. Outside managed task-worktree execution, oversized patches or full-file writes pass a `reviewReason` through `ApprovalManager` and are treated as risky workspace writes, so Trusted mode prompts with a "Write review" boundary. Managed task worktrees disable the extra threshold because patch preview, PR draft, and merge gates already provide the review boundary.
 
 Reason: Trusted mode should stay ergonomic for small local fixes, but large direct edits need an explicit pause before mutating the user's active checkout. Reusing the existing approval/audit path keeps the review event visible in task-run history without inventing a separate modal or policy channel.
+
+## 2026-07-04: Direct write approvals carry pre-apply previews
+
+Decision: write approval audit events can carry a bounded `changePreview` for proposed `apply_patch` diffs or `write_file` content. Activity renders that preview on approval rows, copied task-run audits include a compact preview summary, and saved-session validation preserves the preview payload.
+
+Reason: post-success patch/file-change artifacts are not enough for a harness review boundary because denied, blocked, and auto-allowed writes also need inspectable proposed-change evidence. Keeping the preview on the approval record ties the evidence to the policy decision that happened before mutation.

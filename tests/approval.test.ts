@@ -377,6 +377,107 @@ describe("approval manager", () => {
     expect(prompt).not.toContain("Destructive write");
   });
 
+  it("records structured patch previews on write approval audits", async () => {
+    const events: AgentTaskRunApprovalEvent[] = [];
+    const approvals = new ApprovalManager(
+      "trusted",
+      async () => false,
+      {},
+      (event) => {
+        events.push(event);
+      }
+    );
+
+    await expect(
+      approvals.require({
+        type: "write",
+        summary: "patch file",
+        paths: ["src/example.ts"],
+        diff: "--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1 +1 @@\n-old\n+new\n"
+      })
+    ).resolves.toBeUndefined();
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      status: "allowed",
+      actionType: "write",
+      changePreview: {
+        kind: "patch",
+        title: "Patch preview",
+        changedPaths: ["src/example.ts"],
+        additions: 1,
+        deletions: 1,
+        lineCount: 5
+      }
+    });
+    expect(events[0]?.changePreview?.diff).toContain("+new");
+  });
+
+  it("records structured file-write previews on prompted write decisions", async () => {
+    const events: AgentTaskRunApprovalEvent[] = [];
+    const approvals = new ApprovalManager(
+      "ask",
+      async () => true,
+      {},
+      (event) => {
+        events.push(event);
+      }
+    );
+
+    await expect(
+      approvals.require({
+        type: "write",
+        summary: "replace config",
+        path: "config.json",
+        mode: "replace",
+        original: "{\"old\":true}\n",
+        content: "{\"new\":true}\n"
+      })
+    ).resolves.toBeUndefined();
+
+    expect(events.map((event) => event.status)).toEqual(["requested", "approved"]);
+    expect(events[0]?.changePreview).toMatchObject({
+      kind: "file_change",
+      title: "File replacement preview",
+      path: "config.json",
+      writeMode: "replace",
+      lineCount: 1
+    });
+    expect(events[0]?.changePreview?.original).toContain("\"old\"");
+    expect(events[0]?.changePreview?.content).toContain("\"new\"");
+    expect(events[1]?.changePreview).toEqual(events[0]?.changePreview);
+  });
+
+  it("keeps write previews when a prompted write is denied", async () => {
+    const events: AgentTaskRunApprovalEvent[] = [];
+    const approvals = new ApprovalManager(
+      "ask",
+      async () => false,
+      {},
+      (event) => {
+        events.push(event);
+      }
+    );
+
+    await expect(
+      approvals.require({
+        type: "write",
+        summary: "create note",
+        path: "notes/todo.md",
+        mode: "create",
+        content: "- review\n"
+      })
+    ).rejects.toThrow(/denied/);
+
+    expect(events.map((event) => event.status)).toEqual(["requested", "denied"]);
+    expect(events[1]?.changePreview).toMatchObject({
+      kind: "file_change",
+      path: "notes/todo.md",
+      writeMode: "create",
+      content: "- review\n"
+    });
+  });
+
   it("allows browser actions without prompting in default trust modes", async () => {
     for (const mode of ["readonly", "ask", "trusted"] as const) {
       let prompted = false;
