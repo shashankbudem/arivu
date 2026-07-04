@@ -313,6 +313,9 @@ type AgentTaskRunWorktreePullRequestCheckItem = {
   state?: string;
   detailsUrl?: string;
   logCommand?: string;
+  logArtifactId?: string;
+  logFetchedAt?: string;
+  logError?: string;
   startedAt?: string;
   completedAt?: string;
 };
@@ -843,6 +846,7 @@ type DesktopApi = {
       | "prepare_pr"
       | "create_pr"
       | "refresh_pr"
+      | "fetch_pr_check_logs"
       | "sync"
       | "continue_conflict"
       | "abort_conflict"

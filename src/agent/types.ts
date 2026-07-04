@@ -309,6 +309,9 @@ export type AgentTaskRunWorktreePullRequestCheckItem = {
   state?: string;
   detailsUrl?: string;
   logCommand?: string;
+  logArtifactId?: string;
+  logFetchedAt?: string;
+  logError?: string;
   startedAt?: string;
   completedAt?: string;
 };

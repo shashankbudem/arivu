@@ -113,7 +113,25 @@ describe("session store", () => {
               remoteUrl: "https://github.com/acme/repo.git",
               pushCommand: "git push",
               createCommand: "gh pr create --draft",
-              preparedAt: "2026-01-01T00:02:30.000Z"
+              preparedAt: "2026-01-01T00:02:30.000Z",
+              review: {
+                checkSummary: "1 failed",
+                checks: { total: 1, passed: 0, failed: 1, pending: 0, skipped: 0, cancelled: 0, unknown: 0 },
+                checkItems: [
+                  {
+                    name: "lint",
+                    bucket: "failed",
+                    status: "COMPLETED",
+                    conclusion: "FAILURE",
+                    logCommand: "gh run view '123456' --repo 'acme/repo' --job '7890' --log-failed",
+                    logArtifactId: "pr-check-log:lint:123456:7890:command_output",
+                    logFetchedAt: "2026-01-01T00:02:45.000Z",
+                    logError: "Exit code 1"
+                  }
+                ],
+                summary: "1 failed check.",
+                updatedAt: "2026-01-01T00:02:40.000Z"
+              }
             },
             conflict: {
               type: "sync",
@@ -240,7 +258,18 @@ describe("session store", () => {
               branch: "arivu/task-run-1",
               baseBranch: "main",
               remoteName: "origin",
-              preparedAt: "2026-01-01T00:02:30.000Z"
+              preparedAt: "2026-01-01T00:02:30.000Z",
+              review: {
+                checkItems: [
+                  {
+                    name: "lint",
+                    bucket: "failed",
+                    logArtifactId: "pr-check-log:lint:123456:7890:command_output",
+                    logFetchedAt: "2026-01-01T00:02:45.000Z",
+                    logError: "Exit code 1"
+                  }
+                ]
+              }
             },
             conflict: {
               type: "sync",

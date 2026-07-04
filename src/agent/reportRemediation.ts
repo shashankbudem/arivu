@@ -315,7 +315,9 @@ function formatPullRequestReviewEvidence(review: AgentTaskRunWorktreePullRequest
               .join(", ");
             const details = [
               item.detailsUrl ? `details ${item.detailsUrl}` : undefined,
-              item.logCommand ? `logs \`${item.logCommand}\`` : undefined
+              item.logCommand ? `logs \`${item.logCommand}\`` : undefined,
+              item.logArtifactId ? `saved log artifact \`${item.logArtifactId}\`` : undefined,
+              item.logError ? `log fetch issue ${item.logError}` : undefined
             ]
               .filter(Boolean)
               .join("; ");

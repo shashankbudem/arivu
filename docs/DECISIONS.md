@@ -473,3 +473,9 @@ Reason: a plan item is often proven by the test or CI evidence, not by the exact
 Decision: when a refreshed PR check item includes a GitHub Actions details URL, Arivu derives a bounded `gh run view ... --log` or `--log-failed` command and stores it on the check evidence item. Activity, copied audits, and Review PR handoff prompts show that command, but Refresh PR still does not fetch or persist the full log body.
 
 Reason: failed check names are more useful when the next diagnostic command is already visible. Deriving the command from a trusted GitHub URL keeps the handoff actionable without adding background log downloads or large artifacts to session state.
+
+## 2026-07-05: PR check logs fetch into command artifacts
+
+Decision: created-PR cards expose Fetch logs when refreshed check evidence has failed or cancelled GitHub Actions log commands. The action runs those saved `gh run view ... --log-failed` commands from the managed task worktree, stores bounded stdout/stderr as normal command artifacts, and links the resulting artifact id or fetch issue back to the matching check evidence row.
+
+Reason: CI logs are often the fastest route from a failed PR check to a concrete repair, but fetching them during every PR refresh would create surprising network work and oversized session records. Keeping log capture explicit preserves the review boundary while making the captured evidence durable for audits and Review PR handoff prompts.

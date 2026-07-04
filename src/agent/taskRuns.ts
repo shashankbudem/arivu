@@ -57,6 +57,21 @@ type RecordTaskRunEventOptions = {
   workspaceRoot?: string;
 };
 
+type CommandArtifactInput = {
+  id: string;
+  title?: string;
+  command: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  durationMs?: number;
+  workingDirectory?: string;
+  executionProfile?: CommandExecutionProfile;
+  executionIsolation?: string;
+  workspaceRoot?: string;
+  now?: string;
+};
+
 export function createAgentTaskRun(options: CreateAgentTaskRunOptions): AgentTaskRun {
   const now = options.now ?? new Date().toISOString();
   return {
@@ -175,6 +190,36 @@ export function recordTaskRunEvent(
 
   run.updatedAt = now;
   return true;
+}
+
+export function upsertTaskRunCommandArtifact(run: AgentTaskRun, input: CommandArtifactInput): AgentTaskRunArtifact {
+  const now = input.now ?? new Date().toISOString();
+  const result = [
+    input.exitCode === undefined ? undefined : `exitCode: ${input.exitCode}`,
+    input.executionProfile ? `executionProfile: ${input.executionProfile}` : undefined,
+    input.executionIsolation ? `executionIsolation: ${input.executionIsolation}` : undefined,
+    input.workingDirectory ? `workingDirectory: ${input.workingDirectory}` : undefined,
+    input.stdout !== undefined ? `stdout:\n${input.stdout}` : undefined,
+    input.stderr !== undefined ? `stderr:\n${input.stderr}` : undefined
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+  const artifact = {
+    ...commandArtifactFromToolResult(input.id, result, now, {
+      command: input.command,
+      durationMs: input.durationMs,
+      workspaceRoot: input.workspaceRoot
+    }),
+    title: input.title ?? "Command output"
+  };
+  const existingIndex = run.artifacts.findIndex((candidate) => candidate.id === artifact.id);
+  if (existingIndex >= 0) {
+    run.artifacts[existingIndex] = artifact;
+  } else {
+    run.artifacts.push(artifact);
+  }
+  run.updatedAt = now;
+  return artifact;
 }
 
 export function finishTaskRun(run: AgentTaskRun, status: AgentTaskRunStatus, error?: string, now = new Date().toISOString()) {

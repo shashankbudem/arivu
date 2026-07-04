@@ -581,7 +581,19 @@ function reportEvidenceCandidates(artifact: AgentTaskRun["artifacts"][number]) {
 }
 
 function pullRequestCheckEvidenceText(check: AgentTaskRunWorktreePullRequestCheckItem) {
-  return [check.name, check.bucket, check.status, check.conclusion, check.state, check.detailsUrl, check.logCommand].filter(Boolean).join(" ");
+  return [
+    check.name,
+    check.bucket,
+    check.status,
+    check.conclusion,
+    check.state,
+    check.detailsUrl,
+    check.logCommand,
+    check.logArtifactId,
+    check.logError
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function evidenceTextMatches(itemTokens: string[], sourceText: string) {

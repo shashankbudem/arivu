@@ -414,6 +414,7 @@ type TaskWorktreeAction =
   | "prepare_pr"
   | "create_pr"
   | "refresh_pr"
+  | "fetch_pr_check_logs"
   | "sync"
   | "continue_conflict"
   | "abort_conflict"
@@ -5428,6 +5429,17 @@ function TaskWorktreePullRequestCard({
               Refresh PR
             </button>
           ) : null}
+          {pullRequest.review?.checkItems?.some((item) => item.logCommand && (item.bucket === "failed" || item.bucket === "cancelled")) ? (
+            <button
+              type="button"
+              disabled={busy}
+              title="Fetch failed GitHub Actions check logs and save them as task-run evidence"
+              onClick={() => onAction(run, "fetch_pr_check_logs")}
+            >
+              <TerminalSquare size={12} />
+              Fetch logs
+            </button>
+          ) : null}
           {pullRequest.url ? (
             <button
               type="button"
@@ -5536,6 +5548,8 @@ function TaskWorktreePullRequestChecks({ items }: { items: AgentTaskRunWorktreeP
             <span>{pullRequestCheckLabel(item)}</span>
             {item.detailsUrl ? <p>{item.detailsUrl}</p> : null}
             {item.logCommand ? <p>{item.logCommand}</p> : null}
+            {item.logArtifactId ? <p>Saved log artifact: {item.logArtifactId}</p> : null}
+            {item.logError ? <p>Log fetch issue: {item.logError}</p> : null}
           </li>
         ))}
       </ul>
@@ -9609,6 +9623,8 @@ function taskWorktreeActionStatus(action: TaskWorktreeAction) {
       return "Task worktree PR created";
     case "refresh_pr":
       return "Task worktree PR status refreshed";
+    case "fetch_pr_check_logs":
+      return "Task worktree PR check logs saved";
     case "sync":
       return "Task worktree synced";
     case "continue_conflict":

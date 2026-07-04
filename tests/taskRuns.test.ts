@@ -11,6 +11,7 @@ import {
   recordTaskRunAssistantCompletion,
   recordTaskRunAssistantPlan,
   recordTaskRunEvent,
+  upsertTaskRunCommandArtifact,
   capabilityForToolName
 } from "../src/agent/taskRuns.js";
 
@@ -88,6 +89,61 @@ describe("agent task runs", () => {
     finishTaskRun(run, "completed", undefined, "2026-01-01T00:03:00.000Z");
     expect(run.status).toBe("completed");
     expect(run.completedAt).toBe("2026-01-01T00:03:00.000Z");
+  });
+
+  it("upserts command artifacts captured outside streamed tool events", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 3,
+      prompt: "fetch failing PR logs",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+
+    const first = upsertTaskRunCommandArtifact(run, {
+      id: "pr-check-log:lint:123456:7890",
+      title: "PR check log: lint",
+      command: "gh run view '123456' --repo 'example/repo' --job '7890' --log-failed",
+      stdout: "first failure",
+      exitCode: 1,
+      durationMs: 1200,
+      workingDirectory: "/workspace",
+      executionProfile: "host",
+      executionIsolation: "host",
+      workspaceRoot: "/workspace",
+      now: "2026-01-01T00:01:00.000Z"
+    });
+
+    expect(first).toMatchObject({
+      id: "pr-check-log:lint:123456:7890:command_output",
+      kind: "command_output",
+      title: "PR check log: lint",
+      command: "gh run view '123456' --repo 'example/repo' --job '7890' --log-failed",
+      exitCode: 1,
+      durationMs: 1200,
+      workingDirectory: "/workspace",
+      executionProfile: "host",
+      executionIsolation: "host",
+      stdout: "first failure"
+    });
+    expect(run.artifacts).toHaveLength(1);
+    expect(run.updatedAt).toBe("2026-01-01T00:01:00.000Z");
+
+    const second = upsertTaskRunCommandArtifact(run, {
+      id: "pr-check-log:lint:123456:7890",
+      title: "PR check log: lint",
+      command: "gh run view '123456' --repo 'example/repo' --job '7890' --log-failed",
+      stderr: "replacement failure",
+      exitCode: 0,
+      now: "2026-01-01T00:02:00.000Z"
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(run.artifacts).toHaveLength(1);
+    expect(run.artifacts[0]).toMatchObject({
+      exitCode: 0,
+      stderr: "replacement failure"
+    });
+    expect(run.artifacts[0]?.stdout).toBeUndefined();
+    expect(run.updatedAt).toBe("2026-01-01T00:02:00.000Z");
   });
 
   it("records approval decisions as durable run state", () => {

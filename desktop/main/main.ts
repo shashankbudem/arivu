@@ -45,7 +45,8 @@ import {
   recordTaskRunAssistantCompletion,
   recordTaskRunAssistantPlan,
   recordTaskRunEvent,
-  trimTaskRuns
+  trimTaskRuns,
+  upsertTaskRunCommandArtifact
 } from "../../src/agent/taskRuns.js";
 import {
   abortTaskWorktreeConflict,
@@ -206,6 +207,7 @@ type TaskWorktreeActionInput = {
     | "prepare_pr"
     | "create_pr"
     | "refresh_pr"
+    | "fetch_pr_check_logs"
     | "sync"
     | "continue_conflict"
     | "abort_conflict"
@@ -760,6 +762,7 @@ class DesktopController {
         "prepare_pr",
         "create_pr",
         "refresh_pr",
+        "fetch_pr_check_logs",
         "sync",
         "continue_conflict",
         "abort_conflict",
@@ -869,6 +872,9 @@ class DesktopController {
         const result = await refreshTaskWorktreePullRequest(worktree);
         worktree.pullRequest = result.pullRequest;
         worktree.error = undefined;
+      } else if (action === "fetch_pr_check_logs") {
+        await this.fetchPullRequestCheckLogs(taskRun, worktree);
+        worktree.error = undefined;
       } else if (action === "sync") {
         if (worktree.status !== "ready") {
           throw new Error("Only ready task worktrees can be synced.");
@@ -933,6 +939,72 @@ class DesktopController {
     }
     await this.sendSessionLifecycleEvent("updated", session);
     return this.state();
+  }
+
+  private async fetchPullRequestCheckLogs(taskRun: AgentTaskRun, worktree: NonNullable<AgentTaskRun["worktree"]>) {
+    const pullRequest = worktree.pullRequest;
+    const review = pullRequest?.review;
+    if (!pullRequest?.url || !review?.checkItems?.length) {
+      throw new Error("Refresh a created PR before fetching check logs.");
+    }
+    const actionable = review.checkItems.filter(
+      (item) => item.logCommand && (item.bucket === "failed" || item.bucket === "cancelled")
+    );
+    if (actionable.length === 0) {
+      throw new Error("No failed or cancelled GitHub Actions check log commands are available.");
+    }
+
+    const cwd = await resolveTaskWorktreePath(worktree);
+    for (const item of actionable) {
+      const logCommand = item.logCommand;
+      if (!logCommand) {
+        continue;
+      }
+      const parsed = parseSavedPullRequestCheckLogCommand(logCommand);
+      const artifactInputId = `pr-check-log:${safeArtifactSegment(item.name)}:${safeArtifactSegment(parsed.runId)}${
+        parsed.jobId ? `:${safeArtifactSegment(parsed.jobId)}` : ""
+      }`;
+      const startedAt = Date.now();
+      const now = new Date().toISOString();
+      try {
+        const result = await execa("gh", parsed.args, { cwd, reject: false });
+        const artifact = upsertTaskRunCommandArtifact(taskRun, {
+          id: artifactInputId,
+          title: `PR check log: ${item.name}`,
+          command: logCommand,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          durationMs: Date.now() - startedAt,
+          workingDirectory: cwd,
+          executionProfile: "host",
+          executionIsolation: "host",
+          workspaceRoot: cwd,
+          now
+        });
+        item.logArtifactId = artifact.id;
+        item.logFetchedAt = now;
+        item.logError = result.exitCode === 0 ? undefined : truncateInlineText(result.stderr || result.stdout || `Exit code ${result.exitCode}`, 240);
+      } catch (error) {
+        const message = formatError(error);
+        const artifact = upsertTaskRunCommandArtifact(taskRun, {
+          id: artifactInputId,
+          title: `PR check log: ${item.name}`,
+          command: logCommand,
+          stderr: message,
+          exitCode: 1,
+          durationMs: Date.now() - startedAt,
+          workingDirectory: cwd,
+          executionProfile: "host",
+          executionIsolation: "host",
+          workspaceRoot: cwd,
+          now
+        });
+        item.logArtifactId = artifact.id;
+        item.logFetchedAt = now;
+        item.logError = truncateInlineText(message, 240);
+      }
+    }
   }
 
   async taskRunPlanAction(input: TaskRunPlanActionInput = {}) {
@@ -2266,6 +2338,35 @@ function formatBytes(bytes: number) {
 
 function countLines(text: string) {
   return text.length === 0 ? 0 : text.split(/\r\n|\r|\n/).length;
+}
+
+function parseSavedPullRequestCheckLogCommand(command: string | undefined) {
+  const match = /^gh run view '([^']+)' --repo '([^']+)'(?: --job '([^']+)')? (--log(?:-failed)?)$/.exec(command ?? "");
+  if (!match) {
+    throw new Error("Unsupported PR check log command.");
+  }
+  const [, runId, repo, jobId, logFlag] = match;
+  if (!runId || !/^\d+$/.test(runId) || !repo || !logFlag || (jobId !== undefined && !/^\d+$/.test(jobId))) {
+    throw new Error("Unsupported PR check log command.");
+  }
+  return {
+    runId,
+    jobId,
+    args: ["run", "view", runId, "--repo", repo, ...(jobId ? ["--job", jobId] : []), logFlag]
+  };
+}
+
+function safeArtifactSegment(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60) || "check";
+}
+
+function truncateInlineText(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
 }
 
 function formatError(error: unknown) {

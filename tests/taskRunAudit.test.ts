@@ -118,7 +118,8 @@ describe("task run audit summaries", () => {
               bucket: "failed",
               status: "COMPLETED",
               conclusion: "FAILURE",
-              logCommand: "gh run view '123456' --repo 'example/repo' --job '7890' --log-failed"
+              logCommand: "gh run view '123456' --repo 'example/repo' --job '7890' --log-failed",
+              logArtifactId: "pr-check-log:lint:123456:7890:command_output"
             }
           ],
           summary: "Ready to merge",
@@ -135,7 +136,9 @@ describe("task run audit summaries", () => {
     expect(audit).toContain("- Patch preview: 12 lines");
     expect(audit).toContain("- PR: https://github.com/example/repo/pull/1 (Ship harness change)");
     expect(audit).toContain("- PR review: Ready to merge");
-    expect(audit).toContain("- PR check evidence: lint failed logs gh run view '123456' --repo 'example/repo' --job '7890' --log-failed");
+    expect(audit).toContain(
+      "- PR check evidence: lint failed logs gh run view '123456' --repo 'example/repo' --job '7890' --log-failed artifact pr-check-log:lint:123456:7890:command_output"
+    );
   });
 
   it("includes direct write approval preview summaries", () => {

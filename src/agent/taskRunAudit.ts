@@ -287,7 +287,20 @@ function worktreeLines(run: AgentTaskRun) {
       const checkItems = worktree.pullRequest.review.checkItems ?? [];
       if (checkItems.length > 0) {
         lines.push(
-          `- PR check evidence: ${inlineText(checkItems.map((item) => `${item.name} ${item.bucket}${item.logCommand ? ` logs ${item.logCommand}` : ""}`).join("; "))}`
+          `- PR check evidence: ${inlineText(
+            checkItems
+              .map((item) =>
+                [
+                  `${item.name} ${item.bucket}`,
+                  item.logCommand ? `logs ${item.logCommand}` : undefined,
+                  item.logArtifactId ? `artifact ${item.logArtifactId}` : undefined,
+                  item.logError ? `log error ${item.logError}` : undefined
+                ]
+                  .filter(Boolean)
+                  .join(" ")
+              )
+              .join("; ")
+          )}`
         );
       }
     }
