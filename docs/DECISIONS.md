@@ -467,3 +467,9 @@ Reason: check counts alone tell the user that CI is failing, but not which check
 Decision: Approved-plan source reviews now treat parsed JUnit/SARIF report details and refreshed PR check items as item-specific plan evidence. The derived completion notes expose matched reports and checks separately from changed files, shell commands, and assistant-authored completion bullets, and a step can be marked supported when those richer artifacts conservatively match the plan item.
 
 Reason: a plan item is often proven by the test or CI evidence, not by the exact shell command text. Separating reports and PR checks makes Activity close-out clearer and keeps plan review moving toward evidence-based workflow state instead of relying only on filenames or final prose.
+
+## 2026-07-04: PR check evidence carries log commands
+
+Decision: when a refreshed PR check item includes a GitHub Actions details URL, Arivu derives a bounded `gh run view ... --log` or `--log-failed` command and stores it on the check evidence item. Activity, copied audits, and Review PR handoff prompts show that command, but Refresh PR still does not fetch or persist the full log body.
+
+Reason: failed check names are more useful when the next diagnostic command is already visible. Deriving the command from a trusted GitHub URL keeps the handoff actionable without adding background log downloads or large artifacts to session state.

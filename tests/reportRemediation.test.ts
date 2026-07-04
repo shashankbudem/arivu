@@ -569,7 +569,8 @@ describe("report remediation prompts", () => {
                 bucket: "failed",
                 status: "COMPLETED",
                 conclusion: "FAILURE",
-                detailsUrl: "https://ci.example/lint"
+                detailsUrl: "https://github.com/example/repo/actions/runs/123456/job/7890",
+                logCommand: "gh run view '123456' --repo 'example/repo' --job '7890' --log-failed"
               },
               {
                 name: "deploy",
@@ -668,8 +669,10 @@ describe("report remediation prompts", () => {
     expect(prompt).toContain("Checks: 3 checks: 1 passed, 1 failed, 1 pending");
     expect(prompt).toContain("Check counts: 1 passed, 1 failed, 1 pending");
     expect(prompt).toContain("Check evidence");
-    expect(prompt).toContain("lint: failed, conclusion FAILURE, status COMPLETED (https://ci.example/lint)");
-    expect(prompt).toContain("deploy: pending, state PENDING (https://ci.example/deploy)");
+    expect(prompt).toContain(
+      "lint: failed, conclusion FAILURE, status COMPLETED (details https://github.com/example/repo/actions/runs/123456/job/7890; logs `gh run view '123456' --repo 'example/repo' --job '7890' --log-failed`)"
+    );
+    expect(prompt).toContain("deploy: pending, state PENDING (details https://ci.example/deploy)");
     expect(prompt).toContain("Review feedback: 1 review, 1 comment, 1 line thread, 1 unresolved thread, 1 changes requested");
     expect(prompt).toContain("Latest review feedback");
     expect(prompt).toContain("review CHANGES_REQUESTED by reviewer-two");

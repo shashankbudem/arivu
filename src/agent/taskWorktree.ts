@@ -1131,16 +1131,72 @@ function pullRequestCheckEvidenceItem(item: Record<string, unknown>): AgentTaskR
   if (!name) {
     return undefined;
   }
+  const bucket = pullRequestCheckBucket(item);
+  const detailsUrl = optionalString(item.detailsUrl) ?? optionalString(item.targetUrl) ?? optionalString(item.url);
   return {
     name: boundedCheckText(name),
-    bucket: pullRequestCheckBucket(item),
+    bucket,
     status: optionalString(item.status),
     conclusion: optionalString(item.conclusion),
     state: optionalString(item.state),
-    detailsUrl: optionalString(item.detailsUrl) ?? optionalString(item.targetUrl) ?? optionalString(item.url),
+    detailsUrl,
+    logCommand: pullRequestCheckLogCommand(detailsUrl, bucket),
     startedAt: optionalString(item.startedAt),
     completedAt: optionalString(item.completedAt)
   };
+}
+
+function pullRequestCheckLogCommand(detailsUrl: string | undefined, bucket: AgentTaskRunWorktreePullRequestCheckItem["bucket"]) {
+  const actions = parseGithubActionsCheckUrl(detailsUrl);
+  if (!actions) {
+    return undefined;
+  }
+  const args = [
+    "gh",
+    "run",
+    "view",
+    shellQuote(actions.runId),
+    "--repo",
+    shellQuote(actions.repo),
+    actions.jobId ? "--job" : undefined,
+    actions.jobId ? shellQuote(actions.jobId) : undefined,
+    bucket === "failed" || bucket === "cancelled" ? "--log-failed" : "--log"
+  ].filter((part): part is string => Boolean(part));
+  return args.join(" ");
+}
+
+function parseGithubActionsCheckUrl(detailsUrl: string | undefined) {
+  if (!detailsUrl) {
+    return undefined;
+  }
+  try {
+    const url = new URL(detailsUrl);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const actionsIndex = parts.indexOf("actions");
+    const runsIndex = parts.indexOf("runs");
+    if (actionsIndex < 2 || runsIndex !== actionsIndex + 1 || runsIndex + 1 >= parts.length) {
+      return undefined;
+    }
+    const owner = parts[actionsIndex - 2];
+    const repo = parts[actionsIndex - 1];
+    const runId = parts[runsIndex + 1];
+    if (!owner || !repo || !/^\d+$/.test(runId)) {
+      return undefined;
+    }
+    const jobIndex = parts.indexOf("job", runsIndex + 2);
+    const jobId = jobIndex >= 0 ? parts[jobIndex + 1] : undefined;
+    if (jobId !== undefined && !/^\d+$/.test(jobId)) {
+      return undefined;
+    }
+    const repoPrefix = url.hostname && url.hostname !== "github.com" ? `${url.hostname}/` : "";
+    return {
+      repo: `${repoPrefix}${owner}/${repo}`,
+      runId,
+      jobId
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function comparePullRequestCheckItems(

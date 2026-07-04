@@ -313,7 +313,13 @@ function formatPullRequestReviewEvidence(review: AgentTaskRunWorktreePullRequest
             ]
               .filter(Boolean)
               .join(", ");
-            return `  - ${item.name}: ${meta}${item.detailsUrl ? ` (${item.detailsUrl})` : ""}`;
+            const details = [
+              item.detailsUrl ? `details ${item.detailsUrl}` : undefined,
+              item.logCommand ? `logs \`${item.logCommand}\`` : undefined
+            ]
+              .filter(Boolean)
+              .join("; ");
+            return `  - ${item.name}: ${meta}${details ? ` (${details})` : ""}`;
           })
         ]
       : []),

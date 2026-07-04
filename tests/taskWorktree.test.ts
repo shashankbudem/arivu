@@ -518,7 +518,13 @@ describe("task worktrees", () => {
               mergeStateStatus: "BLOCKED",
               statusCheckRollup: [
                 { __typename: "CheckRun", name: "test", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "https://ci.example/test" },
-                { __typename: "CheckRun", name: "lint", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://ci.example/lint" },
+                {
+                  __typename: "CheckRun",
+                  name: "lint",
+                  status: "COMPLETED",
+                  conclusion: "FAILURE",
+                  detailsUrl: "https://github.com/acme/repo/actions/runs/123456/job/7890"
+                },
                 { __typename: "StatusContext", context: "deploy", state: "PENDING", targetUrl: "https://ci.example/deploy" }
               ],
               comments: [
@@ -598,7 +604,8 @@ describe("task worktrees", () => {
           bucket: "failed",
           status: "COMPLETED",
           conclusion: "FAILURE",
-          detailsUrl: "https://ci.example/lint"
+          detailsUrl: "https://github.com/acme/repo/actions/runs/123456/job/7890",
+          logCommand: "gh run view '123456' --repo 'acme/repo' --job '7890' --log-failed"
         },
         {
           name: "deploy",

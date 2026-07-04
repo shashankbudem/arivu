@@ -246,6 +246,7 @@ const AgentTaskRunWorktreePullRequestCheckItemSchema = z.object({
   conclusion: z.string().optional(),
   state: z.string().optional(),
   detailsUrl: z.string().optional(),
+  logCommand: z.string().optional(),
   startedAt: z.string().optional(),
   completedAt: z.string().optional()
 });

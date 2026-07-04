@@ -5535,6 +5535,7 @@ function TaskWorktreePullRequestChecks({ items }: { items: AgentTaskRunWorktreeP
           <li key={`${item.name}-${item.detailsUrl ?? item.completedAt ?? index}`}>
             <span>{pullRequestCheckLabel(item)}</span>
             {item.detailsUrl ? <p>{item.detailsUrl}</p> : null}
+            {item.logCommand ? <p>{item.logCommand}</p> : null}
           </li>
         ))}
       </ul>
