@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { execa } from "execa";
 import { z } from "zod";
 import type { ApprovalManager } from "../permissions/ApprovalManager.js";
-import { isDestructiveCommand } from "../permissions/destructive.js";
+import { analyzeShellCommand } from "../permissions/destructive.js";
 import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "../permissions/scopePolicy.js";
 import type { AppConfig } from "../config.js";
 import { resolveCommandExecutionProfile } from "../execution/profile.js";
@@ -591,11 +591,15 @@ export function createToolRegistry(context: ToolContext) {
       if (!executionProfile.supported) {
         throw new Error(executionProfile.reason ?? `Unsupported execution profile: ${executionProfile.profile}`);
       }
+      const commandAnalysis = analyzeShellCommand(parsed.command);
       await context.approvals.require({
         type: "shell",
         command: parsed.command,
         cwd: context.workspaceRoot,
-        destructive: isDestructiveCommand(parsed.command)
+        destructive: commandAnalysis.destructive,
+        risk: commandAnalysis.risk,
+        analysisSummary: commandAnalysis.summary,
+        analysisReasons: commandAnalysis.reasons
       });
       const result = await execa(parsed.command, {
         cwd: context.workspaceRoot,
@@ -607,6 +611,8 @@ export function createToolRegistry(context: ToolContext) {
         `executionProfile: ${executionProfile.profile}`,
         `executionIsolation: ${executionProfile.isolation}`,
         `workingDirectory: ${context.workspaceRoot}`,
+        `commandRisk: ${commandAnalysis.risk}`,
+        `commandAnalysis: ${commandAnalysis.summary}`,
         `exitCode: ${result.exitCode}`,
         result.stdout ? `stdout:\n${result.stdout}` : "",
         result.stderr ? `stderr:\n${result.stderr}` : ""

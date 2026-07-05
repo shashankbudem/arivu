@@ -43,7 +43,7 @@ Arivu currently executes against the active local workspace:
 - File and search tools are workspace-contained.
 - Desktop file-context attachments are selected explicitly by the user, resolved inside the active workspace, and sent as bounded quoted prompt text.
 - Existing-file edits prefer unified patches and require read-before-replace checks.
-- Shell commands run through the local `run` tool with trust-mode approval. The tool now accepts an explicit `executionProfile` and records profile/isolation/cwd metadata on command artifacts.
+- Shell commands run through the local `run` tool with trust-mode approval. The tool performs shallow shell-aware command analysis before approval, flags high-risk destructive patterns, includes a compact risk summary in approval prompts, accepts an explicit `executionProfile`, and records risk/profile/isolation/cwd metadata on command artifacts.
 - Browser tools use isolated Electron browser targets with a persistent Arivu browser profile.
 - MCP tools use configured stdio servers through short-lived clients.
 
@@ -63,7 +63,10 @@ Only `executionProfile: "host"` is configured today. Requests for `container` or
 4. **Sandbox option**
    The command tool now has an explicit execution-profile seam. Next, implement a real container, gVisor, Kata, or microVM backend for package installs/tests instead of the app host.
 
-5. **PR/review workflow**
+5. **Safer shell execution**
+   The `run` tool still executes through the local host shell after approval, but it now tokenizes commands enough to identify command roots, shell control operators, pipes, redirects, common package/git mutations, and high-risk destructive patterns such as recursive remove, git reset/clean, raw device writes, system-path redirects, and download-piped-to-interpreter commands. Approval prompts and command artifacts preserve the derived risk summary. Next, move from analysis-only shell execution toward structured argv commands or sandbox-backed execution profiles for common test/build/package actions.
+
+6. **PR/review workflow**
    Task worktrees can prepare PR draft metadata, create remote draft PRs through GitHub CLI, refresh created PR review/check/comment snapshots with bounded feedback previews, line-level review-thread summaries, bounded named check evidence, persisted review-state notifications, derived GitHub Actions log commands, external check-detail capture commands, explicit Fetch evidence command artifacts, watch a created PR with user-started background refresh, derive an explicit ready/blocked/waiting merge cue from the last refreshed snapshot, sync with the current original checkout, pause on conflicted files with explicit file-level Open/Continue/Abort actions, keep promotion blocked while conflicts are active, and draft a Review PR continuation prompt from created PR cards with the last refreshed PR status, PR updates, check evidence, check-evidence commands, fetched evidence artifact ids, and review feedback included when present. Next, add provider-specific CI artifact downloads where authenticated APIs are available.
 
 ## Non-Goals For The Local Desktop MVP

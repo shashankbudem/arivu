@@ -569,3 +569,9 @@ Reason: users need a fast answer to "what tools did this query use?" without los
 Decision: Loop mode now persists a bounded iteration ledger on the session loop state and active task run. Each iteration records its status, continue/done/blocked decision when present, tool and artifact deltas, assistant output preview, and error preview for failed iterations. Activity renders those rows in the task-run group, and copied Markdown audits include a `## Loop Iterations` section.
 
 Reason: loop mode is only useful if users can understand why the agent continued or stopped. Persisting compact per-iteration state turns the loop into auditable control-plane data instead of relying on transient working indicators or hidden loop-control markers.
+
+## 2026-07-06: Shell commands get parser-derived risk summaries
+
+Decision: the `run` tool now performs shallow shell-aware command analysis before approval. It tokenizes enough syntax to identify command roots, control operators, pipes, redirects, package/git mutations, privileged/network command roots, and high-risk destructive patterns. Approval prompts include the compact analysis line, and command results persist `commandRisk` plus `commandAnalysis` into task-run command artifacts, Activity details, and copied audits.
+
+Reason: local shell execution remains powerful even when approval-gated. Parser-derived risk metadata gives users a clearer pre-run review signal and preserves command safety evidence after reload without pretending that local host shell execution is a sandbox.

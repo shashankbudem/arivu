@@ -876,6 +876,8 @@ function commandArtifactFromToolResult(
   const executionProfile = commandExecutionProfileFromResult(result);
   const executionIsolation = stringFromMatch(result.match(/^executionIsolation:\s*(.+)$/m)?.[1]);
   const workingDirectory = stringFromMatch(result.match(/^workingDirectory:\s*(.+)$/m)?.[1]);
+  const commandRisk = commandRiskFromResult(result);
+  const commandAnalysis = stringFromMatch(result.match(/^commandAnalysis:\s*(.+)$/m)?.[1]);
   const stdout = extractCommandSection(result, "stdout");
   const stderr = extractCommandSection(result, "stderr");
   const boundedStdout = stdout === undefined ? undefined : boundCommandStream(stdout);
@@ -901,6 +903,8 @@ function commandArtifactFromToolResult(
     title: "Command output",
     summary: summaryParts.length > 0 ? summaryParts.join(" - ") : "Command output captured.",
     command: options.command,
+    commandRisk,
+    commandAnalysis,
     executionProfile,
     executionIsolation,
     workingDirectory,
@@ -921,6 +925,14 @@ function commandArtifactFromToolResult(
 function commandExecutionProfileFromResult(result: string): CommandExecutionProfile | undefined {
   const value = stringFromMatch(result.match(/^executionProfile:\s*(.+)$/m)?.[1]);
   if (value === "host" || value === "container" || value === "sandbox") {
+    return value;
+  }
+  return undefined;
+}
+
+function commandRiskFromResult(result: string): AgentTaskRunArtifact["commandRisk"] {
+  const value = stringFromMatch(result.match(/^commandRisk:\s*(.+)$/m)?.[1]);
+  if (value === "low" || value === "medium" || value === "high") {
     return value;
   }
   return undefined;

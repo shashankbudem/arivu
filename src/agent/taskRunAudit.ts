@@ -220,9 +220,15 @@ function approvalLines(run: AgentTaskRun) {
         approvalScopeSummary(approval.scope)
       ].filter((item): item is string => Boolean(item));
       const preview = approvalChangePreviewSummary(approval.changePreview);
-      return `- ${details.join(" - ")}: ${inlineText(approval.summary)} (${inlineText(approval.reason)})${preview ? `; preview: ${preview}` : ""}`;
+      const commandAnalysis = approvalCommandAnalysisSummary(approval.message);
+      return `- ${details.join(" - ")}: ${inlineText(approval.summary)} (${inlineText(approval.reason)})${commandAnalysis ? `; ${commandAnalysis}` : ""}${preview ? `; preview: ${preview}` : ""}`;
     })
   );
+}
+
+function approvalCommandAnalysisSummary(message: string | undefined) {
+  const analysis = message?.match(/^Command analysis:\s*(.+)$/m)?.[1]?.trim();
+  return analysis ? `analysis: ${inlineText(analysis)}` : "";
 }
 
 function approvalScopeSummary(scope: AgentTaskRun["approvals"][number]["scope"]) {
@@ -267,6 +273,12 @@ function artifactLine(artifact: AgentTaskRunArtifact) {
   }
   if (artifact.exitCode !== undefined) {
     parts.push(`exit ${artifact.exitCode}`);
+  }
+  if (artifact.commandRisk) {
+    parts.push(`risk ${artifact.commandRisk}`);
+  }
+  if (artifact.commandAnalysis) {
+    parts.push(inlineText(artifact.commandAnalysis));
   }
   if (artifact.durationMs !== undefined) {
     parts.push(formatDurationMs(artifact.durationMs));

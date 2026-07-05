@@ -380,9 +380,11 @@ describe("createToolRegistry", () => {
       approvals: new ApprovalManager("ask", async () => true)
     });
 
-    await expect(registry.execute("run", { command: "printf profile-ok" })).resolves.toContain(
-      `executionProfile: host\nexecutionIsolation: local host process\nworkingDirectory: ${process.cwd()}\nexitCode: 0\nstdout:\nprofile-ok`
-    );
+    const result = await registry.execute("run", { command: "printf profile-ok" });
+    expect(result).toContain(`executionProfile: host\nexecutionIsolation: local host process\nworkingDirectory: ${process.cwd()}`);
+    expect(result).toContain("commandRisk: low");
+    expect(result).toContain("commandAnalysis: low risk - commands: printf");
+    expect(result).toContain("exitCode: 0\nstdout:\nprofile-ok");
   });
 
   it("rejects unconfigured command execution profiles before approval", async () => {

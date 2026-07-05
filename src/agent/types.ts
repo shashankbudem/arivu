@@ -269,6 +269,8 @@ export type AgentTaskRunArtifact = {
   additions?: number;
   deletions?: number;
   command?: string;
+  commandRisk?: "low" | "medium" | "high";
+  commandAnalysis?: string;
   executionProfile?: CommandExecutionProfile;
   executionIsolation?: string;
   workingDirectory?: string;

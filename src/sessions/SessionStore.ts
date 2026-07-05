@@ -207,6 +207,8 @@ const AgentTaskRunArtifactSchema = z.object({
   additions: z.number().int().min(0).optional(),
   deletions: z.number().int().min(0).optional(),
   command: z.string().optional(),
+  commandRisk: z.enum(["low", "medium", "high"]).optional(),
+  commandAnalysis: z.string().optional(),
   executionProfile: z.enum(["host", "container", "sandbox"]).optional(),
   executionIsolation: z.string().optional(),
   workingDirectory: z.string().optional(),

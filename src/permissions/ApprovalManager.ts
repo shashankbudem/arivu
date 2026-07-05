@@ -3,7 +3,7 @@ import { confirm } from "@inquirer/prompts";
 import chalk from "chalk";
 import { scopeForApprovalAction } from "./approvalScope.js";
 import { evaluateApprovalPolicy, type CapabilityPolicyOverrides } from "./capabilityPolicy.js";
-import { isDestructiveCommand } from "./destructive.js";
+import { analyzeShellCommand, isDestructiveCommand, type ShellCommandAnalysis } from "./destructive.js";
 import { evaluateScopePolicy, type WorkspaceScopePolicyRules } from "./scopePolicy.js";
 import type { ApprovalAction, TrustMode } from "./types.js";
 import type { AgentTaskRunApprovalChangePreview, AgentTaskRunApprovalEvent } from "../agent/types.js";
@@ -25,7 +25,8 @@ export class ApprovalManager {
   ) {}
 
   async require(action: ApprovalAction): Promise<void> {
-    const destructive = action.destructive ?? (action.type === "shell" ? isDestructiveCommand(action.command) : action.type === "network");
+    const shellAnalysis = action.type === "shell" ? shellAnalysisForAction(action) : undefined;
+    const destructive = action.destructive ?? (shellAnalysis?.destructive ?? (action.type === "shell" ? isDestructiveCommand(action.command) : action.type === "network"));
     const baseDecision = evaluateApprovalPolicy(this.mode, action, { risky: destructive, overrides: this.policyOverrides });
     const scopeDecision = baseDecision.effect === "deny" ? undefined : evaluateScopePolicy(action, this.scopePolicyRules);
     const decision = scopeDecision
@@ -69,7 +70,7 @@ export class ApprovalManager {
 
     const label =
       action.type === "shell"
-        ? formatShellApproval(action.command, destructive, action.cwd)
+        ? formatShellApproval(action.command, destructive, action.cwd, shellAnalysis)
         : action.type === "mcp"
           ? formatMcpApproval(action, destructive)
           : action.type === "network"
@@ -106,8 +107,28 @@ export class ApprovalManager {
   }
 }
 
-function formatShellApproval(command: string, destructive: boolean, cwd?: string) {
-  return [`${destructive ? "Destructive shell command" : "Shell command"}: ${command}`, cwd ? `Working directory: ${cwd}` : ""]
+function shellAnalysisForAction(action: Extract<ApprovalAction, { type: "shell" }>): ShellCommandAnalysis {
+  const analysis = analyzeShellCommand(action.command);
+  if (!action.analysisSummary && !action.risk && !action.analysisReasons?.length) {
+    return analysis;
+  }
+  const reasons = action.analysisReasons?.length ? action.analysisReasons : analysis.reasons;
+  const risk = action.risk ?? analysis.risk;
+  return {
+    ...analysis,
+    risk,
+    destructive: risk === "high",
+    reasons,
+    summary: action.analysisSummary ?? analysis.summary
+  };
+}
+
+function formatShellApproval(command: string, destructive: boolean, cwd?: string, analysis?: ShellCommandAnalysis) {
+  return [
+    `${destructive ? "Destructive shell command" : "Shell command"}: ${command}`,
+    analysis ? `Command analysis: ${analysis.summary}` : "",
+    cwd ? `Working directory: ${cwd}` : ""
+  ]
     .filter(Boolean)
     .join("\n");
 }

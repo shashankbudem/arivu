@@ -31,7 +31,7 @@ describe("task run audit summaries", () => {
           value: "npm test"
         },
         summary: "npm test",
-        message: "Shell command: npm test"
+        message: "Shell command: npm test\nCommand analysis: low risk - commands: npm"
       },
       "2026-01-01T00:00:01.000Z"
     );
@@ -54,7 +54,7 @@ describe("task run audit summaries", () => {
         toolCallId: "call_1",
         name: "run",
         result:
-          "executionProfile: host\nexecutionIsolation: local host process\nworkingDirectory: /workspace\nexitCode: 1\nstdout:\nsrc/app.ts(1,1): error TS2322: Type 'string' is not assignable to type 'number'."
+          "executionProfile: host\nexecutionIsolation: local host process\nworkingDirectory: /workspace\ncommandRisk: low\ncommandAnalysis: low risk - commands: npm\nexitCode: 1\nstdout:\nsrc/app.ts(1,1): error TS2322: Type 'string' is not assignable to type 'number'."
       },
       "2026-01-01T00:00:04.000Z"
     );
@@ -84,8 +84,11 @@ describe("task run audit summaries", () => {
     expect(audit).toContain("- Arguments: `{\"command\":\"npm test\"}`");
     expect(audit).toContain("- Policy: Approved - prompt - ask - scope Command npm test: shell commands require approval");
     expect(audit).toContain("- Approved - Run command - shell - ask - prompt - scope Command npm test: npm test");
+    expect(audit).toContain("analysis: low risk - commands: npm");
     expect(audit).toContain("- Status: Failed");
-    expect(audit).toContain("- command_output: Command output - Exit code 1 - 2.0s - 1 diagnostic - exit 1 - 2.0s - 1 diagnostic");
+    expect(audit).toContain(
+      "- command_output: Command output - Exit code 1 - 2.0s - 1 diagnostic - exit 1 - risk low - low risk - commands: npm - 2.0s - 1 diagnostic"
+    );
     expect(audit).toContain("- completed: Run tests and explain the failure [evidence: command=npm test; report=reports/junit.xml]");
   });
 

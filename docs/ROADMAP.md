@@ -44,7 +44,7 @@ This roadmap is ordered by development leverage for the current MVP.
 - Add richer TUI change inspection beyond the implemented `/diff` staged/unstaged/untracked summary.
 - Add richer file mention/context commands beyond the implemented desktop file-context picker and `/files` command.
 - Add richer multimodal composer workflows beyond the implemented picker, paste, and drag-and-drop image attachment paths.
-- Add safer command parsing instead of broad shell execution.
+- Add safer command parsing instead of broad shell execution. Shallow shell-aware command analysis now records risk summaries for approvals and command artifacts; structured argv execution or sandbox-backed common command profiles remain future work.
 
 ## Milestone 6: Packaging
 

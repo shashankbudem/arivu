@@ -83,7 +83,7 @@ describe("approval manager", () => {
         label: "Command",
         value: "npm test"
       },
-      message: "Shell command: npm test"
+      message: "Shell command: npm test\nCommand analysis: low risk - commands: npm"
     });
     expect(events[1]).toMatchObject({
       id: events[0]?.id,

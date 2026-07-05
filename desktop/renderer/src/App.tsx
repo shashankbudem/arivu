@@ -9197,6 +9197,7 @@ function commandArtifactSummary(artifact?: AgentTaskRunArtifact) {
   }
   const parts = [
     artifact.exitCode === undefined ? undefined : `Exit code ${artifact.exitCode}`,
+    artifact.commandRisk ? `Risk ${artifact.commandRisk}` : undefined,
     artifact.durationMs === undefined ? undefined : formatDurationMs(artifact.durationMs),
     testReportSummary(artifact.testReports) ??
       (artifact.reportPaths?.length ? `${artifact.reportPaths.length} report path${artifact.reportPaths.length === 1 ? "" : "s"}` : undefined),
@@ -9208,6 +9209,8 @@ function commandArtifactSummary(artifact?: AgentTaskRunArtifact) {
 function commandArtifactDetail(artifact: AgentTaskRunArtifact) {
   const metadata = [
     artifact.command === undefined ? undefined : `command: ${artifact.command}`,
+    artifact.commandRisk === undefined ? undefined : `commandRisk: ${artifact.commandRisk}`,
+    artifact.commandAnalysis === undefined ? undefined : `commandAnalysis: ${artifact.commandAnalysis}`,
     artifact.executionProfile === undefined ? undefined : `executionProfile: ${artifact.executionProfile}`,
     artifact.executionIsolation === undefined ? undefined : `executionIsolation: ${artifact.executionIsolation}`,
     artifact.workingDirectory === undefined ? undefined : `workingDirectory: ${artifact.workingDirectory}`,

@@ -27,6 +27,9 @@ export type ApprovalAction =
       command: string;
       cwd?: string;
       destructive?: boolean;
+      risk?: "low" | "medium" | "high";
+      analysisSummary?: string;
+      analysisReasons?: string[];
     }
   | {
       type: "mcp";
