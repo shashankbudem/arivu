@@ -3,7 +3,17 @@ import { chatContentHasImage, chatContentHasText, chatContentToText, type ChatCo
 import type { ChatClient, ChatMessage, ChatRequest, ChatResponse, ChatStreamHandler, ToolCall } from "./types.js";
 
 type OpenAICompatibleConfig = Pick<AppConfig, "apiKey" | "baseUrl" | "model" | "trustMode"> &
-  Partial<Pick<AppConfig, "toolCalling" | "imageInput" | "tavilyApiKey" | "mcpServers">>;
+  Partial<Pick<AppConfig, "toolCalling" | "imageInput" | "tavilyApiKey" | "mcpServers">> & {
+    onCapabilityObservation?: (observation: ProviderCapabilityObservation) => void | Promise<void>;
+  };
+
+export type ProviderCapabilityObservation = {
+  capability: "toolCalling" | "imageInput";
+  value: "disabled";
+  source: "provider_error";
+  status: number;
+  detail: string;
+};
 
 type OpenAIContentPart =
   | {
@@ -83,7 +93,11 @@ export class OpenAICompatibleChatClient implements ChatClient {
     if (!response.ok) {
       const body = await response.text();
       if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(response.status, body, request)) {
+        await this.observeCapability("toolCalling", response.status, body);
         return this.completeWithMode(request, "markdown");
+      }
+      if (this.config.imageInput !== "enabled" && shouldPersistImageInputUnsupported(response.status, body, request)) {
+        await this.observeCapability("imageInput", response.status, body);
       }
       throw new Error(`Model request failed (${response.status}): ${body}`);
     }
@@ -120,7 +134,12 @@ export class OpenAICompatibleChatClient implements ChatClient {
     if (!response.ok) {
       const body = await response.text();
       if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(response.status, body, request)) {
+        await this.observeCapability("toolCalling", response.status, body);
         return this.completeWithMode(request, "markdown");
+      }
+      if (this.config.imageInput !== "enabled" && shouldPersistImageInputUnsupported(response.status, body, request)) {
+        await this.observeCapability("imageInput", response.status, body);
+        throw new Error(`Model request failed (${response.status}): ${body}`);
       }
       return this.completeWithMode(request, mode);
     }
@@ -237,6 +256,16 @@ export class OpenAICompatibleChatClient implements ChatClient {
 
     return { message };
   }
+
+  private async observeCapability(capability: ProviderCapabilityObservation["capability"], status: number, body: string) {
+    await this.config.onCapabilityObservation?.({
+      capability,
+      value: "disabled",
+      source: "provider_error",
+      status,
+      detail: compactErrorDetail(body)
+    });
+  }
 }
 
 type CompletionMode = "tool_calls" | "markdown";
@@ -296,6 +325,19 @@ function shouldRetryWithoutTools(status: number, body: string, request: ChatRequ
   const decodeRelated = /\b(failed to decode json body|decode json|decode json body|invalid json|invalid character|unexpected end of JSON input|invalid request body)\b/i.test(body);
   const emptyAssistantContentRelated = /\bempty content\b/i.test(body) && /\bassistant messages?\b/i.test(body);
   return toolRelated || decodeRelated || emptyAssistantContentRelated;
+}
+
+function shouldPersistImageInputUnsupported(status: number, body: string, request: ChatRequest) {
+  if (!request.messages.some((message) => chatContentHasImage(message.content)) || ![400, 404, 415, 422, 500].includes(status)) {
+    return false;
+  }
+  const imageRelated = /\b(image|images|image_url|vision|visual|multimodal|multi-modal|content part|content parts|input image|data url|base64)\b/i.test(body);
+  const unsupportedRelated = /\b(unsupported|not supported|does not support|do not support|invalid|unrecognized|unknown|cannot|can't|text[- ]?only|media type)\b/i.test(body);
+  return imageRelated && unsupportedRelated;
+}
+
+function compactErrorDetail(body: string) {
+  return body.replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
 function hasToolProtocol(request: ChatRequest) {

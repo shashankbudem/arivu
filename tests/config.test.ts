@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   REDACTED_SECRET_VALUE,
+  applyProviderCapabilityObservation,
   appConfigDir,
   appDataDir,
   configPath,
@@ -217,6 +218,76 @@ describe("config", () => {
       { id: "plain", toolCalling: "disabled", imageInput: "disabled" },
       { id: "legacy-default", toolCalling: "auto", imageInput: "auto" }
     ]);
+  });
+
+  it("applies provider capability observations to auto-mode providers", async () => {
+    const config = await loadConfig({ includeEnv: false });
+    const next = applyProviderCapabilityObservation(
+      {
+        ...config,
+        activeProviderId: "plain",
+        providers: [
+          {
+            id: "plain",
+            name: "Plain Chat",
+            baseUrl: "https://api.example.test/v1/",
+            model: "plain-model",
+            toolCalling: "auto",
+            imageInput: "auto"
+          },
+          {
+            id: "strict",
+            name: "Strict Tools",
+            baseUrl: "https://strict.example.test/v1",
+            model: "strict-model",
+            toolCalling: "enabled",
+            imageInput: "auto"
+          }
+        ],
+        toolCalling: "auto"
+      },
+      {
+        providerId: "plain",
+        baseUrl: "https://api.example.test/v1",
+        capability: "toolCalling",
+        value: "disabled"
+      }
+    );
+
+    expect(next).not.toBe(config);
+    expect(next.toolCalling).toBe("disabled");
+    expect(next.providers).toMatchObject([
+      { id: "plain", toolCalling: "disabled" },
+      { id: "strict", toolCalling: "enabled" }
+    ]);
+
+    const unchanged = applyProviderCapabilityObservation(next, {
+      providerId: "strict",
+      baseUrl: "https://strict.example.test/v1",
+      capability: "toolCalling",
+      value: "disabled"
+    });
+    expect(unchanged).toBe(next);
+    expect(unchanged.providers.find((provider) => provider.id === "strict")?.toolCalling).toBe("enabled");
+  });
+
+  it("applies provider capability observations to top-level config without saved providers", async () => {
+    const config = await loadConfig({ includeEnv: false });
+    const next = applyProviderCapabilityObservation(
+      {
+        ...config,
+        baseUrl: "https://api.example.test/v1/",
+        imageInput: "auto",
+        providers: []
+      },
+      {
+        baseUrl: "https://api.example.test/v1",
+        capability: "imageInput",
+        value: "disabled"
+      }
+    );
+
+    expect(next.imageInput).toBe("disabled");
   });
 
   it("saves workspace capability policy overrides by absolute workspace root", async () => {

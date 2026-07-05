@@ -27,8 +27,8 @@ This roadmap is ordered by development leverage for the current MVP.
 ## Milestone 4: Provider robustness
 
 - Add richer provider diagnostics beyond the implemented `arivu doctor` checks for API key, model listing, selected model, chat, streaming, tool calling, and Tavily.
-- Add provider capability config for tool-calling support. Manual per-provider `auto`/`enabled`/`disabled` tool-calling modes are implemented; automatic persistence from observed fallback outcomes remains future work.
-- Add provider capability config for multimodal image support. Manual per-provider `auto`/`enabled`/`disabled` image-input modes are implemented; automatic persistence from observed failures or probes remains future work.
+- Add provider capability config for tool-calling support. Manual per-provider `auto`/`enabled`/`disabled` tool-calling modes and automatic persistence from observed schema failures are implemented; proactive probes remain future work.
+- Add provider capability config for multimodal image support. Manual per-provider `auto`/`enabled`/`disabled` image-input modes and automatic persistence from observed image-part failures are implemented; proactive probes remain future work.
 - Add clearer remediation copy for tool schema, streaming, and no-tools fallback failures.
 - Add better model error formatting.
 - Add optional per-provider presets, starting with NVIDIA and OpenAI.

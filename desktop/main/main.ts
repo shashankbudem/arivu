@@ -15,7 +15,7 @@ import {
 } from "../../src/agent/content.js";
 import { buildTaskRunReportRemediationInstruction } from "../../src/agent/reportRemediation.js";
 import { createSkill, discoverSkills, globalSkillsDir, type CreateSkillInput, type SkillSummary } from "../../src/agent/skills.js";
-import { OpenAICompatibleChatClient } from "../../src/agent/OpenAICompatibleChatClient.js";
+import { OpenAICompatibleChatClient, type ProviderCapabilityObservation } from "../../src/agent/OpenAICompatibleChatClient.js";
 import {
   MAX_PROMPT_IMAGE_ATTACHMENTS as MAX_IMAGE_ATTACHMENTS,
   MAX_PROMPT_IMAGE_BYTES as MAX_IMAGE_BYTES,
@@ -79,6 +79,7 @@ import type {
 import {
   appDataDir,
   appEnv,
+  applyProviderCapabilityObservation,
   loadConfig,
   mergeRedactedMcpServers,
   redactMcpServers,
@@ -1463,6 +1464,7 @@ class DesktopController {
       content,
       skillNames,
       config,
+      providerId: modelSelection.providerId,
       loopEnabled: Boolean(loopState),
       planModeEnabled,
       taskRunId: taskRun.id,
@@ -1487,6 +1489,7 @@ class DesktopController {
     content,
     skillNames,
     config,
+    providerId,
     loopEnabled,
     planModeEnabled,
     taskRunId,
@@ -1497,6 +1500,7 @@ class DesktopController {
     content: ChatMessage["content"];
     skillNames: string[];
     config: AppConfig;
+    providerId?: string;
     loopEnabled: boolean;
     planModeEnabled: boolean;
     taskRunId?: string;
@@ -1514,7 +1518,15 @@ class DesktopController {
       scopeRules
     );
     const agent = new Agent({
-      client: new OpenAICompatibleChatClient(config),
+      client: new OpenAICompatibleChatClient({
+        ...config,
+        onCapabilityObservation: (observation) =>
+          this.recordProviderCapabilityObservation({
+            providerId,
+            baseUrl: config.baseUrl,
+            observation
+          })
+      }),
       approvals,
       cwd: executionCwd ?? session.cwd,
       projectRoot: session.projectRoot,
@@ -1905,6 +1917,31 @@ class DesktopController {
       return undefined;
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  private async recordProviderCapabilityObservation({
+    providerId,
+    baseUrl,
+    observation
+  }: {
+    providerId?: string;
+    baseUrl: string;
+    observation: ProviderCapabilityObservation;
+  }) {
+    if (observation.value !== "disabled") {
+      return;
+    }
+
+    const saved = await loadConfig({ includeEnv: false });
+    const next = applyProviderCapabilityObservation(saved, {
+      providerId,
+      baseUrl,
+      capability: observation.capability,
+      value: observation.value
+    });
+    if (next !== saved) {
+      await saveConfig(next);
     }
   }
 

@@ -9,6 +9,7 @@ describe("OpenAICompatibleChatClient", () => {
 
   it("falls back to markdown when an endpoint rejects tool calling", async () => {
     const bodies: Array<Record<string, unknown>> = [];
+    const observations: unknown[] = [];
     vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       if (bodies.length === 1) {
@@ -30,7 +31,10 @@ describe("OpenAICompatibleChatClient", () => {
       apiKey: "test-key",
       baseUrl: "https://api.example.test/v1",
       model: "test-model",
-      trustMode: "ask"
+      trustMode: "ask",
+      onCapabilityObservation: (observation) => {
+        observations.push(observation);
+      }
     });
     const request: ChatRequest = {
       messages: [{ role: "user", content: "read the file" }],
@@ -49,6 +53,14 @@ describe("OpenAICompatibleChatClient", () => {
     expect(bodies[0]?.tools).toBeTruthy();
     expect(bodies[1]?.tools).toBeUndefined();
     expect(JSON.stringify(bodies[1]?.messages)).toContain("Tool calling is unavailable");
+    expect(observations).toMatchObject([
+      {
+        capability: "toolCalling",
+        value: "disabled",
+        source: "provider_error",
+        status: 400
+      }
+    ]);
   });
 
   it("omits tools immediately when provider tool calling is disabled", async () => {
@@ -310,6 +322,46 @@ describe("OpenAICompatibleChatClient", () => {
     ).rejects.toThrow("Image input is disabled for this provider");
 
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("observes image input as disabled when an endpoint rejects image parts", async () => {
+    const observations: unknown[] = [];
+    vi.stubGlobal("fetch", async () => new Response("image_url content parts are not supported by this model", { status: 400 }));
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      imageInput: "auto",
+      onCapabilityObservation: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await expect(
+      client.complete({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this." },
+              { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "low" } }
+            ]
+          }
+        ],
+        tools: []
+      })
+    ).rejects.toThrow("image_url content parts are not supported");
+
+    expect(observations).toMatchObject([
+      {
+        capability: "imageInput",
+        value: "disabled",
+        source: "provider_error",
+        status: 400
+      }
+    ]);
   });
 
   it("falls back to markdown when an endpoint rejects empty assistant tool-call content", async () => {

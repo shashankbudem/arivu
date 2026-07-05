@@ -539,3 +539,9 @@ Reason: some OpenAI-compatible endpoints work for chat but fail on tool schemas.
 Decision: saved OpenAI-compatible providers have an `imageInput` mode: `auto`, `enabled`, or `disabled`. Auto preserves the existing OpenAI-compatible image-part behavior, enabled marks a provider as known image-capable for routing, and disabled fails multimodal prompts before a provider request is sent.
 
 Reason: text-only OpenAI-compatible endpoints often reject `image_url` content parts. A provider-level flag gives the user an explicit escape hatch, avoids leaking image data to endpoints known not to support it, and lets Auto routing prefer image-capable providers when multiple providers are configured.
+
+## 2026-07-05: Auto-mode provider failures update capability flags
+
+Decision: when an auto-mode provider rejects OpenAI tool schemas or image content parts during a desktop chat request, Arivu persists the matching provider capability as `disabled`. Explicit `enabled` values are never overwritten automatically.
+
+Reason: the first failed request is useful evidence. Persisting it prevents repeated failing round trips and makes future prompts behave predictably, while respecting explicit user overrides for providers they know are capable.

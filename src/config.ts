@@ -81,6 +81,13 @@ export type AppConfig = z.infer<typeof ConfigSchema>;
 export type LlmProviderProfile = z.infer<typeof LlmProviderSchema>;
 export type ProviderToolCallingMode = z.infer<typeof ProviderToolCallingSchema>;
 export type ProviderImageInputMode = z.infer<typeof ProviderImageInputSchema>;
+export type ProviderCapabilityName = "toolCalling" | "imageInput";
+export type ProviderCapabilityObservationPatch = {
+  providerId?: string;
+  baseUrl: string;
+  capability: ProviderCapabilityName;
+  value: "disabled";
+};
 export type WorkspacePolicyCapability = z.infer<typeof WorkspacePolicyCapabilitySchema>;
 export type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapability, CapabilityPolicyOverrideEffect>>;
 export type WorkspaceCapabilityPolicyScopeRules = WorkspaceScopePolicyRules;
@@ -180,6 +187,58 @@ export function redactMcpServers(servers: AppConfig["mcpServers"]): AppConfig["m
       }
     ])
   );
+}
+
+export function applyProviderCapabilityObservation(config: AppConfig, observation: ProviderCapabilityObservationPatch): AppConfig {
+  if (observation.value !== "disabled") {
+    return config;
+  }
+
+  const capability = observation.capability;
+  if (config.providers.length > 0) {
+    const targetId = observation.providerId ?? config.activeProviderId;
+    const normalizedBaseUrl = normalizeCapabilityBaseUrl(observation.baseUrl);
+    let changed = false;
+    let matchedProviderIsActive = false;
+    const providers = config.providers.map((provider): LlmProviderProfile => {
+      const isTarget = targetId ? provider.id === targetId : normalizeCapabilityBaseUrl(provider.baseUrl) === normalizedBaseUrl;
+      if (!isTarget) {
+        return provider;
+      }
+      matchedProviderIsActive = provider.id === config.activeProviderId;
+      if (provider[capability] !== "auto") {
+        return provider;
+      }
+      changed = true;
+      return {
+        ...provider,
+        [capability]: "disabled"
+      } as LlmProviderProfile;
+    });
+
+    if (!changed) {
+      return config;
+    }
+
+    return {
+      ...config,
+      providers,
+      ...(matchedProviderIsActive && config[capability] === "auto" ? { [capability]: "disabled" } : {})
+    };
+  }
+
+  if (normalizeCapabilityBaseUrl(config.baseUrl) !== normalizeCapabilityBaseUrl(observation.baseUrl) || config[capability] !== "auto") {
+    return config;
+  }
+
+  return {
+    ...config,
+    [capability]: "disabled"
+  };
+}
+
+function normalizeCapabilityBaseUrl(baseUrl: string) {
+  return baseUrl.trim().replace(/\/+$/, "").toLowerCase();
 }
 
 export function mergeRedactedMcpServers(next: AppConfig["mcpServers"], existing: AppConfig["mcpServers"] = {}): AppConfig["mcpServers"] {
