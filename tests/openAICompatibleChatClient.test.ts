@@ -51,6 +51,72 @@ describe("OpenAICompatibleChatClient", () => {
     expect(JSON.stringify(bodies[1]?.messages)).toContain("Tool calling is unavailable");
   });
 
+  it("omits tools immediately when provider tool calling is disabled", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "Plain chat response."
+            }
+          }
+        ]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      toolCalling: "disabled"
+    });
+
+    const response = await client.complete({
+      messages: [{ role: "user", content: "read the file" }],
+      tools: [
+        {
+          name: "read",
+          description: "Read a file.",
+          parameters: { type: "object" }
+        }
+      ]
+    });
+
+    expect(response.message.content).toBe("Plain chat response.");
+    expect(body?.tools).toBeUndefined();
+    expect(body?.tool_choice).toBeUndefined();
+    expect(JSON.stringify(body?.messages)).toContain("Tool calling is unavailable");
+  });
+
+  it("does not downgrade when provider tool calling is explicitly enabled", async () => {
+    vi.stubGlobal("fetch", async () => new Response("tools are not supported", { status: 400 }));
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      toolCalling: "enabled"
+    });
+
+    await expect(
+      client.complete({
+        messages: [{ role: "user", content: "read the file" }],
+        tools: [
+          {
+            name: "read",
+            description: "Read a file.",
+            parameters: { type: "object" }
+          }
+        ]
+      })
+    ).rejects.toThrow("Model request failed (400): tools are not supported");
+  });
+
   it("strips tool protocol history when retrying a failed tool result request", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {

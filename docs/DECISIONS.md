@@ -527,3 +527,9 @@ Reason: filtered text output is useful for copyable audit-style lists, but termi
 Decision: expose the same deterministic local context compaction through `arivu compact <session-id>` and TUI `/compact [n]`.
 
 Reason: terminal and scripting workflows should not have to open desktop just to shrink a long saved transcript. Sharing the desktop compaction helper keeps the transcript format identical across surfaces, while CLI `--dry-run`, `--recent`, and `--entry-limit` make compaction inspectable for saved sessions.
+
+## 2026-07-05: Providers can disable tool schemas
+
+Decision: saved OpenAI-compatible providers have a `toolCalling` mode: `auto`, `enabled`, or `disabled`. Auto preserves the existing send-tools-then-downgrade behavior, enabled surfaces tool-schema failures, and disabled sends Markdown/no-tools requests immediately. Doctor skips the tool-calling probe when the provider is explicitly configured for plain chat.
+
+Reason: some OpenAI-compatible endpoints work for chat but fail on tool schemas. Persisting the known provider behavior avoids repeating a failing schema round trip on every request while keeping strict users able to force tool support and see real errors.

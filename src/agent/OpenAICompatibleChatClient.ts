@@ -3,7 +3,7 @@ import { chatContentHasText, chatContentToText, type ChatContent, type ChatImage
 import type { ChatClient, ChatMessage, ChatRequest, ChatResponse, ChatStreamHandler, ToolCall } from "./types.js";
 
 type OpenAICompatibleConfig = Pick<AppConfig, "apiKey" | "baseUrl" | "model" | "trustMode"> &
-  Partial<Pick<AppConfig, "tavilyApiKey" | "mcpServers">>;
+  Partial<Pick<AppConfig, "toolCalling" | "tavilyApiKey" | "mcpServers">>;
 
 type OpenAIContentPart =
   | {
@@ -62,7 +62,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
   constructor(private readonly config: OpenAICompatibleConfig) {}
 
   async complete(request: ChatRequest): Promise<ChatResponse> {
-    return this.completeWithMode(request, "tool_calls");
+    return this.completeWithMode(request, initialCompletionMode(this.config));
   }
 
   private async completeWithMode(request: ChatRequest, mode: CompletionMode): Promise<ChatResponse> {
@@ -81,7 +81,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
 
     if (!response.ok) {
       const body = await response.text();
-      if (mode === "tool_calls" && shouldRetryWithoutTools(response.status, body, request)) {
+      if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(response.status, body, request)) {
         return this.completeWithMode(request, "markdown");
       }
       throw new Error(`Model request failed (${response.status}): ${body}`);
@@ -105,21 +105,22 @@ export class OpenAICompatibleChatClient implements ChatClient {
       throw new Error("Missing ARIVU_API_KEY, legacy SHANKINSTER_API_KEY, or saved apiKey config.");
     }
 
+    const mode = initialCompletionMode(this.config);
     const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.config.apiKey}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(toOpenAIRequestBody(this.config.model, request, true, "tool_calls"))
+      body: JSON.stringify(toOpenAIRequestBody(this.config.model, request, true, mode))
     });
 
     if (!response.ok) {
       const body = await response.text();
-      if (shouldRetryWithoutTools(response.status, body, request)) {
+      if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(response.status, body, request)) {
         return this.completeWithMode(request, "markdown");
       }
-      return this.complete(request);
+      return this.completeWithMode(request, mode);
     }
 
     const contentType = response.headers.get("content-type") ?? "";
@@ -237,6 +238,10 @@ export class OpenAICompatibleChatClient implements ChatClient {
 }
 
 type CompletionMode = "tool_calls" | "markdown";
+
+function initialCompletionMode(config: OpenAICompatibleConfig): CompletionMode {
+  return config.toolCalling === "disabled" ? "markdown" : "tool_calls";
+}
 
 function toOpenAIRequestBody(model: string, request: ChatRequest, stream: boolean, mode: CompletionMode) {
   const body: Record<string, unknown> = {

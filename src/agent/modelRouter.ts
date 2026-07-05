@@ -1,4 +1,4 @@
-import type { AppConfig } from "../config.js";
+import type { AppConfig, ProviderToolCallingMode } from "../config.js";
 import { chatContentToText, type ChatContent } from "./content.js";
 import type { AgentSession } from "./types.js";
 
@@ -12,6 +12,7 @@ export type ModelProviderCandidate = {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  toolCalling?: ProviderToolCallingMode;
   active: boolean;
   models?: string[];
 };
@@ -21,6 +22,7 @@ export type ModelSelection = {
   model: string;
   baseUrl: string;
   apiKey?: string;
+  toolCalling?: ProviderToolCallingMode;
   providerId?: string;
   providerName: string;
   task: AutoModelTask;
@@ -100,6 +102,7 @@ export function providerCandidatesFromConfig(config: AppConfig): ModelProviderCa
         baseUrl: config.baseUrl,
         model: config.model,
         apiKey: config.apiKey,
+        toolCalling: config.toolCalling,
         active: true
       }
     ];
@@ -113,6 +116,7 @@ export function providerCandidatesFromConfig(config: AppConfig): ModelProviderCa
       baseUrl: provider.baseUrl,
       model: provider.model,
       apiKey: provider.apiKey || (active ? config.apiKey : undefined),
+      toolCalling: provider.toolCalling,
       active
     };
   });
@@ -134,6 +138,7 @@ export function resolveModelForPrompt(
       model: config.model,
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
+      toolCalling: active?.toolCalling ?? config.toolCalling,
       providerId: active?.id,
       providerName: active?.name ?? "OpenAI-compatible",
       task: "general",
@@ -153,6 +158,7 @@ export function resolveModelForPrompt(
     model,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
+    toolCalling: provider.toolCalling,
     providerId: provider.id,
     providerName: provider.name,
     task,

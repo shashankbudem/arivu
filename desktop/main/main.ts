@@ -114,6 +114,7 @@ const MAX_CONTEXT_FILE_CHARS = 24_000;
 type PublicConfig = {
   baseUrl: string;
   model: string;
+  toolCalling: AppConfig["toolCalling"];
   activeProviderId?: string;
   providers: PublicLlmProviderProfile[];
   trustMode: AppConfig["trustMode"];
@@ -285,6 +286,7 @@ type ConfigPatch = {
   tavilyApiKey?: string;
   baseUrl?: string;
   model?: string;
+  toolCalling?: AppConfig["toolCalling"];
   activeProviderId?: string;
   providers?: LlmProviderPatch[];
   trustMode?: AppConfig["trustMode"];
@@ -1115,6 +1117,9 @@ class DesktopController {
     if (patch.model?.trim()) {
       next.model = patch.model.trim();
     }
+    if (patch.toolCalling) {
+      next.toolCalling = patch.toolCalling;
+    }
     if (patch.trustMode) {
       next.trustMode = patch.trustMode;
     }
@@ -1140,6 +1145,7 @@ class DesktopController {
         if (activeProvider) {
           next.baseUrl = activeProvider.baseUrl;
           next.model = activeProvider.model;
+          next.toolCalling = activeProvider.toolCalling;
           next.apiKey = activeProvider.apiKey;
         }
       }
@@ -2127,6 +2133,7 @@ function configForModelSelection(config: AppConfig, selection: ModelSelection): 
     ...config,
     model: selection.model,
     baseUrl: selection.baseUrl,
+    toolCalling: selection.toolCalling ?? config.toolCalling,
     apiKey: selection.apiKey ?? (selection.baseUrl === config.baseUrl ? config.apiKey : undefined)
   };
 }
@@ -2181,6 +2188,7 @@ function toPublicConfig(config: AppConfig): PublicConfig {
   return {
     baseUrl: config.baseUrl,
     model: config.model,
+    toolCalling: config.toolCalling,
     activeProviderId: config.activeProviderId,
     providers: config.providers.map(toPublicProvider),
     trustMode: config.trustMode,
@@ -2198,6 +2206,7 @@ function toPublicProvider(provider: LlmProviderProfile): PublicLlmProviderProfil
     name: provider.name,
     baseUrl: provider.baseUrl,
     model: provider.model,
+    toolCalling: provider.toolCalling,
     apiKeyPresent: Boolean(provider.apiKey)
   };
 }
@@ -2497,6 +2506,7 @@ function normalizeProviders(providers: LlmProviderPatch[], existingProviders: Ll
       name,
       baseUrl,
       model,
+      toolCalling: provider.toolCalling ?? "auto",
       ...(apiKey ? { apiKey } : {})
     });
   }
@@ -2505,7 +2515,7 @@ function normalizeProviders(providers: LlmProviderPatch[], existingProviders: Ll
 }
 
 function updateProviderRuntime(providers: LlmProviderProfile[], activeProviderId: string, patch: ConfigPatch): LlmProviderProfile[] {
-  if (!patch.baseUrl?.trim() && !patch.model?.trim() && !patch.apiKey?.trim()) {
+  if (!patch.baseUrl?.trim() && !patch.model?.trim() && !patch.apiKey?.trim() && !patch.toolCalling) {
     return providers;
   }
 
@@ -2518,6 +2528,7 @@ function updateProviderRuntime(providers: LlmProviderProfile[], activeProviderId
       ...provider,
       baseUrl: patch.baseUrl?.trim() || provider.baseUrl,
       model: patch.model?.trim() || provider.model,
+      toolCalling: patch.toolCalling ?? provider.toolCalling,
       ...(apiKey ? { apiKey } : {})
     };
   });
@@ -2655,6 +2666,7 @@ function applyConfigPatch(config: AppConfig, patch: ConfigPatch): AppConfig {
     tavilyApiKey: patch.tavilyApiKey?.trim() || config.tavilyApiKey,
     baseUrl: patch.baseUrl?.trim() || config.baseUrl,
     model: patch.model?.trim() || config.model,
+    toolCalling: patch.toolCalling ?? config.toolCalling,
     trustMode: patch.trustMode ?? config.trustMode,
     mcpServers: patch.mcpServers ? mergeRedactedMcpServers(patch.mcpServers, config.mcpServers) : config.mcpServers,
     workspacePolicies: patch.workspacePolicies ?? config.workspacePolicies,

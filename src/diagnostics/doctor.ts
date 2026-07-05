@@ -26,6 +26,7 @@ const MAX_DIAGNOSTIC_BODY_BYTES = 64 * 1024;
 const DIAGNOSTIC_FETCH_TIMEOUT_MS = 15_000;
 
 type DoctorConfig = Pick<AppConfig, "apiKey" | "tavilyApiKey" | "baseUrl" | "model" | "trustMode"> &
+  Partial<Pick<AppConfig, "toolCalling">> &
   Partial<Pick<AppConfig, "mcpServers">>;
 
 type ChatJson = {
@@ -62,7 +63,9 @@ export async function runDoctor(config: DoctorConfig, options: DoctorOptions = {
     checks.push(checkSelectedModel(config.model, models));
     checks.push(await checkBasicChat(config, fetcher));
     checks.push(await checkStreaming(config, fetcher));
-    checks.push(await checkToolCalling(config, fetcher));
+    checks.push(config.toolCalling === "disabled"
+      ? check("tool-calling", "Tool calling", "skip", "Skipped because this provider is configured for plain chat.")
+      : await checkToolCalling(config, fetcher));
   }
 
   checks.push(await checkTavily(config, fetcher));

@@ -44,11 +44,14 @@ const McpServerSchema = z.object({
   disabled: z.boolean().default(false)
 });
 
+const ProviderToolCallingSchema = z.enum(["auto", "enabled", "disabled"]);
+
 const LlmProviderSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   baseUrl: z.string().url(),
   model: z.string().min(1),
+  toolCalling: ProviderToolCallingSchema.default("auto"),
   apiKey: z.string().optional()
 });
 
@@ -62,6 +65,7 @@ const ConfigSchema = z.object({
   tavilyApiKey: z.string().optional(),
   baseUrl: z.string().url().default("https://api.openai.com/v1"),
   model: z.string().default("gpt-4.1"),
+  toolCalling: ProviderToolCallingSchema.default("auto"),
   activeProviderId: z.string().optional(),
   providers: z.array(LlmProviderSchema).default([]),
   trustMode: TrustModeSchema.default("ask"),
@@ -72,6 +76,7 @@ const ConfigSchema = z.object({
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
 export type LlmProviderProfile = z.infer<typeof LlmProviderSchema>;
+export type ProviderToolCallingMode = z.infer<typeof ProviderToolCallingSchema>;
 export type WorkspacePolicyCapability = z.infer<typeof WorkspacePolicyCapabilitySchema>;
 export type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapability, CapabilityPolicyOverrideEffect>>;
 export type WorkspaceCapabilityPolicyScopeRules = WorkspaceScopePolicyRules;

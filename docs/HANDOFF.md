@@ -30,7 +30,7 @@ Implemented:
 - Desktop workspace open and create flows.
 - Desktop expandable project chat groups, standalone Chats section, and draft-chat project selector in the prompt `+` menu.
 - Desktop searchable model switching dialog, backed by the active OpenAI-compatible provider's `GET /models`.
-- Desktop multiple-provider settings for OpenAI-compatible LLM providers. Each saved provider has a unique name, base URL, model id, and optional API key.
+- Desktop multiple-provider settings for OpenAI-compatible LLM providers. Each saved provider has a unique name, base URL, model id, tool-calling capability mode, and optional API key.
 - Desktop image attachments and pasted/dropped-image upload in the composer for PNG, JPEG, WebP, and GIF prompts.
 - Desktop workspace file-context attachments from the prompt `+` menu and `/files`, with bounded UTF-8 text sent as quoted prompt context.
 - Desktop compact header/sidebar chrome, icon-only header actions with tooltips, and light/dark mode.
@@ -119,6 +119,7 @@ Important config behavior: saved config is merged with non-empty environment var
 Desktop provider behavior:
 
 - The active provider supplies the runtime base URL, model, and API key.
+- The active provider also supplies the runtime tool-calling mode: `auto` sends tools and downgrades on provider schema errors, `enabled` sends tools and surfaces errors, and `disabled` starts in Markdown/no-tools mode for plain-chat endpoints.
 - The model picker loads and searches models for only the selected provider.
 - Manual model picker lists are not combined across providers because duplicate model ids can exist and a manual model choice must imply a provider/base URL/key.
 - `auto` is a first-class model mode. At send time, Electron main classifies the prompt and resolves `auto` into a concrete provider/model using `src/agent/modelRouter.ts` plus cached `/models` results when available.
@@ -178,7 +179,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Task runs record captured plan/capability/tool/artifact metadata. Direct write approval rows store bounded pre-apply previews for proposed `apply_patch` diffs or `write_file` content, direct `apply_patch` edits are captured as bounded patch artifacts with changed paths and line stats after success, direct `write_file` edits are captured as bounded file-change artifacts with write mode and new-content preview after success, direct edit artifacts can draft revert prompts from their saved evidence, and large direct edits are marked as risky write reviews before applying outside managed task worktrees. Shell command output is captured as an artifact with command text, execution profile/isolation/cwd metadata, exit code, duration, bounded stdout/stderr snippets, detected test-report paths, parsed JUnit/SARIF summaries, bounded failing-test/finding previews, and Activity can copy a bounded Markdown audit summary for a whole run. PR check evidence fetches also use bounded command artifacts and link the saved artifact id back to the refreshed check evidence row. Refreshed PR snapshots keep compact update notifications for changed review/check/feedback state. Tool Activity rows and audit summaries now show matching policy effect/reason when approval audit evidence exists, or an explicit tool-name capability inference when only transcript protocol is available. Run-level verification summaries gate task-worktree PR/merge promotion when failed. Passed-verification promotion hints, created-PR Review PR prompts seeded with manually refreshed or watched PR review/check/comment/check snapshots, PR updates, derived check-evidence commands, fetched evidence artifact ids, and line-level thread summaries when present, persisted repair history chains with focus/open/compare/replay controls plus `replayOfTaskRunId` lineage, Activity open actions for attached report/source evidence, Draft fix prompts, worktree-level Fix verification and Rerun checks prompts, replay failure Review prompts with pattern summaries and focused verification plans, and one-shot Loop continuation injection for the latest failed report evidence inside the execution workspace are implemented.
 - Task worktree open/sync/merge/discard/cleanup and PR creation are local desktop actions. Create PR requires GitHub CLI credentials and a usable origin remote. Conflict resolution is Activity-driven today: open the managed folder or individual conflicted files from the conflict card, resolve files, then Continue or Abort the recorded sync conflict.
 - Approval prompts are action-aware for shell and write actions, but still need more polish for a production-grade UX.
-- Persistent provider capability detection is not implemented. Tool support is inferred per request through retries/fallbacks, not cached as provider config.
+- Automatic provider capability detection is not implemented. Tool support can be configured manually per provider, while automatic persistence from observed fallback outcomes remains future work.
 - Provider-specific multimodal capability detection is not implemented; image prompts require a model endpoint that accepts OpenAI-compatible image content parts.
 - Desktop history exists with deletion, and the CLI can list/filter recent sessions with `arivu sessions`.
 - Workspace creation currently creates an empty folder; there is no project template or git initialization flow yet.
@@ -194,7 +195,7 @@ High-value tasks:
 - Deepen command diagnostics into broader language-server evidence beyond TypeScript and ESLint command-output parsing.
 - Add signed or centrally managed workspace policy distribution for teams that need stronger provenance than a checked-in bundle file.
 - Polish stale-path recovery and cleanup for recent workspace rows.
-- Add richer remediation and provider capability persistence from doctor/fallback outcomes.
-- Add provider capability flags for tool-calling vs plain chat, using observed fallback outcomes.
+- Add richer remediation and automatic provider capability persistence from doctor/fallback outcomes.
+- Add provider capability flags for multimodal image support.
 - Add first-run setup flow for base URL, model, API key, and trust mode.
 - Add tests around TUI command handling by extracting pure command logic.

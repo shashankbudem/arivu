@@ -94,6 +94,7 @@ function config(patch: Partial<AppConfig> = {}): AppConfig {
   return {
     baseUrl: "https://integrate.api.nvidia.com/v1",
     model: "auto",
+    toolCalling: "auto",
     activeProviderId: "nvidia",
     providers: [],
     trustMode: "ask",

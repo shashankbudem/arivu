@@ -69,9 +69,10 @@ Provider health check:
 ```bash
 arivu doctor
 arivu doctor --json
+arivu config set toolCalling disabled
 ```
 
-The doctor command checks API key presence, `GET /models`, selected model membership, chat completions, streaming, tool calling, and Tavily. Without an API key it reports skipped network checks, which is useful for offline setup validation.
+The doctor command checks API key presence, `GET /models`, selected model membership, chat completions, streaming, tool calling, and Tavily. Without an API key it reports skipped network checks, which is useful for offline setup validation. When `toolCalling` is `disabled`, doctor skips the tool-calling probe because the active provider is intentionally configured for plain chat.
 
 Basic one-shot model check:
 
@@ -176,7 +177,7 @@ MCP tools check:
 
 With NVIDIA-style OpenAI-compatible endpoints, batch/fallback requests should omit `stream`; only streaming requests should send `stream: true`. Assistant tool-call history with no text should serialize as `content: null`, not `content: ""`, and blank assistant history messages without tool calls should be omitted from provider payloads. If a model/provider rejects tool payloads or empty assistant tool-call content, the client should retry without tools and convert tool history into plain-text transcript entries.
 
-For image-capable models, desktop image prompts should serialize as OpenAI-compatible text and `image_url` content parts. Provider capability detection is not cached, so use a model endpoint that is known to accept image content when testing attachments.
+For image-capable models, desktop image prompts should serialize as OpenAI-compatible text and `image_url` content parts. Multimodal provider capability detection is not cached, so use a model endpoint that is known to accept image content when testing attachments.
 
 TUI check:
 
@@ -229,7 +230,7 @@ Desktop workflows to check manually after UI changes:
 - Typing `/` in the desktop composer opens slash commands. Verify `/session` shows chat id plus estimated context used/remaining and latest task-run status, `/tools` opens the tools list, `/skills` opens the skills selector, `/files` attaches workspace text/code files to the next prompt, `/browser` opens or focuses the separate browser window, `/plan` toggles one-shot read-only plan approval, `/worktree` toggles one-shot task worktree mode for git projects, `/compact` runs the existing compact-context flow when enough messages exist, and unknown slash commands are not sent as model prompts.
 - Skills in the prompt `+` menu show the installed global skills list. Load queues a skill for the next prompt, the composer shows a queued chip, and after the prompt succeeds the chat shows the skill as loaded context. The Add skill action opens Settings where a new skill can be saved as `<name>/SKILL.md`.
 - Model selection opens a dialog with search, loads options from the selected provider's `GET /models`, and keeps manual model id entry available when the provider has no list or no match.
-- Settings can save multiple OpenAI-compatible LLM providers, a Tavily key, and MCP server JSON. Confirm the model picker searches only the selected provider's models and does not combine lists across providers.
+- Settings can save multiple OpenAI-compatible LLM providers, a Tavily key, and MCP server JSON. Confirm the model picker searches only the selected provider's models and does not combine lists across providers. Confirm each provider's Tool calling mode saves as Auto fallback, Enabled, or Disabled, and Disabled makes doctor skip the tool-calling probe.
 - Header actions are icon-only and expose hover/focus tooltips.
 - The Browser header action opens or hides the separate maximized browser window. Verify explicit visible URL opens in that window, default agent browser tools remain hidden/background, and the main workspace layout does not gain an embedded browser column.
 - In the visible browser window, verify the tab strip can create a new tab, select between tabs, close a tab, keep each tab's URL/title/history separate, navigate with the address bar/back/forward/reload controls, and convert non-URL address text into a Google search.

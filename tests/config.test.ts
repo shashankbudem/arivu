@@ -67,6 +67,7 @@ describe("config", () => {
     await expect(loadConfig()).resolves.toMatchObject({
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4.1",
+      toolCalling: "auto",
       trustMode: "ask"
     });
   });
@@ -98,7 +99,16 @@ describe("config", () => {
     const display = redactConfigForDisplay({
       apiKey: "saved-key",
       tavilyApiKey: "tavily-key",
-      providers: [{ id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: "provider-key" }],
+      providers: [
+        {
+          id: "openai",
+          name: "OpenAI",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-4.1",
+          toolCalling: "auto",
+          apiKey: "provider-key"
+        }
+      ],
       mcpServers: {
         docs: {
           command: "server",
@@ -173,6 +183,35 @@ describe("config", () => {
   it("reuses standard Tavily API key env var", async () => {
     process.env.TAVILY_API_KEY = "tvly-standard";
     await expect(loadConfig()).resolves.toMatchObject({ tavilyApiKey: "tvly-standard" });
+  });
+
+  it("persists provider tool-calling capability flags", async () => {
+    await writeFile(configPath(), `${JSON.stringify({
+      toolCalling: "disabled",
+      providers: [
+        {
+          id: "plain",
+          name: "Plain Chat",
+          baseUrl: "https://api.example.test/v1",
+          model: "plain-model",
+          toolCalling: "disabled"
+        },
+        {
+          id: "legacy-default",
+          name: "Legacy Default",
+          baseUrl: "https://legacy.example.test/v1",
+          model: "legacy-model"
+        }
+      ]
+    })}\n`);
+
+    const loaded = await loadConfig({ includeEnv: false });
+
+    expect(loaded.toolCalling).toBe("disabled");
+    expect(loaded.providers).toMatchObject([
+      { id: "plain", toolCalling: "disabled" },
+      { id: "legacy-default", toolCalling: "auto" }
+    ]);
   });
 
   it("saves workspace capability policy overrides by absolute workspace root", async () => {

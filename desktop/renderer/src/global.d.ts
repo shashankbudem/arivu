@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 type TrustMode = "ask" | "readonly" | "trusted";
+type ProviderToolCallingMode = "auto" | "enabled" | "disabled";
 type BrowserMode = "visible" | "background";
 
 type BrowserBounds = {
@@ -24,6 +25,7 @@ type LlmProviderProfile = {
   name: string;
   baseUrl: string;
   model: string;
+  toolCalling: ProviderToolCallingMode;
   apiKeyPresent: boolean;
 };
 
@@ -530,6 +532,7 @@ type DesktopState = {
   config: {
     baseUrl: string;
     model: string;
+    toolCalling: ProviderToolCallingMode;
     activeProviderId?: string;
     providers: LlmProviderProfile[];
     trustMode: TrustMode;
@@ -663,6 +666,7 @@ type ConfigPatch = {
   tavilyApiKey?: string;
   baseUrl?: string;
   model?: string;
+  toolCalling?: ProviderToolCallingMode;
   activeProviderId?: string;
   providers?: LlmProviderPatch[];
   trustMode?: TrustMode;

@@ -174,31 +174,36 @@ const PROVIDER_PRESETS: LlmProviderPatch[] = [
     id: "openai",
     name: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4.1"
+    model: "gpt-4.1",
+    toolCalling: "auto"
   },
   {
     id: "nvidia",
     name: "NVIDIA NIM",
     baseUrl: "https://integrate.api.nvidia.com/v1",
-    model: "moonshotai/kimi-k2.6"
+    model: "moonshotai/kimi-k2.6",
+    toolCalling: "auto"
   },
   {
     id: "openrouter",
     name: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
-    model: "openai/gpt-4.1"
+    model: "openai/gpt-4.1",
+    toolCalling: "auto"
   },
   {
     id: "groq",
     name: "Groq",
     baseUrl: "https://api.groq.com/openai/v1",
-    model: "llama-3.3-70b-versatile"
+    model: "llama-3.3-70b-versatile",
+    toolCalling: "auto"
   },
   {
     id: "local",
     name: "Local / Ollama",
     baseUrl: "http://localhost:11434/v1",
-    model: "llama3.1"
+    model: "llama3.1",
+    toolCalling: "auto"
   }
 ];
 const DEFAULT_COLLAPSED_SECTIONS: Record<SidebarSectionId, boolean> = {
@@ -6268,6 +6273,7 @@ function SettingsView({
       name,
       baseUrl: "",
       model: "",
+      toolCalling: "auto",
       apiKey: ""
     };
     setProviders((current) => [...current, nextProvider]);
@@ -6294,6 +6300,7 @@ function SettingsView({
         providers: providerPatch.providers,
         baseUrl: providerPatch.activeProvider.baseUrl,
         model: providerPatch.activeProvider.model,
+        toolCalling: providerPatch.activeProvider.toolCalling,
         trustMode,
         mcpServers,
         workspacePolicies: updateWorkspacePoliciesForRoot(
@@ -6339,6 +6346,7 @@ function SettingsView({
         model,
         apiKey: apiKey.trim() || undefined,
         tavilyApiKey: tavilyApiKey.trim() || undefined,
+        toolCalling: selectedProvider?.toolCalling ?? "auto",
         trustMode
       });
       setDoctorReport(report);
@@ -6512,6 +6520,18 @@ function SettingsView({
             type="password"
             placeholder={selectedProviderApiKeyPresent ? "Saved. Enter a new key to replace it." : "No key saved for this provider."}
           />
+        </label>
+        <label>
+          <span>Tool calling</span>
+          <select
+            value={selectedProvider?.toolCalling ?? "auto"}
+            onChange={(event) => updateSelectedProvider({ toolCalling: event.target.value as ProviderToolCallingMode })}
+          >
+            <option value="auto">Auto fallback</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          <small className="field-note">Disable for plain-chat endpoints that reject OpenAI tool schemas.</small>
         </label>
         <label className="tavily-key-field">
           <span>Tavily API key</span>
@@ -7707,6 +7727,7 @@ function providerFormsFromConfig(config: DesktopState["config"]): ProviderFormSt
       name: provider.name,
       baseUrl: provider.baseUrl,
       model: provider.model,
+      toolCalling: provider.toolCalling ?? "auto",
       apiKey: "",
       apiKeyPresent: provider.apiKeyPresent
     }));
@@ -7719,6 +7740,7 @@ function providerFormsFromConfig(config: DesktopState["config"]): ProviderFormSt
       name: preset?.name ?? "Current provider",
       baseUrl: config.baseUrl,
       model: config.model,
+      toolCalling: config.toolCalling,
       apiKey: "",
       apiKeyPresent: config.apiKeyPresent
     }
@@ -7862,6 +7884,7 @@ function validateProviderForms(
       name,
       baseUrl: normalizeProviderUrl(baseUrl, name),
       model,
+      toolCalling: provider.toolCalling ?? "auto",
       ...(provider.apiKey?.trim() ? { apiKey: provider.apiKey.trim() } : {})
     });
   }
