@@ -282,7 +282,7 @@ type ActivityEvidenceLink = {
   artifactId: string;
   path: string;
   line?: number;
-  kind: "report" | "source";
+  kind: "report" | "source" | "diagnostic";
 };
 
 type ActivityGroupStatus = "running" | "done" | "waiting" | "failed";
@@ -8978,7 +8978,8 @@ function commandArtifactSummary(artifact?: AgentTaskRunArtifact) {
     artifact.exitCode === undefined ? undefined : `Exit code ${artifact.exitCode}`,
     artifact.durationMs === undefined ? undefined : formatDurationMs(artifact.durationMs),
     testReportSummary(artifact.testReports) ??
-      (artifact.reportPaths?.length ? `${artifact.reportPaths.length} report path${artifact.reportPaths.length === 1 ? "" : "s"}` : undefined)
+      (artifact.reportPaths?.length ? `${artifact.reportPaths.length} report path${artifact.reportPaths.length === 1 ? "" : "s"}` : undefined),
+    diagnosticSummary(artifact.diagnostics)
   ].filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join(" - ") : artifact.summary;
 }
@@ -9001,6 +9002,9 @@ function commandArtifactDetail(artifact: AgentTaskRunArtifact) {
   const unparsedReportPaths = artifact.reportPaths?.filter((path) => !parsedReportPaths.has(path)) ?? [];
   if (unparsedReportPaths.length) {
     sections.push(`report paths:\n${unparsedReportPaths.map((path) => `- ${path}`).join("\n")}`);
+  }
+  if (artifact.diagnostics?.length) {
+    sections.push(`diagnostics:\n${artifact.diagnostics.map(formatDiagnosticLine).join("\n")}`);
   }
   if (artifact.stdout !== undefined) {
     sections.push(`stdout${artifact.stdoutTruncated ? " (truncated)" : ""}:\n${artifact.stdout || "(empty)"}`);
@@ -9179,8 +9183,21 @@ function commandArtifactEvidenceLinks(taskRunId: string, artifact: AgentTaskRunA
       addLink("source", finding.path, finding.line);
     }
   }
+  for (const diagnostic of artifact.diagnostics ?? []) {
+    addLink("diagnostic", diagnostic.path, diagnostic.line);
+  }
 
   return links.length > 0 ? links : undefined;
+}
+
+function diagnosticSummary(diagnostics?: AgentTaskRunDiagnostic[]) {
+  if (!diagnostics?.length) {
+    return undefined;
+  }
+  const errorCount = diagnostics.filter((diagnostic) => diagnostic.severity === "error").length;
+  return errorCount > 0
+    ? `${diagnostics.length} diagnostic${diagnostics.length === 1 ? "" : "s"} (${errorCount} error${errorCount === 1 ? "" : "s"})`
+    : `${diagnostics.length} diagnostic${diagnostics.length === 1 ? "" : "s"}`;
 }
 
 function testReportSummary(reports?: AgentTaskRunTestReport[]) {
@@ -9223,6 +9240,14 @@ function formatFindingLine(finding: NonNullable<AgentTaskRunTestReport["findingD
   const location = finding.path ? ` ${finding.path}${finding.line ? `:${finding.line}${finding.column ? `:${finding.column}` : ""}` : ""}` : "";
   const message = finding.message ? ` - ${finding.message}` : "";
   return `${rule}${level}${location}${message}`;
+}
+
+function formatDiagnosticLine(diagnostic: AgentTaskRunDiagnostic) {
+  const code = diagnostic.code ? `${diagnostic.code} ` : "";
+  const location = diagnostic.path
+    ? ` ${diagnostic.path}${diagnostic.line ? `:${diagnostic.line}${diagnostic.column ? `:${diagnostic.column}` : ""}` : ""}`
+    : "";
+  return `- ${diagnostic.source} ${diagnostic.severity}${location} - ${code}${diagnostic.message}`;
 }
 
 function mergeActivityGroupStatus(run: AgentTaskRun, itemStatus: ActivityGroupStatus): ActivityGroupStatus {

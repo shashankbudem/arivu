@@ -2700,6 +2700,11 @@ function taskRunArtifactIncludesEvidencePath(artifact: AgentTaskRunArtifact, req
       }
     }
   }
+  for (const diagnostic of artifact.diagnostics ?? []) {
+    if (diagnostic.path) {
+      paths.add(diagnostic.path);
+    }
+  }
 
   return paths.has(requestedPath);
 }

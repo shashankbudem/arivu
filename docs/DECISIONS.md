@@ -110,7 +110,7 @@ Reason: the harness architecture needs durable, human-readable evidence for what
 
 ## 2026-06-24: Task-run evidence opens from Activity
 
-Decision: Activity command results expose compact open-report/source actions for report paths, JUnit failed-test files, and SARIF finding locations attached to that command artifact. The main process validates the requested path against the artifact, then resolves it under the session or task-worktree root before opening it.
+Decision: Activity command results expose compact open-report/source actions for report paths, JUnit failed-test files, SARIF finding locations, and TypeScript diagnostic source locations attached to that command artifact. The main process validates the requested path against the artifact, then resolves it under the session or task-worktree root before opening it.
 
 Reason: parsed reports are most useful when the user can jump directly from a failed run to the underlying evidence. Keeping the allowed path list anchored to the stored artifact preserves the harness audit boundary while making failures faster to inspect.
 
@@ -497,3 +497,9 @@ Reason: fuzzy text matching alone is useful but brittle when a plan item is prov
 Decision: command-output artifacts now parse bounded TypeScript compiler diagnostics from `tsc`-style stdout/stderr lines, preserving source, severity, `TS####` code, file, line, column, and message. Copied audits show diagnostic counts, saved sessions preserve them, and approved-plan source reviews can use matching diagnostics as item-specific completion evidence.
 
 Reason: compiler diagnostics are the closest available local signal to LSP evidence without running a long-lived language-server process. Capturing the stable `tsc` output format gives plan close-out more semantic evidence for type fixes while keeping the feature deterministic and replayable from command artifacts.
+
+## 2026-07-05: Diagnostic evidence can open source files
+
+Decision: Activity command-result details now render captured TypeScript diagnostics and expose guarded Open actions for diagnostic source paths. The same main-process evidence guard used by report/test/SARIF evidence validates that a requested diagnostic path is attached to the command artifact before resolving it under the session or task-worktree root.
+
+Reason: diagnostic evidence is only useful if the user can jump from the audit trail to the affected source file. Reusing the existing evidence-open guard keeps the interaction convenient without turning arbitrary paths from command output into openable filesystem targets.
