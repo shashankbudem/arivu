@@ -43,6 +43,12 @@ describe("createToolRegistry", () => {
     expect(result.mode).toBe("background");
     expect(result.url).toBe("http://localhost:5173/");
 
+    const searchResult = JSON.parse(await withBrowser.execute("browser_open", { url: "service now developer portal" })) as Record<
+      string,
+      unknown
+    >;
+    expect(searchResult.url).toBe("https://www.google.com/search?q=service+now+developer+portal");
+
     const visibleResult = JSON.parse(await withBrowser.execute("browser_open", { url: "localhost:5173", mode: "visible" })) as Record<
       string,
       unknown

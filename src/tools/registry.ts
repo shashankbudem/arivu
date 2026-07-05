@@ -152,9 +152,9 @@ export function createToolRegistry(context: ToolContext) {
       schema: {
         name: "browser_open",
         description:
-          "Open a URL in Arivu's isolated browser. Defaults to hidden background mode; use visible mode only when the user explicitly asks to see a separate browser window. In visible mode, pass newTab to create a new browser tab or tabId to target an existing tab.",
+          "Open a URL or search text in Arivu's isolated browser. Defaults to hidden background mode; use visible mode only when the user explicitly asks to see a separate browser window. In visible mode, pass newTab to create a new browser tab or tabId to target an existing tab.",
         parameters: objectSchema({
-          url: { type: "string", description: "URL to open. localhost:5173 is accepted and normalized to http://localhost:5173." },
+          url: { type: "string", description: "URL or search text to open. localhost:5173 is normalized to http://localhost:5173; plain text becomes a Google search." },
           mode: { type: "string", enum: ["visible", "background"], description: "Optional browser mode. Defaults to hidden background mode." },
           tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
           newTab: { type: "boolean", description: "Create and activate a new visible browser tab before opening the URL." }

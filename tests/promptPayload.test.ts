@@ -3,6 +3,7 @@ import {
   normalizePromptLoopOptions,
   normalizePromptPayload,
   normalizePromptPlanOptions,
+  normalizePromptRetryFromUserMessageIndex,
   normalizePromptReuseLastUserMessage,
   normalizePromptSkillNames,
   normalizePromptWorktreeOptions
@@ -84,6 +85,14 @@ describe("prompt payload normalization", () => {
     expect(normalizePromptReuseLastUserMessage({ content: "retry", reuseLastUserMessage: true })).toBe(true);
     expect(normalizePromptReuseLastUserMessage({ content: "retry", reuseLastUserMessage: false })).toBe(false);
     expect(normalizePromptReuseLastUserMessage("retry")).toBe(false);
+  });
+
+  it("normalizes assistant retry source indexes", () => {
+    expect(normalizePromptRetryFromUserMessageIndex({ content: "retry", retryFromUserMessageIndex: 4 })).toBe(4);
+    expect(normalizePromptRetryFromUserMessageIndex({ content: "retry", retryFromUserMessageIndex: 0 })).toBe(0);
+    expect(normalizePromptRetryFromUserMessageIndex({ content: "retry", retryFromUserMessageIndex: -1 })).toBeUndefined();
+    expect(normalizePromptRetryFromUserMessageIndex({ content: "retry", retryFromUserMessageIndex: 1.5 })).toBeUndefined();
+    expect(normalizePromptRetryFromUserMessageIndex("retry")).toBeUndefined();
   });
 
   it("normalizes bounded agent loop options", () => {

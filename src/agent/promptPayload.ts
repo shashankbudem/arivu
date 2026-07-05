@@ -31,6 +31,14 @@ export type PromptPlanOptions = {
   enabled: boolean;
 };
 
+export function normalizePromptRetryFromUserMessageIndex(payload: PromptPayload): number | undefined {
+  if (!isRecord(payload) || payload.retryFromUserMessageIndex === undefined) {
+    return undefined;
+  }
+  const value = payload.retryFromUserMessageIndex;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
 export function normalizePromptPayload(payload: PromptPayload): ChatContent {
   if (typeof payload === "string") {
     return payload.trim();

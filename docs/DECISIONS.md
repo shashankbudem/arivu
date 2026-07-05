@@ -551,3 +551,9 @@ Reason: the first failed request is useful evidence. Persisting it prevents repe
 Decision: Settings doctor emits a structured provider capability observation when the forced tool-calling probe proves the endpoint does not support tools. Desktop persists that observation with the same auto-mode rule used for live chat failures.
 
 Reason: doctor is the user's explicit health-check action. When it has strong evidence that a provider cannot accept tool schemas, saving the setting prevents the next chat from repeating the same failing request while still preserving explicit `enabled` overrides.
+
+## 2026-07-05: Assistant retry replaces the old response tail
+
+Decision: retrying an assistant reply sends the source user-message index to desktop. The main process validates that the target is still the same user prompt, truncates messages and task runs after that prompt, and starts the replacement run from the existing user bubble.
+
+Reason: users expect Retry to regenerate the answer, not duplicate the query in the transcript. Handling this in the persisted session keeps chat history, Activity grouping, and future model context aligned.

@@ -22,6 +22,7 @@ import {
   normalizePromptLoopOptions,
   normalizePromptPayload,
   normalizePromptPlanOptions,
+  normalizePromptRetryFromUserMessageIndex,
   normalizePromptReuseLastUserMessage,
   normalizePromptSkillNames,
   normalizePromptWorktreeOptions,
@@ -1270,6 +1271,7 @@ class DesktopController {
     const content = normalizePromptPayload(prompt);
     const skillNames = normalizePromptSkillNames(prompt);
     const reuseLastUserMessage = normalizePromptReuseLastUserMessage(prompt);
+    const retryFromUserMessageIndex = normalizePromptRetryFromUserMessageIndex(prompt);
     const planOptions = normalizePromptPlanOptions(prompt);
     const loopOptions = normalizePromptLoopOptions(prompt);
     const worktreeOptions = normalizePromptWorktreeOptions(prompt);
@@ -1306,12 +1308,23 @@ class DesktopController {
         : createDesktopSession(originCwd, originProjectRoot, config.trustMode),
       modelSelection
     );
+    const trimmedContent = trimChatContent(content);
+    if (retryFromUserMessageIndex !== undefined) {
+      const retryMessage = session.messages[retryFromUserMessageIndex];
+      if (retryMessage?.role !== "user") {
+        throw new Error("Retry target user message was not found.");
+      }
+      if (JSON.stringify(trimChatContent(retryMessage.content)) !== JSON.stringify(trimmedContent)) {
+        throw new Error("Retry target no longer matches the requested prompt.");
+      }
+      session.messages = session.messages.slice(0, retryFromUserMessageIndex + 1);
+      session.taskRuns = (session.taskRuns ?? []).filter((run) => run.userMessageIndex < retryFromUserMessageIndex);
+    }
     const before = session.messages.length;
     const lastMessage = session.messages.at(-1);
-    const trimmedContent = trimChatContent(content);
     const loopState = !planModeEnabled && loopOptions.enabled ? createAgentLoopState(trimmedContent, loopOptions.maxIterations, now) : undefined;
     const canReuseLastUserMessage =
-      reuseLastUserMessage &&
+      (reuseLastUserMessage || retryFromUserMessageIndex !== undefined) &&
       lastMessage?.role === "user" &&
       JSON.stringify(trimChatContent(lastMessage.content)) === JSON.stringify(trimmedContent);
     if (loopState) {

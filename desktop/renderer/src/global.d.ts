@@ -833,6 +833,7 @@ type PromptPayload = {
   content: ChatContent;
   skills?: string[];
   reuseLastUserMessage?: boolean;
+  retryFromUserMessageIndex?: number;
   loop?: boolean | {
     enabled?: boolean;
     maxIterations?: number;

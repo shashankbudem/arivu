@@ -78,9 +78,22 @@ export function normalizeBrowserUrl(input: string) {
     assertAllowedBrowserProtocol(parsed);
     return parsed.toString();
   }
+  if (!isLikelyBrowserHost(trimmed)) {
+    return googleBrowserSearchUrl(trimmed);
+  }
   const parsed = new URL(`https://${trimmed}`);
   assertAllowedBrowserProtocol(parsed);
   return parsed.toString();
+}
+
+function isLikelyBrowserHost(value: string) {
+  return /^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:\/.*)?$/i.test(value);
+}
+
+function googleBrowserSearchUrl(query: string) {
+  const url = new URL("https://www.google.com/search");
+  url.searchParams.set("q", query);
+  return url.toString();
 }
 
 export function isLocalBrowserUrl(rawUrl: string) {

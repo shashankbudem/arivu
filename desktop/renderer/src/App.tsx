@@ -389,6 +389,7 @@ type FailedPrompt = {
 
 type SubmitPromptOptions = {
   reuseFailedPrompt?: boolean;
+  retryFromUserMessageIndex?: number;
   skillNames?: string[];
   planModeEnabled?: boolean;
   loopEnabled?: boolean;
@@ -413,6 +414,11 @@ type DraftPromptOptions = {
   worktreePlanSource?: WorktreePlanSource;
   status?: string;
   confirmLabel?: string;
+};
+
+type RetryPromptTarget = {
+  content: ChatContent;
+  userMessageIndex: number;
 };
 
 type TaskWorktreeAction =
@@ -1958,6 +1964,7 @@ export function App() {
       options.worktreeReplayOfTaskRunId ?? (usingComposer ? worktreeContinuation?.replayOfTaskRunId : undefined);
     const nextWorktreePlannedFromTaskRunId =
       options.worktreePlannedFromTaskRunId ?? (usingComposer ? worktreePlanSource?.taskRunId : undefined);
+    const retryFromUserMessageIndex = options.retryFromUserMessageIndex;
     const nextWorktreeEnabled = nextPlanModeEnabled
       ? false
       : options.worktreeEnabled ??
@@ -1994,7 +2001,9 @@ export function App() {
     activeSubmissionTokenRef.current = submissionToken;
     const messagesBeforeRun = messages;
     const failedMessageIndex = canReuseFailedPrompt ? failedPrompt.messageIndex : messagesBeforeRun.length;
-    if (!canReuseFailedPrompt) {
+    if (retryFromUserMessageIndex !== undefined) {
+      setMessages(messagesBeforeRun.slice(0, retryFromUserMessageIndex + 1));
+    } else if (!canReuseFailedPrompt) {
       setMessages((current) => [...current, { role: "user", content: nextContent }]);
     }
 
@@ -2003,6 +2012,7 @@ export function App() {
         content: nextContent,
         skills: nextSkillNames,
         reuseLastUserMessage: canReuseFailedPrompt,
+        retryFromUserMessageIndex,
         loop: nextLoopEnabled
           ? {
               enabled: true,
@@ -2053,7 +2063,11 @@ export function App() {
     } catch (err) {
       if (activeSubmissionTokenRef.current === submissionToken) {
         activeSubmissionTokenRef.current = null;
-        setMessages(canReuseFailedPrompt ? messagesBeforeRun : [...messagesBeforeRun, { role: "user", content: nextContent }]);
+        setMessages(
+          canReuseFailedPrompt || retryFromUserMessageIndex !== undefined
+            ? messagesBeforeRun
+            : [...messagesBeforeRun, { role: "user", content: nextContent }]
+        );
         if (usingComposer && nextLoopEnabled) {
           setAgentLoopEnabled(true);
         }
@@ -2076,7 +2090,7 @@ export function App() {
         setError(formatError(err));
         setRetryPrompt(nextContent);
         setFailedPrompt({
-          messageIndex: failedMessageIndex,
+          messageIndex: retryFromUserMessageIndex ?? failedMessageIndex,
           content: nextContent,
           skillNames: nextSkillNames,
           planModeEnabled: nextPlanModeEnabled,
@@ -2116,16 +2130,19 @@ export function App() {
     );
   }
 
-  function retryPromptForAssistant(index: number) {
+  function retryPromptForAssistant(index: number): RetryPromptTarget | null {
     const message = visibleMessages[index]?.message;
     if (message?.role !== "assistant") {
       return null;
     }
 
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      const previous = visibleMessages[cursor]?.message;
-      if (previous?.role === "user") {
-        return previous.content;
+      const previous = visibleMessages[cursor];
+      if (previous?.message.role === "user") {
+        return {
+          content: previous.message.content,
+          userMessageIndex: previous.sourceIndexes.at(-1) ?? previous.messageIndex
+        };
       }
     }
     return null;
@@ -2589,8 +2606,8 @@ export function App() {
                       failedPrompt !== null &&
                       sourceIndexes.includes(failedPrompt.messageIndex) &&
                       chatContentEquals(failedPrompt.content, message.content);
-                    const assistantPromptToRetry = retryPromptForAssistant(index);
-                    const promptToRetry = failedUserPrompt ? message.content : assistantPromptToRetry;
+                    const assistantRetryTarget = retryPromptForAssistant(index);
+                    const promptToRetry = failedUserPrompt ? message.content : assistantRetryTarget?.content;
                     const activityGroup =
                       message.role === "user"
                         ? sourceIndexes
@@ -2623,8 +2640,10 @@ export function App() {
                               });
                               return;
                             }
-                            if (assistantPromptToRetry) {
-                              void submitPrompt(assistantPromptToRetry);
+                            if (assistantRetryTarget) {
+                              void submitPrompt(assistantRetryTarget.content, {
+                                retryFromUserMessageIndex: assistantRetryTarget.userMessageIndex
+                              });
                             }
                           }}
                           onEdit={() => editPromptContent(message.content)}
@@ -2635,9 +2654,9 @@ export function App() {
                   })
                 )}
                 {busy ? (
-                  <div className={agentLoopRunning ? "agent-thinking loop-active" : "agent-thinking"}>
+                  <div className={agentLoopRunning ? "agent-thinking loop-active" : "agent-thinking"} role="status" aria-live="polite">
                     <span className="pulse-dot" />
-                    <span>{agentLoopRunning && activeAgentLoop ? agentLoopLabel : "Agent is working"}</span>
+                    <span className="agent-thinking-label">{agentLoopRunning && activeAgentLoop ? agentLoopLabel : "Agent is working"}</span>
                     {agentLoopRunning ? (
                       <button
                         type="button"
@@ -4447,7 +4466,7 @@ function ToolRunSummary({ group }: { group: ActivityGroup }) {
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <span className="tool-run-icon">{group.status === "running" ? <span className="pulse-dot" /> : <TerminalSquare size={13} />}</span>
         <strong>{toolRunSummaryLabel(group)}</strong>
-        <span>{group.title}</span>
+        <span title={group.detail}>For this query: {group.title}</span>
       </button>
       {group.run ? <TaskRunMeta run={group.run} compact /> : null}
       {expanded ? (
@@ -4561,8 +4580,8 @@ function ActivityGroupCard({
       >
         {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         <div className="activity-group-title">
-          <span>Query</span>
-          <strong>{group.title}</strong>
+          <span>{activityGroupEyebrow(group)}</span>
+          <strong title={group.detail}>{group.title}</strong>
         </div>
         <span className="activity-group-count">{toolEventCountLabel(toolItemCount)}</span>
         <span className={`activity-status ${group.status}`}>{activityStatusLabel(group.status)}</span>
@@ -9378,19 +9397,29 @@ function queryActivityTitle(content: ChatContent) {
 function toolRunSummaryLabel(group: ActivityGroup) {
   const count = group.items.filter((item) => item.kind !== "system").length;
   if (group.status === "running") {
-    return `Running ${toolEventCountLabel(count)}`;
+    return `${toolEventCountLabel(count)} running`;
   }
   if (group.status === "failed") {
-    return `Failed ${toolEventCountLabel(count)}`;
+    return `${toolEventCountLabel(count)} failed`;
   }
   if (group.status === "waiting") {
-    return `Waiting on ${toolEventCountLabel(count)}`;
+    return `${toolEventCountLabel(count)} waiting`;
   }
-  return `Ran ${toolEventCountLabel(count)}`;
+  return `${toolEventCountLabel(count)} done`;
 }
 
 function toolEventCountLabel(count: number) {
-  return `${count} activity ${count === 1 ? "event" : "events"}`;
+  return `${count} tool ${count === 1 ? "event" : "events"}`;
+}
+
+function activityGroupEyebrow(group: ActivityGroup) {
+  if (group.run) {
+    return `Query tools - ${shortRunId(group.run.id)}`;
+  }
+  if (group.userMessageIndex !== null) {
+    return "Query tools";
+  }
+  return "Session tools";
 }
 
 function toolRunKindLabel(item: ActivityItem) {
