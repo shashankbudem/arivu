@@ -126,6 +126,89 @@ describe("cli sessions command", () => {
   });
 });
 
+describe("cli compact command", () => {
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-cli-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("compacts a saved session transcript", async () => {
+    const store = new SessionStore(path.join(tempDir, "sessions"));
+    await store.save({
+      id: "long-session",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [
+        { role: "user", content: "older question" },
+        { role: "assistant", content: "older answer" },
+        { role: "user", content: "recent question" },
+        { role: "assistant", content: "recent answer" }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    const { stdout } = await execArivu(["compact", "long-session", "--recent", "2"]);
+
+    expect(stdout).toContain("Compacted session long-session.");
+    expect(stdout).toContain("Compacted messages: 2");
+    expect(stdout).toContain("Kept recent messages: 2");
+
+    const compacted = await store.load("long-session");
+    expect(compacted.updatedAt).not.toBe("2026-01-01T00:00:00.000Z");
+    expect(compacted.messages).toHaveLength(3);
+    expect(compacted.messages[0]?.role).toBe("system");
+    expect(compacted.messages[0]?.content).toContain("Context compacted locally");
+    expect(compacted.messages[0]?.content).toContain("User: older question");
+    expect(compacted.messages.slice(1)).toEqual([
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ]);
+  });
+
+  it("supports dry-run compaction without saving", async () => {
+    const store = new SessionStore(path.join(tempDir, "sessions"));
+    const session = {
+      id: "dry-run-session",
+      cwd: "/tmp/project",
+      trustMode: "ask" as const,
+      messages: [
+        { role: "user" as const, content: "older question" },
+        { role: "assistant" as const, content: "older answer" },
+        { role: "user" as const, content: "recent question" },
+        { role: "assistant" as const, content: "recent answer" }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    };
+    await store.save(session);
+
+    const { stdout } = await execArivu(["compact", "dry-run-session", "--recent", "2", "--dry-run"]);
+
+    expect(stdout).toContain("Would compact session dry-run-session.");
+    expect(await store.load("dry-run-session")).toEqual(session);
+  });
+
+  it("reports when a saved session does not need compaction", async () => {
+    const store = new SessionStore(path.join(tempDir, "sessions"));
+    await store.save({
+      id: "short-session",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "short" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    const { stdout } = await execArivu(["compact", "short-session", "--recent", "8"]);
+
+    expect(stdout.trim()).toBe("Session short-session is already compact enough. Non-system messages: 1; recent window: 8.");
+  });
+});
+
 describe("cli doctor command", () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-cli-"));

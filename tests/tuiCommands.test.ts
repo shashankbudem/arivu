@@ -37,6 +37,8 @@ describe("TUI slash commands", () => {
     });
     expect(parseTuiSlashCommand("/resume abc123")).toEqual({ kind: "resume", sessionId: "abc123" });
     expect(parseTuiSlashCommand("/diff")).toEqual({ kind: "diff" });
+    expect(parseTuiSlashCommand("/compact")).toEqual({ kind: "compact" });
+    expect(parseTuiSlashCommand("/compact 4")).toEqual({ kind: "compact", recentMessageCount: 4 });
   });
 
   it("keeps unknown slash commands available for model prompts", () => {
@@ -55,6 +57,14 @@ describe("TUI slash commands", () => {
       message: "Use only one of --pinned or --unpinned."
     });
     expect(parseTuiSlashCommand("/resume")).toEqual({ kind: "error", message: "Usage: /resume <session-id>" });
+    expect(parseTuiSlashCommand("/compact zero")).toEqual({
+      kind: "error",
+      message: "Usage: /compact [positive-recent-message-count]"
+    });
+    expect(parseTuiSlashCommand("/compact 4 extra")).toEqual({
+      kind: "error",
+      message: "Usage: /compact [positive-recent-message-count]"
+    });
   });
 
   it("formats recent sessions with resume guidance", () => {

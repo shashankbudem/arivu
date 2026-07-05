@@ -521,3 +521,9 @@ Reason: session discovery should stay consistent across non-desktop surfaces. Sh
 Decision: TUI `/sessions --pick` opens a bounded selectable list using the same optional limit and filters as the text list. Selecting a row resumes that saved session in the live TUI; Escape or `q` dismisses the picker without changing sessions.
 
 Reason: filtered text output is useful for copyable audit-style lists, but terminal users also need a low-friction way to resume without copying ids. Keeping `--pick` opt-in preserves script-like text output while adding an interactive path for daily TUI use.
+
+## 2026-07-05: Terminal surfaces expose local compaction
+
+Decision: expose the same deterministic local context compaction through `arivu compact <session-id>` and TUI `/compact [n]`.
+
+Reason: terminal and scripting workflows should not have to open desktop just to shrink a long saved transcript. Sharing the desktop compaction helper keeps the transcript format identical across surfaces, while CLI `--dry-run`, `--recent`, and `--entry-limit` make compaction inspectable for saved sessions.

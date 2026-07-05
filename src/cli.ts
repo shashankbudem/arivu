@@ -2,6 +2,7 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { Agent } from "./agent/Agent.js";
+import { COMPACT_RECENT_MESSAGE_COUNT, compactSessionMessages } from "./agent/contextCompaction.js";
 import type { AgentSession } from "./agent/types.js";
 import { OpenAICompatibleChatClient } from "./agent/OpenAICompatibleChatClient.js";
 import {
@@ -103,6 +104,48 @@ program
   });
 
 program
+  .command("compact")
+  .description("Compact a saved session transcript locally.")
+  .argument("<session-id>", "session id")
+  .option("--recent <count>", "number of recent non-system messages to keep", String(COMPACT_RECENT_MESSAGE_COUNT))
+  .option("--entry-limit <chars>", "maximum characters per compacted summary entry")
+  .option("--dry-run", "show what would be compacted without saving")
+  .action(async (sessionId: string, options: CompactOptions) => {
+    const store = new SessionStore();
+    const session = await store.load(sessionId);
+    const now = new Date();
+    const recentMessageCount = parsePositiveInteger(options.recent, "Recent message count");
+    const entryCharacterLimit = options.entryLimit ? parsePositiveInteger(options.entryLimit, "Entry limit") : undefined;
+    const result = compactSessionMessages(session.messages, {
+      recentMessageCount,
+      entryCharacterLimit,
+      now
+    });
+
+    if (!result.compacted) {
+      console.log(
+        chalk.dim(
+          `Session ${session.id} is already compact enough. Non-system messages: ${result.remainingMessageCount}; recent window: ${recentMessageCount}.`
+        )
+      );
+      return;
+    }
+
+    if (!options.dryRun) {
+      await store.save({
+        ...session,
+        messages: result.messages,
+        updatedAt: now.toISOString()
+      });
+    }
+
+    console.log(chalk.green(`${options.dryRun ? "Would compact" : "Compacted"} session ${session.id}.`));
+    console.log(`Compacted messages: ${result.compactedMessageCount}`);
+    console.log(`Kept recent messages: ${result.remainingMessageCount}`);
+    console.log(`Total stored messages after compaction: ${result.messages.length}`);
+  });
+
+program
   .command("config")
   .description("Read or update arivu config.")
   .argument("<action>", "get or set")
@@ -167,6 +210,12 @@ type SessionsOptions = {
   unpinned?: boolean;
   project?: boolean;
   standalone?: boolean;
+};
+
+type CompactOptions = {
+  recent: string;
+  entryLimit?: string;
+  dryRun?: boolean;
 };
 
 type DoctorOptions = {
@@ -236,9 +285,13 @@ function formatCliDate(value: string) {
 }
 
 function parseLimit(value: string) {
+  return parsePositiveInteger(value, "Limit");
+}
+
+function parsePositiveInteger(value: string, label = "Value") {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error("Limit must be a positive integer.");
+    throw new Error(`${label} must be a positive integer.`);
   }
   return parsed;
 }

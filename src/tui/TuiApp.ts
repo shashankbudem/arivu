@@ -3,6 +3,7 @@ import blessed from "blessed";
 import { execa } from "execa";
 import { Agent } from "../agent/Agent.js";
 import { chatContentToText } from "../agent/content.js";
+import { COMPACT_RECENT_MESSAGE_COUNT, compactSessionMessages } from "../agent/contextCompaction.js";
 import { OpenAICompatibleChatClient } from "../agent/OpenAICompatibleChatClient.js";
 import type { AgentRunEvent, AgentSession, ChatMessage } from "../agent/types.js";
 import { workspacePolicyOverridesForRoot, workspaceScopeRulesForRoot, type AppConfig } from "../config.js";
@@ -39,6 +40,7 @@ type ActivityLine = {
 type FocusTarget = "input" | "conversation" | "activity";
 export type TuiSlashCommand =
   | { kind: "clear" | "diff" | "exit" | "help" | "status" }
+  | { kind: "compact"; recentMessageCount?: number }
   | { kind: "sessions"; limit: number; filters?: SessionListFilters; pick?: boolean }
   | { kind: "resume"; sessionId: string }
   | { kind: "error"; message: string }
@@ -392,6 +394,11 @@ export class TuiApp {
       return true;
     }
 
+    if (command.kind === "compact") {
+      await this.compactCurrentSession(command.recentMessageCount);
+      return true;
+    }
+
     if (command.kind === "sessions") {
       if (command.pick) {
         await this.pickSession(command.limit, command.filters);
@@ -516,6 +523,7 @@ export class TuiApp {
         "/clear         Clear the visible conversation",
         "/status        Show workspace and model status",
         "/diff          Show staged, unstaged, and untracked git changes",
+        "/compact [n]   Compact the saved chat, keeping n recent messages",
         "/sessions [n] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]",
         "/resume <id>   Resume a saved session in this TUI",
         "/exit          Quit",
@@ -563,6 +571,71 @@ export class TuiApp {
         time: new Date()
       });
       this.setStatus("Diff failed");
+    }
+  }
+
+  private async compactCurrentSession(recentMessageCount = COMPACT_RECENT_MESSAGE_COUNT) {
+    if (!this.currentSession) {
+      this.log.push({
+        kind: "system",
+        text: "No saved session to compact yet. Send a prompt first, then run /compact.",
+        time: new Date()
+      });
+      this.setStatus("No session");
+      return;
+    }
+
+    try {
+      const now = new Date();
+      const result = compactSessionMessages(this.currentSession.messages, {
+        recentMessageCount,
+        now
+      });
+
+      if (!result.compacted) {
+        this.log.push({
+          kind: "system",
+          text: `Session ${this.currentSession.id} is already compact enough. Non-system messages: ${result.remainingMessageCount}; recent window: ${recentMessageCount}.`,
+          time: now
+        });
+        this.setStatus("Already compact");
+        return;
+      }
+
+      const compactedSession: AgentSession = {
+        ...this.currentSession,
+        messages: result.messages,
+        updatedAt: now.toISOString()
+      };
+      await this.store.save(compactedSession);
+
+      this.currentSession = compactedSession;
+      this.agent = this.createAgent(compactedSession);
+      this.lastMessageCount = compactedSession.messages.length;
+      this.streamingAssistantIndex = undefined;
+      this.liveActivity = false;
+      this.streamingToolRows.clear();
+      this.log.splice(0, this.log.length);
+      this.activityLog.splice(0, this.activityLog.length);
+      this.seedFromSession(compactedSession);
+      this.log.push({
+        kind: "system",
+        text: [
+          `Compacted session ${compactedSession.id}.`,
+          `Compacted messages: ${result.compactedMessageCount}`,
+          `Kept recent messages: ${result.remainingMessageCount}`,
+          `Stored messages now: ${result.messages.length}`
+        ].join("\n"),
+        time: now
+      });
+      this.setStatus("Compacted");
+    } catch (error) {
+      this.log.push({
+        kind: "error",
+        text: `Unable to compact session: ${error instanceof Error ? error.message : String(error)}`,
+        time: new Date()
+      });
+      this.setStatus("Compaction failed");
     }
   }
 
@@ -977,6 +1050,8 @@ export function parseTuiSlashCommand(value: string): TuiSlashCommand | undefined
       return { kind: "status" };
     case "/diff":
       return { kind: "diff" };
+    case "/compact":
+      return parseCompactCommand(args);
     case "/sessions":
       return parseSessionsCommand(args);
     case "/resume":
@@ -987,6 +1062,24 @@ export function parseTuiSlashCommand(value: string): TuiSlashCommand | undefined
     default:
       return { kind: "unknown" };
   }
+}
+
+function parseCompactCommand(args: string[]): TuiSlashCommand {
+  if (args.length === 0) {
+    return { kind: "compact" };
+  }
+  if (args.length > 1) {
+    return compactUsageError();
+  }
+  const recentMessageCount = Number.parseInt(args[0] ?? "", 10);
+  if (!Number.isFinite(recentMessageCount) || recentMessageCount < 1) {
+    return compactUsageError();
+  }
+  return { kind: "compact", recentMessageCount };
+}
+
+function compactUsageError(): TuiSlashCommand {
+  return { kind: "error", message: "Usage: /compact [positive-recent-message-count]" };
 }
 
 export async function loadTuiGitDiffSummary(root: string): Promise<TuiGitDiffSummary> {

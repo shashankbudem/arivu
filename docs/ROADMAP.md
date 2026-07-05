@@ -21,7 +21,7 @@ This roadmap is ordered by development leverage for the current MVP.
 
 - Add richer session metadata and filters to `arivu sessions`. Search, workspace, pinned/unpinned, and project/standalone filters are implemented for CLI and TUI session lists.
 - Add an interactive session picker in the TUI. Filterable `/sessions [n]`, `/sessions --pick`, and `/resume <id>` commands are implemented.
-- Add TUI/CLI controls for transcript compaction. Desktop compaction is implemented.
+- Add TUI/CLI controls for transcript compaction. Desktop `/compact`, TUI `/compact [n]`, and CLI `arivu compact <session-id>` are implemented.
 - Add richer chat organization beyond the implemented rename/pin controls in desktop history and sidebar lists.
 
 ## Milestone 4: Provider robustness
