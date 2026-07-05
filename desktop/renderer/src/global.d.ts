@@ -226,6 +226,16 @@ type AgentTaskRunTestReport = {
   }>;
 };
 
+type AgentTaskRunDiagnostic = {
+  source: "typescript";
+  severity: "error" | "warning" | "info" | "hint";
+  message: string;
+  code?: string;
+  path?: string;
+  line?: number;
+  column?: number;
+};
+
 type AgentTaskRunArtifact = {
   id: string;
   kind: "browser_screenshot" | "command_output" | "file_change" | "patch" | "tool_result";
@@ -255,6 +265,7 @@ type AgentTaskRunArtifact = {
   stderrTruncated?: boolean;
   reportPaths?: string[];
   testReports?: AgentTaskRunTestReport[];
+  diagnostics?: AgentTaskRunDiagnostic[];
   toolCallId?: string;
   createdAt: string;
 };

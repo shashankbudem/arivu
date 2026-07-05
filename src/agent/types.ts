@@ -202,6 +202,18 @@ export type AgentTaskRunReportFinding = {
   column?: number;
 };
 
+export type AgentTaskRunDiagnosticSeverity = "error" | "warning" | "info" | "hint";
+
+export type AgentTaskRunDiagnostic = {
+  source: "typescript";
+  severity: AgentTaskRunDiagnosticSeverity;
+  message: string;
+  code?: string;
+  path?: string;
+  line?: number;
+  column?: number;
+};
+
 export type AgentTaskRunTestReport = {
   kind: "junit" | "sarif";
   path: string;
@@ -251,6 +263,7 @@ export type AgentTaskRunArtifact = {
   stderrTruncated?: boolean;
   reportPaths?: string[];
   testReports?: AgentTaskRunTestReport[];
+  diagnostics?: AgentTaskRunDiagnostic[];
   toolCallId?: string;
   createdAt: string;
 };

@@ -146,6 +146,78 @@ describe("agent task runs", () => {
     expect(run.updatedAt).toBe("2026-01-01T00:02:00.000Z");
   });
 
+  it("captures TypeScript diagnostics from command output", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 4,
+      prompt: "typecheck",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_call",
+        call: {
+          id: "call_tsc",
+          name: "run",
+          arguments: { command: "npm run typecheck" }
+        }
+      },
+      "2026-01-01T00:00:01.000Z"
+    );
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_result",
+        toolCallId: "call_tsc",
+        name: "run",
+        result: [
+          "exitCode: 2",
+          "executionProfile: host",
+          "workingDirectory: /workspace",
+          "stdout:",
+          "src/agent/taskRuns.ts(12,8): error TS2305: Module './types.js' has no exported member 'AgentTaskRunDiagnostic'.",
+          "/workspace/desktop/renderer/src/App.tsx:44:7 - warning TS6133: 'unused' is declared but its value is never read.",
+          "error TS18003: No inputs were found in config file."
+        ].join("\n")
+      },
+      "2026-01-01T00:00:02.000Z",
+      { workspaceRoot: "/workspace" }
+    );
+
+    expect(run.artifacts[0]).toMatchObject({
+      id: "call_tsc:command_output",
+      kind: "command_output",
+      summary: "Exit code 2 - 1.0s - 3 diagnostics",
+      diagnostics: [
+        {
+          source: "typescript",
+          severity: "error",
+          path: "src/agent/taskRuns.ts",
+          line: 12,
+          column: 8,
+          code: "TS2305",
+          message: "Module './types.js' has no exported member 'AgentTaskRunDiagnostic'."
+        },
+        {
+          source: "typescript",
+          severity: "warning",
+          path: "desktop/renderer/src/App.tsx",
+          line: 44,
+          column: 7,
+          code: "TS6133",
+          message: "'unused' is declared but its value is never read."
+        },
+        {
+          source: "typescript",
+          severity: "error",
+          code: "TS18003",
+          message: "No inputs were found in config file."
+        }
+      ]
+    });
+  });
+
   it("records approval decisions as durable run state", () => {
     const run = createAgentTaskRun({
       userMessageIndex: 1,

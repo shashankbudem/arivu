@@ -81,6 +81,7 @@ export type AgentTaskRunPlanCompletionNote = {
   matchedCommands: string[];
   matchedReports: string[];
   matchedChecks: string[];
+  matchedDiagnostics: string[];
   matchedCompletionNotes: string[];
   matchedCompletionEvidence: string[];
   evidence: string[];
@@ -355,6 +356,7 @@ function buildPlanCompletionReview(
       matchedCommands: matches.commands,
       matchedReports: matches.reports,
       matchedChecks: matches.checks,
+      matchedDiagnostics: matches.diagnostics,
       matchedCompletionNotes: matches.completionNotes,
       matchedCompletionEvidence: matches.completionEvidence,
       evidence: planCompletionNoteEvidence(runEvidence, matches, baseStatus)
@@ -393,6 +395,7 @@ function planCompletionItemStatus(
     commands: string[];
     reports: string[];
     checks: string[];
+    diagnostics: string[];
     completionNotes: string[];
     completionEvidence: string[];
     completionStatus?: NonNullable<AgentTaskRun["completion"]>["items"][number]["status"];
@@ -411,6 +414,7 @@ function planCompletionItemStatus(
     matches.commands.length > 0 ||
     matches.reports.length > 0 ||
     matches.checks.length > 0 ||
+    matches.diagnostics.length > 0 ||
     matches.completionNotes.length > 0 ||
     matches.completionEvidence.length > 0
     ? "supported"
@@ -452,7 +456,7 @@ function planCompletionSummary(
     return "All planned steps have item-specific evidence, verification passed, and a patch preview is ready.";
   }
   if (supportedCount > 0) {
-    return `${supportedCount}/${notes.length} planned step${notes.length === 1 ? "" : "s"} have item-specific evidence. Remaining steps need matching file, command, report, check, or completion-note evidence before close-out.`;
+    return `${supportedCount}/${notes.length} planned step${notes.length === 1 ? "" : "s"} have item-specific evidence. Remaining steps need matching file, command, report, check, diagnostic, or completion-note evidence before close-out.`;
   }
   return "Verification passed and the patch preview is ready, but no planned step has item-specific evidence yet.";
 }
@@ -487,6 +491,7 @@ function planCompletionNoteEvidence(
     commands: string[];
     reports: string[];
     checks: string[];
+    diagnostics: string[];
     completionNotes: string[];
     completionEvidence: string[];
   },
@@ -504,6 +509,11 @@ function planCompletionNoteEvidence(
   }
   if (matches.checks.length > 0) {
     evidence.push(`${matches.checks.length === 1 ? "Matched PR check" : "Matched PR checks"}: ${matches.checks.slice(0, 2).join(", ")}`);
+  }
+  if (matches.diagnostics.length > 0) {
+    evidence.push(
+      `${matches.diagnostics.length === 1 ? "Matched diagnostic" : "Matched diagnostics"}: ${matches.diagnostics.slice(0, 2).join(", ")}`
+    );
   }
   if (matches.completionNotes.length > 0) {
     evidence.push(
@@ -525,10 +535,11 @@ function planCompletionNoteEvidence(
     matches.commands.length === 0 &&
     matches.reports.length === 0 &&
     matches.checks.length === 0 &&
+    matches.diagnostics.length === 0 &&
     matches.completionNotes.length === 0 &&
     matches.completionEvidence.length === 0
   ) {
-    evidence.push("No item-specific file, command, report, check, or completion note match yet");
+    evidence.push("No item-specific file, command, report, check, diagnostic, or completion note match yet");
   }
   return evidence;
 }
@@ -536,7 +547,7 @@ function planCompletionNoteEvidence(
 function matchPlanItemEvidence(itemText: string, run: AgentTaskRun, changeSummary: AgentTaskRunChangeSummary) {
   const itemTokens = planEvidenceTokens(itemText);
   if (itemTokens.length === 0) {
-    return { paths: [], commands: [], reports: [], checks: [], completionNotes: [], completionEvidence: [] };
+    return { paths: [], commands: [], reports: [], checks: [], diagnostics: [], completionNotes: [], completionEvidence: [] };
   }
 
   const paths = changeSummary.paths.filter((changedPath) => evidenceTextMatches(itemTokens, changedPath)).slice(0, 4);
@@ -557,6 +568,12 @@ function matchPlanItemEvidence(itemText: string, run: AgentTaskRun, changeSummar
     .map((check) => truncateEvidenceLabel(`${check.name}: ${check.bucket}`))
     .filter((check): check is string => Boolean(check))
     .slice(0, 3);
+  const diagnostics = run.artifacts
+    .filter((artifact) => artifact.kind === "command_output")
+    .flatMap((artifact) => diagnosticEvidenceCandidates(artifact))
+    .filter((candidate) => evidenceTextMatches(itemTokens, candidate.text))
+    .map((candidate) => candidate.label)
+    .slice(0, 3);
   const completionItems = (run.completion?.items ?? []).filter((item) => evidenceTextMatches(itemTokens, item.text)).slice(0, 3);
   const completionNotes = completionItems.map((item) => truncateEvidenceLabel(item.text)).filter((note): note is string => Boolean(note));
   const completionEvidence = completionItems
@@ -566,7 +583,7 @@ function matchPlanItemEvidence(itemText: string, run: AgentTaskRun, changeSummar
     .slice(0, 6);
   const completionStatus = completionStatusFromItems(completionItems);
 
-  return { paths, commands, reports, checks, completionNotes, completionEvidence, completionStatus };
+  return { paths, commands, reports, checks, diagnostics, completionNotes, completionEvidence, completionStatus };
 }
 
 function completionEvidenceLabel(kind: AgentTaskRunCompletionEvidenceKind, value: string) {
@@ -604,6 +621,21 @@ function reportEvidenceCandidates(artifact: AgentTaskRun["artifacts"][number]) {
         .filter((part): part is string => Boolean(part))
         .join(" ");
       const label = truncateEvidenceLabel(`${report.path}: ${report.summary}`);
+      return label ? { label, text: details } : undefined;
+    })
+    .filter((candidate): candidate is { label: string; text: string } => Boolean(candidate));
+}
+
+function diagnosticEvidenceCandidates(artifact: AgentTaskRun["artifacts"][number]) {
+  return (artifact.diagnostics ?? [])
+    .map((diagnostic) => {
+      const location = diagnostic.path
+        ? `${diagnostic.path}${diagnostic.line !== undefined ? `:${diagnostic.line}` : ""}${
+            diagnostic.column !== undefined ? `:${diagnostic.column}` : ""
+          }`
+        : diagnostic.source;
+      const details = [location, diagnostic.code, diagnostic.severity, diagnostic.message].filter(Boolean).join(" ");
+      const label = truncateEvidenceLabel(`${location}: ${diagnostic.code ? `${diagnostic.code} ` : ""}${diagnostic.message}`);
       return label ? { label, text: details } : undefined;
     })
     .filter((candidate): candidate is { label: string; text: string } => Boolean(candidate));

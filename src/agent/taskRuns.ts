@@ -16,6 +16,7 @@ import type {
   AgentTaskRunCompletionEvidenceKind,
   AgentTaskRunCompletionItem,
   AgentTaskRunCompletionItemStatus,
+  AgentTaskRunDiagnostic,
   AgentTaskRunPlan,
   AgentTaskRunPlanItem,
   AgentTaskRunPlanItemStatus,
@@ -32,9 +33,11 @@ const MAX_COMMAND_STREAM_LENGTH = 8_000;
 const MAX_PATCH_ARTIFACT_DIFF_LENGTH = 40_000;
 const MAX_FILE_CHANGE_CONTENT_LENGTH = 40_000;
 const MAX_COMMAND_REPORT_PATHS = 10;
+const MAX_COMMAND_DIAGNOSTICS = 20;
 const MAX_REPORT_FILE_BYTES = 2_000_000;
 const MAX_REPORT_DETAIL_ITEMS = 10;
 const MAX_REPORT_DETAIL_TEXT = 240;
+const MAX_DIAGNOSTIC_TEXT = 240;
 const MAX_PLAN_ITEMS = 8;
 const MAX_PLAN_ITEM_TEXT = 180;
 const MAX_PLAN_SUMMARY_TEXT = 280;
@@ -787,6 +790,8 @@ function commandArtifactFromToolResult(
   const boundedStderr = stderr === undefined ? undefined : boundCommandStream(stderr);
   const reportPaths = detectReportPaths([options.command, stdout, stderr, result]);
   const testReports = parseTestReports(options.workspaceRoot, reportPaths);
+  const diagnosticStreams = [stdout, stderr].filter((stream): stream is string => Boolean(stream));
+  const diagnostics = parseCommandDiagnostics(diagnosticStreams.length > 0 ? diagnosticStreams : [result], options.workspaceRoot);
   const summaryParts = [
     exitCode === undefined ? undefined : `Exit code ${exitCode}`,
     options.durationMs === undefined ? undefined : formatDuration(options.durationMs),
@@ -794,7 +799,8 @@ function commandArtifactFromToolResult(
       ? `${testReports.length} parsed report${testReports.length === 1 ? "" : "s"}`
       : reportPaths.length > 0
         ? `${reportPaths.length} report path${reportPaths.length === 1 ? "" : "s"}`
-        : undefined
+        : undefined,
+    diagnostics.length > 0 ? `${diagnostics.length} diagnostic${diagnostics.length === 1 ? "" : "s"}` : undefined
   ].filter((part): part is string => Boolean(part));
 
   return {
@@ -814,6 +820,7 @@ function commandArtifactFromToolResult(
     stderrTruncated: boundedStderr?.truncated || undefined,
     reportPaths: reportPaths.length > 0 ? reportPaths : undefined,
     testReports: testReports.length > 0 ? testReports : undefined,
+    diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
     toolCallId,
     createdAt: now
   };
@@ -1110,6 +1117,157 @@ function parseTestReports(workspaceRoot: string | undefined, reportPaths: string
     }
   }
   return reports;
+}
+
+function parseCommandDiagnostics(streams: string[], workspaceRoot: string | undefined): AgentTaskRunDiagnostic[] {
+  const diagnostics: AgentTaskRunDiagnostic[] = [];
+  const seen = new Set<string>();
+
+  for (const stream of streams) {
+    const lines = stripAnsi(stream).replace(/\r\n/g, "\n").split("\n");
+    for (const line of lines) {
+      if (diagnostics.length >= MAX_COMMAND_DIAGNOSTICS) {
+        return diagnostics;
+      }
+      const diagnostic = parseTypeScriptDiagnosticLine(line, workspaceRoot);
+      if (!diagnostic) {
+        continue;
+      }
+      const key = [
+        diagnostic.source,
+        diagnostic.severity,
+        diagnostic.path ?? "",
+        diagnostic.line ?? "",
+        diagnostic.column ?? "",
+        diagnostic.code ?? "",
+        diagnostic.message
+      ].join("\0");
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      diagnostics.push(diagnostic);
+    }
+  }
+
+  return diagnostics;
+}
+
+function parseTypeScriptDiagnosticLine(line: string, workspaceRoot: string | undefined): AgentTaskRunDiagnostic | undefined {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const parenMatch = /^(.+?)\((\d+),(\d+)\):\s+(error|warning|info)\s+(TS\d+):\s+(.+)$/i.exec(trimmed);
+  if (parenMatch) {
+    return typeScriptDiagnostic({
+      path: parenMatch[1],
+      line: parenMatch[2],
+      column: parenMatch[3],
+      severity: parenMatch[4],
+      code: parenMatch[5],
+      message: parenMatch[6],
+      workspaceRoot
+    });
+  }
+
+  const colonMatch = /^(.+?):(\d+):(\d+)\s*-\s*(error|warning|info)\s+(TS\d+):\s+(.+)$/i.exec(trimmed);
+  if (colonMatch) {
+    return typeScriptDiagnostic({
+      path: colonMatch[1],
+      line: colonMatch[2],
+      column: colonMatch[3],
+      severity: colonMatch[4],
+      code: colonMatch[5],
+      message: colonMatch[6],
+      workspaceRoot
+    });
+  }
+
+  const globalMatch = /^(error|warning|info)\s+(TS\d+):\s+(.+)$/i.exec(trimmed);
+  if (globalMatch) {
+    return typeScriptDiagnostic({
+      severity: globalMatch[1],
+      code: globalMatch[2],
+      message: globalMatch[3],
+      workspaceRoot
+    });
+  }
+
+  return undefined;
+}
+
+function typeScriptDiagnostic(options: {
+  path?: string;
+  line?: string;
+  column?: string;
+  severity?: string;
+  code?: string;
+  message?: string;
+  workspaceRoot?: string;
+}): AgentTaskRunDiagnostic | undefined {
+  const severity = diagnosticSeverity(options.severity);
+  const message = truncateDiagnosticText(options.message ?? "");
+  if (!severity || !message) {
+    return undefined;
+  }
+  const diagnostic: AgentTaskRunDiagnostic = {
+    source: "typescript",
+    severity,
+    message
+  };
+  const code = options.code?.toUpperCase();
+  const diagnosticPath = cleanDiagnosticPath(options.path, options.workspaceRoot);
+  const line = positiveIntegerStringValue(options.line);
+  const column = positiveIntegerStringValue(options.column);
+  if (code) {
+    diagnostic.code = code;
+  }
+  if (diagnosticPath) {
+    diagnostic.path = diagnosticPath;
+  }
+  if (line !== undefined) {
+    diagnostic.line = line;
+  }
+  if (column !== undefined) {
+    diagnostic.column = column;
+  }
+  return diagnostic;
+}
+
+function diagnosticSeverity(value?: string): AgentTaskRunDiagnostic["severity"] | undefined {
+  const normalized = value?.toLowerCase();
+  if (normalized === "error" || normalized === "warning" || normalized === "info") {
+    return normalized;
+  }
+  return undefined;
+}
+
+function cleanDiagnosticPath(value: string | undefined, workspaceRoot: string | undefined): string | undefined {
+  const cleaned = value?.trim().replace(/^[("'`]+|[)"'`,.;:]+$/g, "");
+  if (!cleaned || cleaned.length > 300 || /^https?:\/\//i.test(cleaned)) {
+    return undefined;
+  }
+  if (workspaceRoot && path.isAbsolute(cleaned)) {
+    const relative = path.relative(path.resolve(workspaceRoot), path.resolve(cleaned));
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+      return relative;
+    }
+  }
+  return cleaned;
+}
+
+function truncateDiagnosticText(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= MAX_DIAGNOSTIC_TEXT) {
+    return normalized;
+  }
+  return `${normalized.slice(0, MAX_DIAGNOSTIC_TEXT - 1).trimEnd()}...`;
+}
+
+function stripAnsi(value: string) {
+  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 function resolveReportFile(workspaceRoot: string, reportPath: string): string | undefined {

@@ -162,6 +162,16 @@ const AgentTaskRunTestReportSchema = z.object({
     .optional()
 });
 
+const AgentTaskRunDiagnosticSchema = z.object({
+  source: z.enum(["typescript"]),
+  severity: z.enum(["error", "warning", "info", "hint"]),
+  message: z.string(),
+  code: z.string().optional(),
+  path: z.string().optional(),
+  line: z.number().int().min(1).optional(),
+  column: z.number().int().min(1).optional()
+});
+
 const AgentTaskRunArtifactSchema = z.object({
   id: z.string(),
   kind: z.enum(["browser_screenshot", "command_output", "file_change", "patch", "tool_result"]),
@@ -191,6 +201,7 @@ const AgentTaskRunArtifactSchema = z.object({
   stderrTruncated: z.boolean().optional(),
   reportPaths: z.array(z.string()).optional(),
   testReports: z.array(AgentTaskRunTestReportSchema).optional(),
+  diagnostics: z.array(AgentTaskRunDiagnosticSchema).optional(),
   toolCallId: z.string().optional(),
   createdAt: z.string()
 });

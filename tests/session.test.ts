@@ -196,6 +196,26 @@ describe("session store", () => {
               content: "# Plan\nShip it.\n",
               lineCount: 2,
               createdAt: "2026-01-01T00:01:50.000Z"
+            },
+            {
+              id: "call_typecheck:command_output",
+              kind: "command_output",
+              title: "Command output",
+              summary: "Exit code 2 - 1 diagnostic",
+              command: "npm run typecheck",
+              exitCode: 2,
+              diagnostics: [
+                {
+                  source: "typescript",
+                  severity: "error",
+                  path: "src/agent/taskRuns.ts",
+                  line: 12,
+                  column: 8,
+                  code: "TS2305",
+                  message: "Module './types.js' has no exported member 'AgentTaskRunDiagnostic'."
+                }
+              ],
+              createdAt: "2026-01-01T00:01:55.000Z"
             }
           ],
           startedAt: "2026-01-01T00:00:00.000Z",
@@ -334,6 +354,22 @@ describe("session store", () => {
               writeMode: "create",
               content: "# Plan\nShip it.\n",
               lineCount: 2
+            },
+            {
+              id: "call_typecheck:command_output",
+              kind: "command_output",
+              command: "npm run typecheck",
+              diagnostics: [
+                {
+                  source: "typescript",
+                  severity: "error",
+                  path: "src/agent/taskRuns.ts",
+                  line: 12,
+                  column: 8,
+                  code: "TS2305",
+                  message: "Module './types.js' has no exported member 'AgentTaskRunDiagnostic'."
+                }
+              ]
             }
           ]
         }

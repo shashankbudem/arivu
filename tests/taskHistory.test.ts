@@ -198,6 +198,7 @@ describe("task history helpers", () => {
         matchedCommands: [],
         matchedReports: [],
         matchedChecks: [],
+        matchedDiagnostics: [],
         matchedCompletionNotes: [],
         matchedCompletionEvidence: [],
         evidence: ["Verification failed: Verification failed.", "1 changed file recorded", "Patch preview ready"]
@@ -210,6 +211,7 @@ describe("task history helpers", () => {
         matchedCommands: [],
         matchedReports: [],
         matchedChecks: [],
+        matchedDiagnostics: [],
         matchedCompletionNotes: [],
         matchedCompletionEvidence: [],
         evidence: ["Verification failed: Verification failed.", "1 changed file recorded", "Patch preview ready"]
@@ -328,12 +330,12 @@ describe("task history helpers", () => {
 
     expect(review?.completionStatus).toBe("needs_evidence");
     expect(review?.completionSummary).toBe(
-      "1/2 planned steps have item-specific evidence. Remaining steps need matching file, command, report, check, or completion-note evidence before close-out."
+      "1/2 planned steps have item-specific evidence. Remaining steps need matching file, command, report, check, diagnostic, or completion-note evidence before close-out."
     );
     expect(review?.completionNotes.map((note) => note.status)).toEqual(["supported", "needs_evidence"]);
     expect(review?.completionNotes[0].matchedPaths).toEqual(["src/agent/taskHistory.ts"]);
     expect(review?.completionNotes[0].matchedCommands).toEqual(["npm test -- tests/taskHistory.test.ts"]);
-    expect(review?.completionNotes[1].evidence).toContain("No item-specific file, command, report, check, or completion note match yet");
+    expect(review?.completionNotes[1].evidence).toContain("No item-specific file, command, report, check, diagnostic, or completion note match yet");
   });
 
   it("uses parsed reports and PR checks as item-specific plan evidence", () => {
@@ -431,6 +433,75 @@ describe("task history helpers", () => {
     expect(review?.completionNotes[0].evidence).toContain("Matched report: reports/junit.xml: 1 failed test before repair: CheckoutFlowTest");
     expect(review?.completionNotes[1].matchedChecks).toEqual(["lint: passed"]);
     expect(review?.completionNotes[1].evidence).toContain("Matched PR check: lint: passed");
+  });
+
+  it("uses TypeScript diagnostics as item-specific plan evidence", () => {
+    const source = taskRun({
+      id: "run-plan",
+      planMode: { enabled: true },
+      planReview: {
+        status: "approved",
+        updatedAt: "2026-06-27T00:01:00.000Z"
+      },
+      plan: {
+        items: [{ text: "Repair taskRuns type diagnostic TS2322", status: "pending" }],
+        updatedAt: "2026-06-27T00:00:30.000Z"
+      }
+    });
+    const worktreeRun = taskRun({
+      id: "run-worktree",
+      worktree: {
+        enabled: true,
+        status: "ready",
+        plannedFromTaskRunId: "run-plan",
+        diff: {
+          hasChanges: true,
+          files: 1,
+          changedPaths: ["src/agent/runner.ts"],
+          updatedAt: "2026-06-27T00:03:00.000Z"
+        },
+        patchPreview: {
+          text: "diff --git a/src/agent/runner.ts b/src/agent/runner.ts\n",
+          bytes: 68,
+          lineCount: 1,
+          truncated: false,
+          updatedAt: "2026-06-27T00:03:30.000Z"
+        }
+      },
+      artifacts: [
+        {
+          id: "command",
+          kind: "command_output",
+          title: "Command output",
+          command: "npm run typecheck",
+          exitCode: 0,
+          diagnostics: [
+            {
+              source: "typescript",
+              severity: "error",
+              path: "src/agent/taskRuns.ts",
+              line: 42,
+              column: 9,
+              code: "TS2322",
+              message: "Type 'string' is not assignable to type 'AgentTaskRunDiagnostic'."
+            }
+          ],
+          createdAt: "2026-06-27T00:04:00.000Z"
+        }
+      ],
+      verification: verification("passed")
+    });
+
+    const review = buildTaskRunPlanSourceReview(worktreeRun, source);
+
+    expect(review?.completionStatus).toBe("supported");
+    expect(review?.completionNotes[0].matchedPaths).toEqual([]);
+    expect(review?.completionNotes[0].matchedDiagnostics).toEqual([
+      "src/agent/taskRuns.ts:42:9: TS2322 Type 'string' is not assignable to type 'AgentTaskRu..."
+    ]);
+    expect(review?.completionNotes[0].evidence).toContain(
+      "Matched diagnostic: src/agent/taskRuns.ts:42:9: TS2322 Type 'string' is not assignable to type 'AgentTaskRu..."
+    );
   });
 
   it("uses assistant-authored completion notes as item-specific plan evidence", () => {

@@ -247,6 +247,9 @@ function artifactLine(artifact: AgentTaskRunArtifact) {
   if (artifact.testReports?.length) {
     parts.push(`${artifact.testReports.length} report${artifact.testReports.length === 1 ? "" : "s"}`);
   }
+  if (artifact.diagnostics?.length) {
+    parts.push(`${artifact.diagnostics.length} diagnostic${artifact.diagnostics.length === 1 ? "" : "s"}`);
+  }
   return parts.join(" - ");
 }
 

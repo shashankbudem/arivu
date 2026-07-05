@@ -491,3 +491,9 @@ Reason: Watch PR and repeated manual refreshes should make changed review state 
 Decision: approved-plan worktree instructions now ask final `Completion notes:` bullets to use an optional bounded `[evidence: file=...; command=...; report=...; check=...]` suffix. Task runs parse and persist those model-authored evidence labels, copied audits include them, and approved-plan source reviews cite them beside matched files, commands, reports, PR checks, and completion-note text.
 
 Reason: fuzzy text matching alone is useful but brittle when a plan item is proven by a specific file, command, report, or CI check whose wording does not mirror the plan. Explicit model-authored labels give the harness a small structured bridge from final close-out prose to concrete evidence while keeping verification gates conservative.
+
+## 2026-07-05: Command artifacts capture TypeScript diagnostics
+
+Decision: command-output artifacts now parse bounded TypeScript compiler diagnostics from `tsc`-style stdout/stderr lines, preserving source, severity, `TS####` code, file, line, column, and message. Copied audits show diagnostic counts, saved sessions preserve them, and approved-plan source reviews can use matching diagnostics as item-specific completion evidence.
+
+Reason: compiler diagnostics are the closest available local signal to LSP evidence without running a long-lived language-server process. Capturing the stable `tsc` output format gives plan close-out more semantic evidence for type fixes while keeping the feature deterministic and replayable from command artifacts.
