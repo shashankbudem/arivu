@@ -1918,6 +1918,93 @@ body.is-resizing .panel-resize-handle::after {
   color: #ffb0a4;
 }
 
+.task-run-loop {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgb(106 122 255 / 0.2);
+  border-radius: 7px;
+  background: rgb(106 122 255 / 0.055);
+}
+
+.task-run-loop-heading {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  color: #b8c0ff;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.task-run-loop-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #d7dcff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-run-loop ol {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-run-loop li {
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid rgb(255 255 255 / 0.075);
+  border-radius: 6px;
+  background: rgb(0 0 0 / 0.14);
+}
+
+.task-run-loop li.failed,
+.task-run-loop li.blocked,
+.task-run-loop li.max_iterations {
+  border-color: rgb(237 117 100 / 0.22);
+}
+
+.task-run-loop li > div {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.task-run-loop li strong {
+  color: #ede7dc;
+  font-size: 11px;
+}
+
+.task-run-loop li span {
+  min-height: 18px;
+  padding: 0 6px;
+  border: 1px solid rgb(255 255 255 / 0.08);
+  border-radius: 999px;
+  color: #bdb4a7;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 16px;
+}
+
+.task-run-loop p {
+  margin: 0;
+  color: #cfc7bb;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.task-run-loop-live {
+  color: #b8c0ff;
+}
+
 .task-run-verification {
   display: grid;
   gap: 7px;
@@ -6711,6 +6798,48 @@ html[data-theme="light"] .task-run-state.running {
 html[data-theme="light"] .task-run-state.failed {
   border-color: rgb(188 70 54 / 0.36);
   color: #a53827;
+}
+
+html[data-theme="light"] .task-run-loop {
+  border-color: rgb(86 102 220 / 0.2);
+  background: rgb(86 102 220 / 0.065);
+}
+
+html[data-theme="light"] .task-run-loop-heading {
+  color: #3f4faa;
+}
+
+html[data-theme="light"] .task-run-loop-heading strong {
+  color: #27316f;
+}
+
+html[data-theme="light"] .task-run-loop li {
+  border-color: #d9d0c3;
+  background: rgb(255 250 242 / 0.74);
+}
+
+html[data-theme="light"] .task-run-loop li.failed,
+html[data-theme="light"] .task-run-loop li.blocked,
+html[data-theme="light"] .task-run-loop li.max_iterations {
+  border-color: rgb(188 70 54 / 0.24);
+}
+
+html[data-theme="light"] .task-run-loop li strong {
+  color: #2f2a24;
+}
+
+html[data-theme="light"] .task-run-loop li span {
+  border-color: #d9d0c3;
+  color: #756b5e;
+  background: #fffaf2;
+}
+
+html[data-theme="light"] .task-run-loop p {
+  color: #3d3831;
+}
+
+html[data-theme="light"] .task-run-loop-live {
+  color: #3f4faa;
 }
 
 html[data-theme="light"] .task-run-verification {

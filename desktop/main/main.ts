@@ -39,13 +39,16 @@ import {
 } from "../../src/agent/modelRouter.js";
 import {
   capabilityForToolName,
+  beginAgentLoopIteration,
   createAgentTaskRun,
+  finishAgentLoopIteration,
   finishTaskRun,
   markTaskRunRunning,
   recordTaskRunApproval,
   recordTaskRunAssistantCompletion,
   recordTaskRunAssistantPlan,
   recordTaskRunEvent,
+  syncTaskRunLoopState,
   trimTaskRuns,
   upsertTaskRunCommandArtifact
 } from "../../src/agent/taskRuns.js";
@@ -1586,17 +1589,19 @@ class DesktopController {
       await this.sendSessionLifecycleEvent("completed", result.session, { output: result.output });
     } catch (error) {
       this.runningSessionIds.delete(session.id);
+      const errorText = formatError(error);
       session.updatedAt = new Date().toISOString();
       if (session.agentLoop && ["running", "stopping"].includes(session.agentLoop.status)) {
-        session.agentLoop = {
-          ...session.agentLoop,
+        session.agentLoop = finishAgentLoopIteration(session.agentLoop, {
           status: "failed",
-          updatedAt: session.updatedAt,
-          stopRequested: undefined
-        };
+          error: errorText,
+          now: session.updatedAt
+        });
+        session.agentLoop = finishAgentLoop(session.agentLoop, "failed");
+        this.syncTaskRunLoopState(session, taskRunId);
         this.loopStopRequests.delete(session.id);
       }
-      this.finishSessionTaskRun(session, taskRunId, "failed", formatError(error));
+      this.finishSessionTaskRun(session, taskRunId, "failed", errorText);
       await this.store.save(session);
       if (this.session?.id === session.id) {
         this.session = session;
@@ -1626,6 +1631,15 @@ class DesktopController {
       return;
     }
     finishTaskRun(taskRun, status, error);
+    session.updatedAt = taskRun.updatedAt;
+  }
+
+  private syncTaskRunLoopState(session: AgentSession, taskRunId: string | undefined) {
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun || !session.agentLoop) {
+      return;
+    }
+    syncTaskRunLoopState(taskRun, session.agentLoop);
     session.updatedAt = taskRun.updatedAt;
   }
 
@@ -1737,16 +1751,21 @@ class DesktopController {
     while (currentSession.agentLoop) {
       const loop = currentSession.agentLoop;
       const iterationStartedAt = new Date().toISOString();
-      currentSession.agentLoop = {
-        ...loop,
-        status: this.loopStopRequests.has(currentSession.id) || loop.stopRequested ? "stopping" : "running",
-        iteration: loop.iteration + 1,
-        updatedAt: iterationStartedAt
-      };
+      currentSession.agentLoop = beginAgentLoopIteration(
+        {
+          ...loop,
+          stopRequested: this.loopStopRequests.has(currentSession.id) || loop.stopRequested ? true : loop.stopRequested
+        },
+        iterationStartedAt
+      );
       currentSession.updatedAt = iterationStartedAt;
+      this.syncTaskRunLoopState(currentSession, taskRunId);
       await this.store.save(currentSession);
       await this.sendSessionLifecycleEvent("updated", currentSession);
 
+      const beforeRun = this.findTaskRun(currentSession, taskRunId);
+      const toolStartCount = beforeRun?.tools.length ?? 0;
+      const artifactStartCount = beforeRun?.artifacts.length ?? 0;
       const result =
         currentSession.agentLoop.iteration === 1
           ? await agent.run(content, {
@@ -1760,41 +1779,65 @@ class DesktopController {
       const decision = stripAgentLoopDecision(currentSession) ?? "done";
       output = chatContentToText(lastAssistantMessage(currentSession)?.content ?? result.output);
       await this.recordLatestAssistantTaskMetadata(currentSession, taskRunId);
-      currentSession.agentLoop = {
-        ...currentSession.agentLoop!,
-        lastDecision: decision,
-        updatedAt: new Date().toISOString()
-      };
-      currentSession.updatedAt = currentSession.agentLoop.updatedAt;
-      await this.store.save(currentSession);
-      await this.sendSessionLifecycleEvent("updated", currentSession);
+      const afterRun = this.findTaskRun(currentSession, taskRunId);
+      const toolCallCount = Math.max(0, (afterRun?.tools.length ?? 0) - toolStartCount);
+      const artifactCount = Math.max(0, (afterRun?.artifacts.length ?? 0) - artifactStartCount);
+      const assistantMessageIndex = lastAssistantMessageIndex(currentSession);
 
-      if (this.loopStopRequests.has(currentSession.id) || currentSession.agentLoop.stopRequested) {
-        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop, "stopped");
+      const finishIteration = (status: NonNullable<AgentLoopState["iterations"]>[number]["status"]) => {
+        const nextLoop = finishAgentLoopIteration(currentSession.agentLoop!, {
+          decision,
+          status,
+          output,
+          assistantMessageIndex,
+          toolCallCount,
+          artifactCount
+        });
+        currentSession.agentLoop = nextLoop;
+        currentSession.updatedAt = nextLoop.updatedAt;
+        this.syncTaskRunLoopState(currentSession, taskRunId);
+      };
+
+      if (this.loopStopRequests.has(currentSession.id) || currentSession.agentLoop!.stopRequested) {
+        finishIteration("stopped");
+        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop!, "stopped");
+        this.syncTaskRunLoopState(currentSession, taskRunId);
         currentSession.messages.push({ role: "assistant", content: "Loop stopped after the current iteration." });
         output = "Loop stopped after the current iteration.";
         break;
       }
 
       if (decision === "blocked") {
-        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop, "blocked");
+        finishIteration("blocked");
+        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop!, "blocked");
+        this.syncTaskRunLoopState(currentSession, taskRunId);
         break;
       }
 
       if (decision !== "continue") {
-        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop, "completed");
+        finishIteration("completed");
+        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop!, "completed");
+        this.syncTaskRunLoopState(currentSession, taskRunId);
         break;
       }
 
-      if (currentSession.agentLoop.iteration >= currentSession.agentLoop.maxIterations) {
-        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop, "max_iterations");
+      const loopAfterDecision = currentSession.agentLoop!;
+      if (loopAfterDecision.iteration >= loopAfterDecision.maxIterations) {
+        finishIteration("max_iterations");
+        const maxIterations = currentSession.agentLoop!.maxIterations;
+        currentSession.agentLoop = finishAgentLoop(currentSession.agentLoop!, "max_iterations");
+        this.syncTaskRunLoopState(currentSession, taskRunId);
         currentSession.messages.push({
           role: "assistant",
-          content: `Loop stopped after reaching ${currentSession.agentLoop.maxIterations} iterations. Review the latest result or continue manually.`
+          content: `Loop stopped after reaching ${maxIterations} iterations. Review the latest result or continue manually.`
         });
-        output = `Loop stopped after reaching ${currentSession.agentLoop.maxIterations} iterations.`;
+        output = `Loop stopped after reaching ${maxIterations} iterations.`;
         break;
       }
+
+      finishIteration("continued");
+      await this.store.save(currentSession);
+      await this.sendSessionLifecycleEvent("updated", currentSession);
 
       const remediationInstruction = buildTaskRunReportRemediationInstruction(
         this.findTaskRun(currentSession, taskRunId),
@@ -1806,26 +1849,30 @@ class DesktopController {
           content: remediationInstruction
         });
       }
+      const loopForContinuation = currentSession.agentLoop!;
       currentSession.messages.push({
         role: "system",
-        content: continuationAgentLoopInstruction(currentSession.agentLoop)
+        content: continuationAgentLoopInstruction(loopForContinuation)
       });
       currentSession.agentLoop = {
-        ...currentSession.agentLoop,
+        ...loopForContinuation,
         updatedAt: new Date().toISOString()
       };
       currentSession.updatedAt = currentSession.agentLoop.updatedAt;
+      this.syncTaskRunLoopState(currentSession, taskRunId);
       await this.store.save(currentSession);
       await this.sendSessionLifecycleEvent("updated", currentSession);
     }
 
-    if (currentSession.agentLoop) {
+    const loopAfterRun = currentSession.agentLoop;
+    if (loopAfterRun) {
       currentSession.agentLoop = {
-        ...currentSession.agentLoop,
+        ...loopAfterRun,
         stopRequested: undefined,
         updatedAt: new Date().toISOString()
       };
       currentSession.updatedAt = currentSession.agentLoop.updatedAt;
+      this.syncTaskRunLoopState(currentSession, taskRunId);
     }
     this.loopStopRequests.delete(currentSession.id);
     return { output, session: currentSession };
@@ -2184,6 +2231,10 @@ function stripAgentLoopDecision(session: AgentSession): AgentLoopState["lastDeci
 
 function lastAssistantMessage(session: AgentSession) {
   return lastAssistantMessageWithIndex(session)?.message;
+}
+
+function lastAssistantMessageIndex(session: AgentSession) {
+  return lastAssistantMessageWithIndex(session)?.index;
 }
 
 function lastAssistantMessageWithIndex(session: AgentSession) {

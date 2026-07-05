@@ -72,6 +72,22 @@ type ChatMessage = {
 };
 
 type AgentLoopStatus = "running" | "stopping" | "completed" | "stopped" | "blocked" | "failed" | "max_iterations";
+type AgentLoopDecision = "continue" | "done" | "blocked";
+type AgentLoopIterationStatus = "running" | "continued" | "completed" | "stopped" | "blocked" | "failed" | "max_iterations";
+
+type AgentLoopIteration = {
+  iteration: number;
+  status: AgentLoopIterationStatus;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  decision?: AgentLoopDecision;
+  assistantMessageIndex?: number;
+  outputPreview?: string;
+  toolCallCount?: number;
+  artifactCount?: number;
+  error?: string;
+};
 
 type AgentLoopState = {
   status: AgentLoopStatus;
@@ -81,7 +97,8 @@ type AgentLoopState = {
   startedAt: string;
   updatedAt: string;
   stopRequested?: boolean;
-  lastDecision?: "continue" | "done" | "blocked";
+  lastDecision?: AgentLoopDecision;
+  iterations?: AgentLoopIteration[];
 };
 
 type AgentTaskRunStatus = "queued" | "running" | "completed" | "failed" | "stopped" | "blocked" | "max_iterations";
@@ -470,6 +487,10 @@ type AgentTaskRun = {
   loop?: {
     enabled: boolean;
     maxIterations: number;
+    status?: AgentLoopStatus;
+    iteration?: number;
+    lastDecision?: AgentLoopDecision;
+    iterations?: AgentLoopIteration[];
   };
   planMode?: {
     enabled: boolean;

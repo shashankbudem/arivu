@@ -4634,6 +4634,7 @@ function ActivityGroupCard({
       {!collapsed ? (
         <div className="activity-group-body">
           {group.run ? <TaskRunMeta run={group.run} /> : null}
+          {group.run?.loop?.iterations?.length ? <TaskRunLoop loop={group.run.loop} /> : null}
           {group.run?.verification ? <TaskRunVerification verification={group.run.verification} /> : null}
           {group.run?.plan ? (
             <TaskRunPlan
@@ -5705,6 +5706,45 @@ function TaskRunMeta({ run, compact = false }: { run: AgentTaskRun; compact?: bo
       {run.plan?.items.length ? <span>{run.plan.items.length} plan step{run.plan.items.length === 1 ? "" : "s"}</span> : null}
       {run.verification ? <span>{verificationMetaLabel(run.verification)}</span> : null}
       {run.artifacts.length > 0 ? <span>{run.artifacts.length} artifact{run.artifacts.length === 1 ? "" : "s"}</span> : null}
+    </div>
+  );
+}
+
+function TaskRunLoop({ loop }: { loop: NonNullable<AgentTaskRun["loop"]> }) {
+  const iterations = loop.iterations ?? [];
+  const latest = iterations.at(-1);
+  const summary = [
+    `${loop.iteration ?? iterations.length}/${loop.maxIterations}`,
+    loop.status ? agentLoopRunStatusLabel(loop.status) : undefined,
+    loop.lastDecision ? `last ${loop.lastDecision}` : undefined
+  ].filter((item): item is string => Boolean(item));
+
+  return (
+    <div className="task-run-loop">
+      <div className="task-run-loop-heading">
+        <Activity size={13} />
+        <span>Loop iterations</span>
+        <strong>{summary.join(" - ")}</strong>
+      </div>
+      <ol>
+        {iterations.map((iteration) => (
+          <li key={`${iteration.iteration}-${iteration.startedAt}`} className={iteration.status}>
+            <div>
+              <strong>Iteration {iteration.iteration}</strong>
+              <span>{agentLoopIterationStatusLabel(iteration.status)}</span>
+              {iteration.decision ? <span>decision {iteration.decision}</span> : null}
+              {iteration.toolCallCount !== undefined ? (
+                <span>{iteration.toolCallCount} tool{iteration.toolCallCount === 1 ? "" : "s"}</span>
+              ) : null}
+              {iteration.artifactCount !== undefined ? (
+                <span>{iteration.artifactCount} artifact{iteration.artifactCount === 1 ? "" : "s"}</span>
+              ) : null}
+            </div>
+            {iteration.error || iteration.outputPreview ? <p>{iteration.error ?? iteration.outputPreview}</p> : null}
+          </li>
+        ))}
+      </ol>
+      {latest?.status === "running" ? <p className="task-run-loop-live">Current iteration is still running.</p> : null}
     </div>
   );
 }
@@ -7910,6 +7950,44 @@ function agentLoopStatusLabel(loop: AgentLoopState) {
     return `Loop failed at ${progress}`;
   }
   return `Loop reached ${loop.maxIterations} iterations`;
+}
+
+function agentLoopRunStatusLabel(status: AgentLoopStatus) {
+  switch (status) {
+    case "running":
+      return "running";
+    case "stopping":
+      return "stopping";
+    case "completed":
+      return "completed";
+    case "stopped":
+      return "stopped";
+    case "blocked":
+      return "blocked";
+    case "failed":
+      return "failed";
+    case "max_iterations":
+      return "max iterations";
+  }
+}
+
+function agentLoopIterationStatusLabel(status: AgentLoopIterationStatus) {
+  switch (status) {
+    case "running":
+      return "Running";
+    case "continued":
+      return "Continued";
+    case "completed":
+      return "Completed";
+    case "stopped":
+      return "Stopped";
+    case "blocked":
+      return "Blocked";
+    case "failed":
+      return "Failed";
+    case "max_iterations":
+      return "Max iterations";
+  }
 }
 
 function sessionModelLabel(session: SessionSummary) {

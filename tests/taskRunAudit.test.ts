@@ -210,4 +210,55 @@ describe("task run audit summaries", () => {
     expect(run.approvals[0]?.changePreview?.changedPaths).toEqual(["src/app.ts"]);
     expect(audit).toContain("preview: Patch review preview - 1 file, +1/-1 - paths `src/app.ts`");
   });
+
+  it("includes loop iteration history when present", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 3,
+      prompt: "loop until verified",
+      loop: {
+        status: "completed",
+        goal: "loop until verified",
+        iteration: 2,
+        maxIterations: 5,
+        lastDecision: "done",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:03:00.000Z",
+        iterations: [
+          {
+            iteration: 1,
+            status: "continued",
+            startedAt: "2026-01-01T00:00:01.000Z",
+            updatedAt: "2026-01-01T00:01:00.000Z",
+            completedAt: "2026-01-01T00:01:00.000Z",
+            decision: "continue",
+            toolCallCount: 2,
+            artifactCount: 1,
+            outputPreview: "First pass found a failing check."
+          },
+          {
+            iteration: 2,
+            status: "completed",
+            startedAt: "2026-01-01T00:02:00.000Z",
+            updatedAt: "2026-01-01T00:03:00.000Z",
+            completedAt: "2026-01-01T00:03:00.000Z",
+            decision: "done",
+            toolCallCount: 1,
+            artifactCount: 1,
+            outputPreview: "Verification passed."
+          }
+        ]
+      },
+      now: "2026-01-01T00:00:00.000Z"
+    });
+
+    const audit = buildTaskRunAuditMarkdown(run);
+
+    expect(audit).toContain("## Loop Iterations");
+    expect(audit).toContain(
+      "- Iteration 1: Continued - decision continue - 2 tools - 1 artifact - completed 2026-01-01T00:01:00.000Z - First pass found a failing check."
+    );
+    expect(audit).toContain(
+      "- Iteration 2: Completed - decision done - 1 tool - 1 artifact - completed 2026-01-01T00:03:00.000Z - Verification passed."
+    );
+  });
 });

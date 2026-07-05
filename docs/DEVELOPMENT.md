@@ -94,7 +94,7 @@ Desktop agent-loop check:
 1. Run `npm run desktop:dev`.
 2. Toggle `Loop` in the composer or run `/loop`.
 3. Send a bounded task such as "Inspect the repo and tell me one thing to improve."
-4. Confirm the working pill shows loop progress, Activity shows an agent-loop system item, and Stop Loop changes the status to stopping until the current iteration finishes.
+4. Confirm the working pill shows loop progress, Activity shows an agent-loop system item, the task-run group shows Loop iterations with decision/tool/artifact counts after each pass, copied audit text includes `## Loop Iterations`, and Stop Loop changes the status to stopping until the current iteration finishes.
 
 Desktop task-run audit check:
 

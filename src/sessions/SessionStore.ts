@@ -46,7 +46,24 @@ const AgentLoopSchema = z.object({
   startedAt: z.string(),
   updatedAt: z.string(),
   stopRequested: z.boolean().optional(),
-  lastDecision: z.enum(["continue", "done", "blocked"]).optional()
+  lastDecision: z.enum(["continue", "done", "blocked"]).optional(),
+  iterations: z
+    .array(
+      z.object({
+        iteration: z.number().int().min(1),
+        status: z.enum(["running", "continued", "completed", "stopped", "blocked", "failed", "max_iterations"]),
+        startedAt: z.string(),
+        updatedAt: z.string(),
+        completedAt: z.string().optional(),
+        decision: z.enum(["continue", "done", "blocked"]).optional(),
+        assistantMessageIndex: z.number().int().min(0).optional(),
+        outputPreview: z.string().optional(),
+        toolCallCount: z.number().int().min(0).optional(),
+        artifactCount: z.number().int().min(0).optional(),
+        error: z.string().optional()
+      })
+    )
+    .optional()
 });
 
 const AgentTaskRunToolSchema = z.object({
@@ -404,7 +421,11 @@ const AgentTaskRunSchema = z.object({
   loop: z
     .object({
       enabled: z.boolean(),
-      maxIterations: z.number().int().min(1).max(10)
+      maxIterations: z.number().int().min(1).max(10),
+      status: AgentLoopSchema.shape.status.optional(),
+      iteration: z.number().int().min(0).optional(),
+      lastDecision: AgentLoopSchema.shape.lastDecision,
+      iterations: AgentLoopSchema.shape.iterations
     })
     .optional(),
   planMode: z

@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  beginAgentLoopIteration,
   createAgentTaskRun,
+  finishAgentLoopIteration,
   finishTaskRun,
   parseAgentTaskRunCompletion,
   parseAgentTaskRunPlan,
@@ -11,6 +13,7 @@ import {
   recordTaskRunAssistantCompletion,
   recordTaskRunAssistantPlan,
   recordTaskRunEvent,
+  syncTaskRunLoopState,
   upsertTaskRunCommandArtifact,
   capabilityForToolName
 } from "../src/agent/taskRuns.js";
@@ -89,6 +92,63 @@ describe("agent task runs", () => {
     finishTaskRun(run, "completed", undefined, "2026-01-01T00:03:00.000Z");
     expect(run.status).toBe("completed");
     expect(run.completedAt).toBe("2026-01-01T00:03:00.000Z");
+  });
+
+  it("persists compact agent loop iteration history on the task run", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 1,
+      prompt: "fix and verify",
+      loop: {
+        status: "running",
+        goal: "fix and verify",
+        iteration: 0,
+        maxIterations: 5,
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      },
+      now: "2026-01-01T00:00:00.000Z"
+    });
+
+    let loop = beginAgentLoopIteration(
+      {
+        status: "running",
+        goal: "fix and verify",
+        iteration: 0,
+        maxIterations: 5,
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      },
+      "2026-01-01T00:00:01.000Z"
+    );
+    loop = finishAgentLoopIteration(loop, {
+      decision: "continue",
+      status: "continued",
+      output: "Made the first edit and found one failing test that needs another pass.",
+      assistantMessageIndex: 4,
+      toolCallCount: 2,
+      artifactCount: 1,
+      now: "2026-01-01T00:00:05.000Z"
+    });
+    syncTaskRunLoopState(run, loop);
+
+    expect(run.loop).toMatchObject({
+      enabled: true,
+      maxIterations: 5,
+      status: "running",
+      iteration: 1,
+      lastDecision: "continue",
+      iterations: [
+        {
+          iteration: 1,
+          status: "continued",
+          decision: "continue",
+          assistantMessageIndex: 4,
+          toolCallCount: 2,
+          artifactCount: 1,
+          outputPreview: "Made the first edit and found one failing test that needs another pass."
+        }
+      ]
+    });
   });
 
   it("upserts command artifacts captured outside streamed tool events", () => {

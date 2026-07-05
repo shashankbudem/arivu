@@ -563,3 +563,9 @@ Reason: users expect Retry to regenerate the answer, not duplicate the query in 
 Decision: the chat transcript derives paired tool-step rows by `toolCallId`, showing call details and matching result details together. The Activity rail still renders the underlying call/result/approval rows separately so audit evidence, screenshots, open actions, and repair prompts remain lossless.
 
 Reason: users need a fast answer to "what tools did this query use?" without losing the detailed control-plane trace needed for audits and follow-up repair work.
+
+## 2026-07-05: Loop runs keep an iteration ledger
+
+Decision: Loop mode now persists a bounded iteration ledger on the session loop state and active task run. Each iteration records its status, continue/done/blocked decision when present, tool and artifact deltas, assistant output preview, and error preview for failed iterations. Activity renders those rows in the task-run group, and copied Markdown audits include a `## Loop Iterations` section.
+
+Reason: loop mode is only useful if users can understand why the agent continued or stopped. Persisting compact per-iteration state turns the loop into auditable control-plane data instead of relying on transient working indicators or hidden loop-control markers.

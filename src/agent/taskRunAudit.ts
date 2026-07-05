@@ -60,6 +60,10 @@ export function buildTaskRunAuditMarkdown(run: AgentTaskRun) {
     );
   }
 
+  if (run.loop?.iterations?.length) {
+    lines.push("", "## Loop Iterations", ...loopIterationLines(run));
+  }
+
   if (run.completion) {
     lines.push("", "## Completion Notes");
     if (run.completion.summary) {
@@ -98,6 +102,29 @@ export function buildTaskRunAuditMarkdown(run: AgentTaskRun) {
   }
 
   return lines.join("\n").trimEnd();
+}
+
+function loopIterationLines(run: AgentTaskRun) {
+  const iterations = run.loop?.iterations ?? [];
+  if (iterations.length === 0) {
+    return ["- None"];
+  }
+
+  return iterations.map((iteration) => {
+    const details = [
+      loopIterationStatusLabel(iteration.status),
+      iteration.decision ? `decision ${iteration.decision}` : undefined,
+      iteration.toolCallCount !== undefined
+        ? `${iteration.toolCallCount} tool${iteration.toolCallCount === 1 ? "" : "s"}`
+        : undefined,
+      iteration.artifactCount !== undefined
+        ? `${iteration.artifactCount} artifact${iteration.artifactCount === 1 ? "" : "s"}`
+        : undefined,
+      iteration.completedAt ? `completed ${iteration.completedAt}` : `updated ${iteration.updatedAt}`
+    ].filter((item): item is string => Boolean(item));
+    const preview = iteration.error ?? iteration.outputPreview;
+    return `- Iteration ${iteration.iteration}: ${details.join(" - ")}${preview ? ` - ${inlineText(preview)}` : ""}`;
+  });
 }
 
 function toolLines(run: AgentTaskRun) {
@@ -410,6 +437,25 @@ function toolStatusLabel(status: AgentTaskRunToolStatus) {
       return "Done";
     case "failed":
       return "Failed";
+  }
+}
+
+function loopIterationStatusLabel(status: NonNullable<NonNullable<AgentTaskRun["loop"]>["iterations"]>[number]["status"]) {
+  switch (status) {
+    case "running":
+      return "Running";
+    case "continued":
+      return "Continued";
+    case "completed":
+      return "Completed";
+    case "stopped":
+      return "Stopped";
+    case "blocked":
+      return "Blocked";
+    case "failed":
+      return "Failed";
+    case "max_iterations":
+      return "Max iterations";
   }
 }
 

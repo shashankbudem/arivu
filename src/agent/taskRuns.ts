@@ -6,6 +6,8 @@ import { chatContentToText, type ChatContent } from "./content.js";
 import { capabilityForToolName } from "./toolCapabilities.js";
 import type {
   AgentLoopState,
+  AgentLoopDecision,
+  AgentLoopIterationStatus,
   AgentRunEvent,
   AgentTaskRunFailedTest,
   AgentTaskRun,
@@ -46,6 +48,7 @@ const MAX_COMPLETION_ITEM_TEXT = 220;
 const MAX_COMPLETION_SUMMARY_TEXT = 280;
 const MAX_COMPLETION_EVIDENCE_LABELS = 6;
 const MAX_COMPLETION_EVIDENCE_TEXT = 160;
+const MAX_LOOP_ITERATION_OUTPUT = 220;
 
 type CreateAgentTaskRunOptions = {
   userMessageIndex: number;
@@ -91,7 +94,11 @@ export function createAgentTaskRun(options: CreateAgentTaskRunOptions): AgentTas
     loop: options.loop
       ? {
           enabled: true,
-          maxIterations: options.loop.maxIterations
+          maxIterations: options.loop.maxIterations,
+          status: options.loop.status,
+          iteration: options.loop.iteration,
+          lastDecision: options.loop.lastDecision,
+          iterations: options.loop.iterations
         }
       : undefined,
     planMode: options.planModeEnabled
@@ -112,6 +119,71 @@ export function createAgentTaskRun(options: CreateAgentTaskRunOptions): AgentTas
     startedAt: now,
     updatedAt: now
   };
+}
+
+export function beginAgentLoopIteration(loop: AgentLoopState, now = new Date().toISOString()): AgentLoopState {
+  const iteration = loop.iteration + 1;
+  const next: AgentLoopState = {
+    ...loop,
+    status: loop.stopRequested ? "stopping" : "running",
+    iteration,
+    updatedAt: now,
+    iterations: upsertAgentLoopIteration(loop.iterations, {
+      iteration,
+      status: "running",
+      startedAt: now,
+      updatedAt: now
+    })
+  };
+  return next;
+}
+
+export function finishAgentLoopIteration(
+  loop: AgentLoopState,
+  options: {
+    decision?: AgentLoopDecision;
+    status: AgentLoopIterationStatus;
+    output?: string;
+    assistantMessageIndex?: number;
+    toolCallCount?: number;
+    artifactCount?: number;
+    error?: string;
+    now?: string;
+  }
+): AgentLoopState {
+  const now = options.now ?? new Date().toISOString();
+  const iterationNumber = Math.max(1, loop.iteration);
+  const current = loop.iterations?.find((iteration) => iteration.iteration === iterationNumber);
+  return {
+    ...loop,
+    lastDecision: options.decision ?? loop.lastDecision,
+    updatedAt: now,
+    iterations: upsertAgentLoopIteration(loop.iterations, {
+      iteration: iterationNumber,
+      status: options.status,
+      startedAt: current?.startedAt ?? now,
+      updatedAt: now,
+      completedAt: now,
+      decision: options.decision,
+      assistantMessageIndex: options.assistantMessageIndex,
+      outputPreview: options.output ? truncateRunText(options.output, MAX_LOOP_ITERATION_OUTPUT) : undefined,
+      toolCallCount: options.toolCallCount,
+      artifactCount: options.artifactCount,
+      error: options.error ? truncateRunText(options.error, MAX_LOOP_ITERATION_OUTPUT) : undefined
+    })
+  };
+}
+
+export function syncTaskRunLoopState(run: AgentTaskRun, loop: AgentLoopState) {
+  run.loop = {
+    enabled: true,
+    maxIterations: loop.maxIterations,
+    status: loop.status,
+    iteration: loop.iteration,
+    lastDecision: loop.lastDecision,
+    iterations: loop.iterations
+  };
+  run.updatedAt = loop.updatedAt;
 }
 
 export function trimTaskRuns(runs: AgentTaskRun[] | undefined): AgentTaskRun[] | undefined {
@@ -661,6 +733,26 @@ function addCapability(run: AgentTaskRun, capability: AgentTaskRunCapability) {
   if (!run.capabilities.includes(capability)) {
     run.capabilities.push(capability);
   }
+}
+
+function upsertAgentLoopIteration(
+  iterations: AgentLoopState["iterations"] | undefined,
+  next: NonNullable<AgentLoopState["iterations"]>[number]
+) {
+  const existing = iterations ?? [];
+  const index = existing.findIndex((iteration) => iteration.iteration === next.iteration);
+  const merged =
+    index >= 0
+      ? existing.map((iteration, currentIndex) =>
+          currentIndex === index
+            ? {
+                ...iteration,
+                ...next
+              }
+            : iteration
+        )
+      : [...existing, next];
+  return merged.slice(-10);
 }
 
 function artifactFromToolResult(
