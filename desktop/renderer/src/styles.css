@@ -3302,6 +3302,14 @@ body.is-resizing .panel-resize-handle::after {
   border-color: rgb(43 191 159 / 0.38);
 }
 
+.tool-run-item.status-failed {
+  border-color: rgb(237 117 100 / 0.42);
+}
+
+.tool-run-item.approval {
+  border-color: rgb(112 149 193 / 0.38);
+}
+
 .tool-run-step {
   width: 22px;
   height: 22px;
@@ -3333,10 +3341,20 @@ body.is-resizing .panel-resize-handle::after {
 
 .tool-run-item p {
   grid-column: 3 / -1;
+  display: flex;
+  gap: 7px;
   margin: 0;
   color: #bdb6ac;
   font-size: 12px;
   line-height: 1.35;
+}
+
+.tool-run-item p span {
+  flex: 0 0 auto;
+  color: #9c968d;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .tool-run-chip {
@@ -7015,6 +7033,17 @@ html[data-theme="light"] .task-worktree-attempt-actions button:focus-visible {
   color: #17886f;
 }
 
+.tool-run-item pre[data-label]::before {
+  content: attr(data-label);
+  display: block;
+  margin-bottom: 4px;
+  color: #9c968d;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 html[data-theme="light"] .task-worktree-attempt-comparison {
   border-color: rgb(28 168 137 / 0.22);
   background: rgb(28 168 137 / 0.065);
@@ -7312,10 +7341,23 @@ html[data-theme="light"] .tool-run-item.status-running {
   border-color: rgb(28 168 137 / 0.36);
 }
 
+html[data-theme="light"] .tool-run-item.status-failed {
+  border-color: rgb(188 72 52 / 0.38);
+}
+
+html[data-theme="light"] .tool-run-item.approval {
+  border-color: rgb(61 103 158 / 0.34);
+}
+
 html[data-theme="light"] .tool-run-step {
   border-color: #d9d0c3;
   background: #f7f1e8;
   color: #8a5a00;
+}
+
+html[data-theme="light"] .tool-run-item p span,
+html[data-theme="light"] .tool-run-item pre[data-label]::before {
+  color: #756b5e;
 }
 
 html[data-theme="light"] .tool-run-chip {

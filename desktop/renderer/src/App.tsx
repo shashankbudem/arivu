@@ -252,6 +252,7 @@ const UI_CONCEPTS: Array<{
 type ActivityItem = {
   id: string;
   kind: "call" | "result" | "approval" | "system";
+  toolCallId?: string;
   title: string;
   detail: string;
   summary?: string;
@@ -315,6 +316,18 @@ type ActivityModel = {
   systemItems: ActivityItem[];
   groups: ActivityGroup[];
   groupsByUserMessageIndex: Map<number, ActivityGroup>;
+};
+
+type ToolRunEntry = {
+  id: string;
+  kind: "tool" | "approval" | "event";
+  title: string;
+  status?: ActivityItem["status"];
+  call?: ActivityItem;
+  result?: ActivityItem;
+  item?: ActivityItem;
+  policy?: ActivityPolicyDetail;
+  imagePreview?: ActivityItem["imagePreview"];
 };
 
 type VisibleMessageEntry = {
@@ -4449,8 +4462,8 @@ function UserMessageContent({ content }: { content: ChatContent }) {
 
 function ToolRunSummary({ group }: { group: ActivityGroup }) {
   const [expanded, setExpanded] = useState(group.status === "running");
-  const toolItems = group.items.filter((item) => item.kind !== "system");
-  if (toolItems.length === 0) {
+  const entries = toolRunEntriesFromItems(group.items);
+  if (entries.length === 0) {
     return null;
   }
 
@@ -4471,24 +4484,45 @@ function ToolRunSummary({ group }: { group: ActivityGroup }) {
       {group.run ? <TaskRunMeta run={group.run} compact /> : null}
       {expanded ? (
         <div className="tool-run-list">
-          {toolItems.map((item, itemIndex) => {
-            const detailPreview = toolRunDetailPreview(item);
-            return (
-              <div className={`tool-run-item ${item.kind}${item.status ? ` status-${item.status}` : ""}`} key={item.id}>
-                <span className="tool-run-step">{itemIndex + 1}</span>
-                <span className="tool-run-kind">{toolRunKindLabel(item)}</span>
-                <strong>{item.title}</strong>
-                {item.status ? <span className={`activity-status ${item.status}`}>{activityStatusLabel(item.status)}</span> : null}
-                {item.imagePreview ? <span className="tool-run-chip">Screenshot</span> : null}
-                {item.policy ? <ActivityPolicyChip policy={item.policy} compact /> : null}
-                {item.summary ? <p>{item.summary}</p> : null}
-                {detailPreview ? <pre>{detailPreview}</pre> : null}
-              </div>
-            );
-          })}
+          {entries.map((entry, itemIndex) => (
+            <ToolRunEntryRow entry={entry} step={itemIndex + 1} key={entry.id} />
+          ))}
         </div>
       ) : null}
     </section>
+  );
+}
+
+function ToolRunEntryRow({ entry, step }: { entry: ToolRunEntry; step: number }) {
+  const callPreview = entry.call ? toolRunDetailPreview(entry.call) : undefined;
+  const resultPreview = entry.result ? toolRunDetailPreview(entry.result) : undefined;
+  const itemPreview = entry.item ? toolRunDetailPreview(entry.item) : undefined;
+  const status = entry.status;
+  return (
+    <div className={`tool-run-item ${entry.kind}${status ? ` status-${status}` : ""}`}>
+      <span className="tool-run-step">{step}</span>
+      <span className="tool-run-kind">{toolRunEntryKindLabel(entry)}</span>
+      <strong>{entry.title}</strong>
+      {status ? <span className={`activity-status ${status}`}>{activityStatusLabel(status)}</span> : null}
+      {entry.imagePreview ? <span className="tool-run-chip">Screenshot</span> : null}
+      {entry.policy ? <ActivityPolicyChip policy={entry.policy} compact /> : null}
+      {entry.call?.summary ? (
+        <p>
+          <span>Call</span>
+          {entry.call.summary}
+        </p>
+      ) : null}
+      {entry.result?.summary ? (
+        <p>
+          <span>Result</span>
+          {entry.result.summary}
+        </p>
+      ) : null}
+      {entry.item?.summary ? <p>{entry.item.summary}</p> : null}
+      {callPreview ? <pre data-label="Call args">{callPreview}</pre> : null}
+      {resultPreview ? <pre data-label="Result">{resultPreview}</pre> : null}
+      {itemPreview ? <pre>{itemPreview}</pre> : null}
+    </div>
   );
 }
 
@@ -4528,7 +4562,7 @@ function ActivityGroupCard({
   const [collapsed, setCollapsed] = useState(group.status !== "running");
   const [copiedAudit, setCopiedAudit] = useState(false);
   const auditCopyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const toolItemCount = group.items.filter((item) => item.kind !== "system").length;
+  const toolCountLabel = toolActivityCountLabel(group.items);
   const focused = Boolean(group.run && group.run.id === focusedRunId);
   const planApprovalPrompt = group.run ? buildTaskRunPlanApprovalPrompt(group.run) : undefined;
   const planWorktreePrompt = group.run ? buildTaskRunPlanApprovalPrompt(group.run, { worktree: true }) : undefined;
@@ -4583,7 +4617,7 @@ function ActivityGroupCard({
           <span>{activityGroupEyebrow(group)}</span>
           <strong title={group.detail}>{group.title}</strong>
         </div>
-        <span className="activity-group-count">{toolEventCountLabel(toolItemCount)}</span>
+        <span className="activity-group-count">{toolCountLabel}</span>
         <span className={`activity-status ${group.status}`}>{activityStatusLabel(group.status)}</span>
       </button>
       {group.run ? (
@@ -8680,6 +8714,7 @@ function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null
         group.items.push({
           id: `call-${index}-${call.id}`,
           kind: "call",
+          toolCallId: call.id,
           title: call.name,
           detail: safeJson(call.arguments),
           summary: summarizeToolCall(call),
@@ -8695,6 +8730,7 @@ function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null
       group.items.push({
         id: `tool-${index}-${message.toolCallId ?? message.name}`,
         kind: "result",
+        toolCallId: message.toolCallId,
         title: message.name ?? "tool",
         detail: toolResult.detail,
         summary: toolResult.summary,
@@ -8822,6 +8858,7 @@ function activityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
     items.push({
       id: `run-call-${run.id}-${tool.toolCallId}`,
       kind: "call",
+      toolCallId: tool.toolCallId,
       title: tool.name,
       detail: safeJson(tool.arguments ?? {}),
       summary: capabilityLabel(tool.capability),
@@ -8832,6 +8869,7 @@ function activityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
       items.push({
         id: `run-result-${run.id}-${tool.toolCallId}`,
         kind: "result",
+        toolCallId: tool.toolCallId,
         title: tool.name,
         detail: resultDetail,
         summary: resultSummary,
@@ -9395,21 +9433,26 @@ function queryActivityTitle(content: ChatContent) {
 }
 
 function toolRunSummaryLabel(group: ActivityGroup) {
-  const count = group.items.filter((item) => item.kind !== "system").length;
+  const label = toolActivityCountLabel(group.items);
   if (group.status === "running") {
-    return `${toolEventCountLabel(count)} running`;
+    return `${label} running`;
   }
   if (group.status === "failed") {
-    return `${toolEventCountLabel(count)} failed`;
+    return `${label} failed`;
   }
   if (group.status === "waiting") {
-    return `${toolEventCountLabel(count)} waiting`;
+    return `${label} waiting`;
   }
-  return `${toolEventCountLabel(count)} done`;
+  return `${label} done`;
 }
 
-function toolEventCountLabel(count: number) {
-  return `${count} tool ${count === 1 ? "event" : "events"}`;
+function toolActivityCountLabel(items: ActivityItem[]) {
+  const entries = toolRunEntriesFromItems(items);
+  const toolCount = entries.filter((entry) => entry.kind === "tool").length;
+  if (toolCount > 0) {
+    return `${toolCount} tool ${toolCount === 1 ? "step" : "steps"}`;
+  }
+  return `${entries.length} activity ${entries.length === 1 ? "step" : "steps"}`;
 }
 
 function activityGroupEyebrow(group: ActivityGroup) {
@@ -9422,17 +9465,74 @@ function activityGroupEyebrow(group: ActivityGroup) {
   return "Session tools";
 }
 
-function toolRunKindLabel(item: ActivityItem) {
-  if (item.kind === "call") {
-    return "Call";
+function toolRunEntriesFromItems(items: ActivityItem[]): ToolRunEntry[] {
+  const entries: ToolRunEntry[] = [];
+  const byToolCallId = new Map<string, ToolRunEntry>();
+  for (const item of items) {
+    if (item.kind === "system") {
+      continue;
+    }
+    if ((item.kind === "call" || item.kind === "result") && item.toolCallId) {
+      const existing = byToolCallId.get(item.toolCallId);
+      if (existing) {
+        if (item.kind === "call") {
+          existing.call = item;
+        } else {
+          existing.result = item;
+        }
+        existing.title = existing.call?.title ?? existing.result?.title ?? existing.title;
+        existing.status = mergeToolRunEntryStatus(existing.call, existing.result);
+        existing.policy = existing.call?.policy ?? existing.result?.policy;
+        existing.imagePreview = existing.result?.imagePreview ?? existing.call?.imagePreview;
+        continue;
+      }
+
+      const entry: ToolRunEntry = {
+        id: `tool-entry-${item.toolCallId}`,
+        kind: "tool",
+        title: item.title,
+        status: mergeToolRunEntryStatus(item.kind === "call" ? item : undefined, item.kind === "result" ? item : undefined),
+        call: item.kind === "call" ? item : undefined,
+        result: item.kind === "result" ? item : undefined,
+        policy: item.policy,
+        imagePreview: item.imagePreview
+      };
+      byToolCallId.set(item.toolCallId, entry);
+      entries.push(entry);
+      continue;
+    }
+
+    entries.push({
+      id: `tool-entry-${item.id}`,
+      kind: item.kind === "approval" ? "approval" : "event",
+      title: item.title,
+      status: item.status,
+      item,
+      policy: item.policy,
+      imagePreview: item.imagePreview
+    });
   }
-  if (item.kind === "result") {
-    return "Result";
+  return entries;
+}
+
+function mergeToolRunEntryStatus(call: ActivityItem | undefined, result: ActivityItem | undefined): ActivityItem["status"] {
+  if (result?.status === "failed" || call?.status === "failed") {
+    return "failed";
   }
-  if (item.kind === "approval") {
+  if (result) {
+    return result.status ?? "done";
+  }
+  return call?.status;
+}
+
+function toolRunEntryKindLabel(entry: ToolRunEntry) {
+  if (entry.kind === "tool") {
+    return entry.result ? "Tool" : "Call";
+  }
+  if (entry.kind === "approval") {
     return "Approval";
   }
-  return "Info";
+  return "Event";
 }
 
 function capabilityLabel(capability: AgentTaskRunCapability) {

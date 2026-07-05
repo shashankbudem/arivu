@@ -557,3 +557,9 @@ Reason: doctor is the user's explicit health-check action. When it has strong ev
 Decision: retrying an assistant reply sends the source user-message index to desktop. The main process validates that the target is still the same user prompt, truncates messages and task runs after that prompt, and starts the replacement run from the existing user bubble.
 
 Reason: users expect Retry to regenerate the answer, not duplicate the query in the transcript. Handling this in the persisted session keeps chat history, Activity grouping, and future model context aligned.
+
+## 2026-07-05: Inline tool activity is paired by tool call
+
+Decision: the chat transcript derives paired tool-step rows by `toolCallId`, showing call details and matching result details together. The Activity rail still renders the underlying call/result/approval rows separately so audit evidence, screenshots, open actions, and repair prompts remain lossless.
+
+Reason: users need a fast answer to "what tools did this query use?" without losing the detailed control-plane trace needed for audits and follow-up repair work.
