@@ -62,7 +62,7 @@ Implemented:
 - Markdown rendering for assistant responses, with Shiki-highlighted fenced code blocks and per-block copy controls.
 - Default TUI built with `blessed`.
 - One-shot mode via `arivu "task"`.
-- `sessions`, `resume <session-id>`, and `config get|set`; inside the TUI, `/sessions [n]` lists recent saved sessions, `/resume <session-id>` switches the live TUI into that saved session, and `/diff` shows a read-only staged/unstaged/untracked git summary for the active workspace.
+- `sessions`, `resume <session-id>`, and `config get|set`; `arivu sessions` and TUI `/sessions [n]` support shared search/workspace/pinned/project filters, `/resume <session-id>` switches the live TUI into that saved session, and `/diff` shows a read-only staged/unstaged/untracked git summary for the active workspace.
 - OpenAI-compatible `/chat/completions` client.
 - Agent tool-call loop plus desktop bounded agent-loop mode for multi-iteration tasks.
 - Harness foundation docs in `docs/HARNESS.md`, with task runs plus opt-in task worktrees and local worktree lifecycle actions implemented; sandbox execution remains a future milestone.
@@ -180,7 +180,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Approval prompts are action-aware for shell and write actions, but still need more polish for a production-grade UX.
 - Persistent provider capability detection is not implemented. Tool support is inferred per request through retries/fallbacks, not cached as provider config.
 - Provider-specific multimodal capability detection is not implemented; image prompts require a model endpoint that accepts OpenAI-compatible image content parts.
-- Desktop history exists with deletion, and the CLI can list recent sessions with `arivu sessions`.
+- Desktop history exists with deletion, and the CLI can list/filter recent sessions with `arivu sessions`.
 - Workspace creation currently creates an empty folder; there is no project template or git initialization flow yet.
 - No packaging or release workflow beyond `npm link` and local build.
 
@@ -190,7 +190,7 @@ Best next milestone: deepen the coding-agent workflow now that the desktop cockp
 
 High-value tasks:
 
-- Add an interactive TUI session picker and richer `arivu sessions` filters.
+- Add an interactive TUI session picker on top of the richer CLI/TUI session filters.
 - Add provider-specific PR-check artifact ingestion beyond generic GitHub Actions log and external check-detail captures.
 - Deepen command diagnostics into broader language-server evidence beyond TypeScript and ESLint command-output parsing.
 - Add signed or centrally managed workspace policy distribution for teams that need stronger provenance than a checked-in bundle file.

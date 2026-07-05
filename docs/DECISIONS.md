@@ -509,3 +509,9 @@ Reason: lint output is the next most common local coding-agent signal after comp
 Decision: Activity command-result details now render captured TypeScript and ESLint diagnostics and expose guarded Open actions for diagnostic source paths. The same main-process evidence guard used by report/test/SARIF evidence validates that a requested diagnostic path is attached to the command artifact before resolving it under the session or task-worktree root.
 
 Reason: diagnostic evidence is only useful if the user can jump from the audit trail to the affected source file. Reusing the existing evidence-open guard keeps the interaction convenient without turning arbitrary paths from command output into openable filesystem targets.
+
+## 2026-07-05: CLI and TUI session lists share filters
+
+Decision: `arivu sessions` and TUI `/sessions` use the same session-list filter helper for search text, workspace path/name, pinned/unpinned state, and project/standalone chat mode. The CLI exposes those as flags, and the TUI accepts the same flags after the optional limit.
+
+Reason: session discovery should stay consistent across non-desktop surfaces. Sharing the filter logic avoids separate matching behavior between scripting-friendly CLI output and in-terminal TUI exploration.

@@ -19,8 +19,8 @@ This roadmap is ordered by development leverage for the current MVP.
 
 ## Milestone 3: Session ergonomics
 
-- Add richer session metadata and filters to `arivu sessions`. Basic recent-session listing is implemented.
-- Add an interactive session picker in the TUI. Basic `/sessions [n]` and `/resume <id>` commands are implemented.
+- Add richer session metadata and filters to `arivu sessions`. Search, workspace, pinned/unpinned, and project/standalone filters are implemented for CLI and TUI session lists.
+- Add an interactive session picker in the TUI. Filterable `/sessions [n]` and `/resume <id>` commands are implemented.
 - Add TUI/CLI controls for transcript compaction. Desktop compaction is implemented.
 - Add richer chat organization beyond the implemented rename/pin controls in desktop history and sidebar lists.
 

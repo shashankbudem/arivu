@@ -10,6 +10,16 @@ describe("TUI slash commands", () => {
   it("parses session listing and resume commands", () => {
     expect(parseTuiSlashCommand("/sessions")).toEqual({ kind: "sessions", limit: 10 });
     expect(parseTuiSlashCommand("/sessions 3")).toEqual({ kind: "sessions", limit: 3 });
+    expect(parseTuiSlashCommand("/sessions 25 --search provider fallback --workspace arivu --pinned --project")).toEqual({
+      kind: "sessions",
+      limit: 25,
+      filters: {
+        search: "provider fallback",
+        workspace: "arivu",
+        pinned: "pinned",
+        project: "project"
+      }
+    });
     expect(parseTuiSlashCommand("/resume abc123")).toEqual({ kind: "resume", sessionId: "abc123" });
     expect(parseTuiSlashCommand("/diff")).toEqual({ kind: "diff" });
   });
@@ -20,7 +30,14 @@ describe("TUI slash commands", () => {
   });
 
   it("reports invalid command usage", () => {
-    expect(parseTuiSlashCommand("/sessions zero")).toEqual({ kind: "error", message: "Usage: /sessions [positive-limit]" });
+    expect(parseTuiSlashCommand("/sessions zero")).toEqual({
+      kind: "error",
+      message: "Usage: /sessions [positive-limit] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]"
+    });
+    expect(parseTuiSlashCommand("/sessions --pinned --unpinned")).toEqual({
+      kind: "error",
+      message: "Use only one of --pinned or --unpinned."
+    });
     expect(parseTuiSlashCommand("/resume")).toEqual({ kind: "error", message: "Usage: /resume <session-id>" });
   });
 
@@ -51,6 +68,41 @@ describe("TUI slash commands", () => {
     expect(output).toContain("newer  2026-01-02T00:00:00Z  project  new work in project");
     expect(output).toContain("Resume with /resume <session-id>.");
     expect(output).not.toContain("older");
+  });
+
+  it("formats filtered sessions with filter context", () => {
+    const sessions: AgentSession[] = [
+      {
+        id: "pinned",
+        title: "Provider fallback fix",
+        pinnedAt: "2026-01-02T00:00:00.000Z",
+        cwd: "/tmp/arivu",
+        projectRoot: "/tmp/arivu",
+        trustMode: "ask",
+        messages: [{ role: "user", content: "fallback work" }],
+        createdAt: "2026-01-02T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z"
+      },
+      {
+        id: "standalone",
+        cwd: "/tmp/notes",
+        trustMode: "ask",
+        messages: [{ role: "user", content: "browser notes" }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      }
+    ];
+
+    const output = formatTuiSessionList(sessions, 10, { search: "provider", pinned: "pinned", project: "project" });
+
+    expect(output).toContain("Matching sessions:");
+    expect(output).toContain("Filters: search=provider, pinned, project");
+    expect(output).toContain("pinned  2026-01-02T00:00:00Z  arivu  Provider fallback fix");
+    expect(output).not.toContain("standalone");
+  });
+
+  it("formats a filtered empty session list", () => {
+    expect(formatTuiSessionList([], 10, { search: "missing" })).toBe("No saved sessions match filters: search=missing.");
   });
 
   it("formats an empty session list", () => {

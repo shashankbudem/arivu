@@ -46,6 +46,79 @@ describe("cli sessions command", () => {
     expect(stdout).not.toContain("older");
   });
 
+  it("filters saved sessions by search, workspace, and pinned state", async () => {
+    const store = new SessionStore(path.join(tempDir, "sessions"));
+    await store.save({
+      id: "pinned-api",
+      title: "Fix provider fallback",
+      pinnedAt: "2026-01-03T00:00:00.000Z",
+      cwd: "/tmp/arivu",
+      projectRoot: "/tmp/arivu",
+      trustMode: "ask",
+      selectedProviderName: "NVIDIA",
+      messages: [{ role: "user", content: "repair fallback issue" }],
+      createdAt: "2026-01-03T00:00:00.000Z",
+      updatedAt: "2026-01-03T00:00:00.000Z"
+    });
+    await store.save({
+      id: "standalone-notes",
+      cwd: "/tmp/notes",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "browser notes" }],
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z"
+    });
+    await store.save({
+      id: "project-browser",
+      cwd: "/tmp/other",
+      projectRoot: "/tmp/other",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "browser tabs" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    const { stdout } = await execArivu(["sessions", "--search", "fallback", "--workspace", "arivu", "--pinned"]);
+
+    expect(stdout).toContain("Filters: search=fallback, workspace=arivu, pinned");
+    expect(stdout).toContain("pinned-api\t2026-01-03T00:00:00Z\t/tmp/arivu\tFix provider fallback");
+    expect(stdout).not.toContain("standalone-notes");
+    expect(stdout).not.toContain("project-browser");
+  });
+
+  it("filters saved sessions by project mode", async () => {
+    const store = new SessionStore(path.join(tempDir, "sessions"));
+    await store.save({
+      id: "project-chat",
+      cwd: "/tmp/project",
+      projectRoot: "/tmp/project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "project work" }],
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z"
+    });
+    await store.save({
+      id: "standalone-chat",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "standalone work" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    const { stdout } = await execArivu(["sessions", "--standalone"]);
+
+    expect(stdout).toContain("Filters: standalone");
+    expect(stdout).toContain("standalone-chat");
+    expect(stdout).not.toContain("project-chat");
+  });
+
+  it("prints a filtered empty state", async () => {
+    const { stdout } = await execArivu(["sessions", "--search", "missing"]);
+
+    expect(stdout.trim()).toBe("No saved sessions match filters: search=missing.");
+  });
+
   it("prints an empty state when no sessions are saved", async () => {
     const { stdout } = await execArivu(["sessions"]);
 

@@ -2,7 +2,6 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { Agent } from "./agent/Agent.js";
-import { chatContentToText } from "./agent/content.js";
 import type { AgentSession } from "./agent/types.js";
 import { OpenAICompatibleChatClient } from "./agent/OpenAICompatibleChatClient.js";
 import {
@@ -17,6 +16,13 @@ import {
 import { runDoctor, type DoctorReport, type DoctorStatus } from "./diagnostics/doctor.js";
 import { ApprovalManager } from "./permissions/ApprovalManager.js";
 import { SessionStore } from "./sessions/SessionStore.js";
+import {
+  describeSessionListFilters,
+  filterSessions,
+  sessionDisplayTitle,
+  sessionWorkspacePath,
+  type SessionListFilters
+} from "./sessions/sessionList.js";
 import { TuiApp } from "./tui/TuiApp.js";
 import { detectWorkspace } from "./workspace.js";
 
@@ -70,18 +76,29 @@ program
   .command("sessions")
   .description("List recent saved sessions.")
   .option("-l, --limit <count>", "maximum sessions to show", parseLimit, 20)
+  .option("-s, --search <text>", "filter by session id, title, message, model, provider, or workspace")
+  .option("-w, --workspace <text>", "filter by workspace path or folder name")
+  .option("--pinned", "show only pinned sessions")
+  .option("--unpinned", "show only unpinned sessions")
+  .option("--project", "show only project/workspace sessions")
+  .option("--standalone", "show only standalone chats")
   .action(async (options: SessionsOptions) => {
     const store = new SessionStore();
-    const sessions = await store.list();
+    const filters = sessionFiltersFromCliOptions(options);
+    const sessions = filterSessions(await store.list(), filters);
     const visible = sessions.slice(0, options.limit);
+    const filterDescription = describeSessionListFilters(filters);
     if (visible.length === 0) {
-      console.log(chalk.dim("No saved sessions."));
+      console.log(chalk.dim(filterDescription ? `No saved sessions match filters: ${filterDescription}.` : "No saved sessions."));
       return;
     }
 
+    if (filterDescription) {
+      console.log(chalk.dim(`Filters: ${filterDescription}`));
+    }
     console.log(["ID", "UPDATED", "WORKSPACE", "TITLE"].join("\t"));
     for (const session of visible) {
-      console.log([session.id, formatCliDate(session.updatedAt), session.projectRoot ?? session.cwd, sessionTitle(session)].join("\t"));
+      console.log([session.id, formatCliDate(session.updatedAt), sessionWorkspacePath(session), sessionDisplayTitle(session)].join("\t"));
     }
   });
 
@@ -144,6 +161,12 @@ type RootOptions = {
 
 type SessionsOptions = {
   limit: number;
+  search?: string;
+  workspace?: string;
+  pinned?: boolean;
+  unpinned?: boolean;
+  project?: boolean;
+  standalone?: boolean;
 };
 
 type DoctorOptions = {
@@ -204,11 +227,6 @@ function isConfigKey(key: string): key is ConfigKey {
   return ["apiKey", "tavilyApiKey", "baseUrl", "model", "trustMode"].includes(key);
 }
 
-function sessionTitle(session: AgentSession) {
-  const content = session.messages.find((message) => message.role === "user")?.content;
-  return content ? chatContentToText(content).trim().split(/\s+/).slice(0, 12).join(" ") || "Untitled session" : "Untitled session";
-}
-
 function formatCliDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -223,6 +241,21 @@ function parseLimit(value: string) {
     throw new Error("Limit must be a positive integer.");
   }
   return parsed;
+}
+
+function sessionFiltersFromCliOptions(options: SessionsOptions): SessionListFilters {
+  if (options.pinned && options.unpinned) {
+    throw new Error("Use only one of --pinned or --unpinned.");
+  }
+  if (options.project && options.standalone) {
+    throw new Error("Use only one of --project or --standalone.");
+  }
+  return {
+    search: options.search,
+    workspace: options.workspace,
+    pinned: options.pinned ? "pinned" : options.unpinned ? "unpinned" : "all",
+    project: options.project ? "project" : options.standalone ? "standalone" : "all"
+  };
 }
 
 function printDoctorReport(report: DoctorReport) {
