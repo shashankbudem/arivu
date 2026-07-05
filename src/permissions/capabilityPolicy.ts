@@ -75,7 +75,7 @@ const CAPABILITY_DETAILS: Record<AgentTaskRunCapability, CapabilityDetails> = {
     defaultPosture: "Blocked in readonly, approval in ask, allowed in trusted except risky writes."
   },
   run_command: {
-    label: "Shell commands",
+    label: "Commands",
     description: "Run commands, tests, installs, and builds.",
     examples: ["npm test", "npm install", "git commands"],
     risk: "Runs host processes that can change files, use secrets, or call external services.",
@@ -154,7 +154,7 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     local_context: { base: "allow", label: "Local context", reason: "local context reads are allowed" },
     skill_context: { base: "allow", label: "Skill context", reason: "local skill reads are allowed" },
     write_workspace: { base: "prompt", label: "Requires approval", reason: "workspace writes require approval" },
-    run_command: { base: "prompt", label: "Requires approval", reason: "shell commands require approval" },
+    run_command: { base: "prompt", label: "Requires approval", reason: "commands require approval" },
     network_fetch: { base: "prompt", label: "Network approval", reason: "network reads require approval" },
     browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },
@@ -165,7 +165,7 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     local_context: { base: "allow", label: "Local context", reason: "local context reads are allowed" },
     skill_context: { base: "allow", label: "Skill context", reason: "local skill reads are allowed" },
     write_workspace: { base: "allow", risky: "prompt", label: "Approval for risky", reason: "risky workspace writes require approval" },
-    run_command: { base: "prompt", label: "Requires approval", reason: "shell commands require approval" },
+    run_command: { base: "prompt", label: "Requires approval", reason: "commands require approval" },
     network_fetch: { base: "prompt", label: "Network approval", reason: "network reads require approval" },
     browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },

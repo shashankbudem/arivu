@@ -16,6 +16,7 @@ export type ApprovalView =
   | {
       type: "shell";
       destructive: boolean;
+      mode?: "shell" | "argv";
       command: string;
       cwd?: string;
       executable: string;
@@ -48,14 +49,16 @@ export type ApprovalView =
     };
 
 export function parseApprovalMessage(message: string): ApprovalView {
-  const shellMatch = /^(Destructive shell command|Shell command):[ \t]*/m.exec(message);
+  const shellMatch = /^(Destructive shell command|Shell command|Destructive structured command|Structured command):[ \t]*/m.exec(message);
   if (shellMatch) {
     const command = extractShellCommand(message, shellMatch);
     const cwd = /^Working directory:\s*(.*)$/m.exec(message)?.[1]?.trim();
+    const mode = commandModeFromApprovalLabel(shellMatch[1]) ?? commandModeFromMessage(message);
     const [executable, ...rest] = tokenizeCommand(command);
     return {
       type: "shell",
       destructive: shellMatch[1].startsWith("Destructive"),
+      mode,
       command,
       cwd,
       executable: executable ?? command,
@@ -189,9 +192,23 @@ function tokenizeCommand(command: string) {
 
 function extractShellCommand(message: string, shellMatch: RegExpExecArray) {
   const commandStart = shellMatch.index + shellMatch[0].length;
-  const cwdMarkerIndex = message.lastIndexOf("\nWorking directory:");
-  const commandEnd = cwdMarkerIndex > commandStart ? cwdMarkerIndex : message.length;
+  const markerIndexes = ["\nCommand mode:", "\nCommand analysis:", "\nWorking directory:"]
+    .map((marker) => message.indexOf(marker, commandStart))
+    .filter((index) => index >= 0);
+  const commandEnd = markerIndexes.length > 0 ? Math.min(...markerIndexes) : message.length;
   return message.slice(commandStart, commandEnd).trim();
+}
+
+function commandModeFromApprovalLabel(label: string | undefined): "shell" | "argv" | undefined {
+  if (!label) {
+    return undefined;
+  }
+  return label.toLowerCase().includes("structured") ? "argv" : label.toLowerCase().includes("shell") ? "shell" : undefined;
+}
+
+function commandModeFromMessage(message: string): "shell" | "argv" | undefined {
+  const mode = /^Command mode:\s*(shell|argv)$/m.exec(message)?.[1];
+  return mode === "shell" || mode === "argv" ? mode : undefined;
 }
 
 function detectCommandWarnings(command: string) {

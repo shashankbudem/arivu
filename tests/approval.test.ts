@@ -21,7 +21,7 @@ describe("approval manager", () => {
     expect(prompted).toBe(true);
   });
 
-  it("prompts for shell commands even in trusted mode", async () => {
+  it("prompts for commands even in trusted mode", async () => {
     const approvals = new ApprovalManager("trusted", async () => false);
     await expect(approvals.require({ type: "shell", command: "npm test" })).rejects.toThrow(/denied/);
   });
@@ -97,6 +97,41 @@ describe("approval manager", () => {
         label: "Command",
         value: "npm test"
       }
+    });
+  });
+
+  it("labels structured argv approvals distinctly from shell approvals", async () => {
+    const events: AgentTaskRunApprovalEvent[] = [];
+    const approvals = new ApprovalManager(
+      "ask",
+      async (message) => {
+        expect(message).toBe(
+          "Structured command: node -e \"process.stdout.write('ok')\"\nCommand mode: argv\nCommand analysis: low risk - commands: node\nWorking directory: /workspace"
+        );
+        return false;
+      },
+      {},
+      (event) => {
+        events.push(event);
+      }
+    );
+
+    await expect(
+      approvals.require({
+        type: "shell",
+        command: "node -e \"process.stdout.write('ok')\"",
+        commandMode: "argv",
+        cwd: "/workspace",
+        risk: "low",
+        analysisSummary: "low risk - commands: node"
+      })
+    ).rejects.toThrow(/denied/);
+    expect(events[0]).toMatchObject({
+      actionType: "shell",
+      capability: "run_command",
+      status: "requested",
+      message:
+        "Structured command: node -e \"process.stdout.write('ok')\"\nCommand mode: argv\nCommand analysis: low risk - commands: node\nWorking directory: /workspace"
     });
   });
 

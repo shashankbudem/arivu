@@ -372,7 +372,7 @@ describe("agent task runs", () => {
         trustMode: "ask",
         effect: "prompt",
         label: "Requires approval",
-        reason: "shell commands require approval",
+        reason: "commands require approval",
         risky: false,
         scope: {
           kind: "command",
@@ -394,7 +394,7 @@ describe("agent task runs", () => {
         trustMode: "ask",
         effect: "prompt",
         label: "Requires approval",
-        reason: "shell commands require approval",
+        reason: "commands require approval",
         risky: false,
         scope: {
           kind: "command",
@@ -418,7 +418,7 @@ describe("agent task runs", () => {
         trustMode: "ask",
         effect: "prompt",
         label: "Requires approval",
-        reason: "shell commands require approval",
+        reason: "commands require approval",
         risky: false,
         scope: {
           kind: "command",

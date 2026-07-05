@@ -606,6 +606,7 @@ export function createToolRegistry(context: ToolContext) {
       await context.approvals.require({
         type: "shell",
         command: commandText,
+        commandMode,
         cwd: context.workspaceRoot,
         destructive: commandAnalysis.destructive,
         risk: commandAnalysis.risk,

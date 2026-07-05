@@ -581,3 +581,9 @@ Reason: local shell execution remains powerful even when approval-gated. Parser-
 Decision: the `run` tool now accepts `argv` as a structured command vector in addition to the existing shell `command` string. Argv mode executes with `shell: false`, is preferred for simple test/build/package commands, records `commandMode: argv` on command artifacts, and uses argv-aware risk analysis for destructive command vectors plus nested shell strings such as `bash -lc`.
 
 Reason: shell strings are still needed for pipelines and redirects, but most agent verification commands do not need shell parsing. Structured argv execution reduces accidental shell interpretation while preserving the same approval, risk, and audit path.
+
+## 2026-07-06: Command approvals show execution mode
+
+Decision: command approval prompts now distinguish structured argv execution from shell execution. Structured commands are labeled `Structured command`, include `Command mode: argv`, and the renderer approval parser stops command extraction before command-mode, analysis, and working-directory metadata.
+
+Reason: users need to see the trust boundary before approving a command, not only after it finishes. Keeping mode visible in the prompt and parsed modal prevents argv execution from being misrepresented as shell execution and keeps command text clean in the approval UI.

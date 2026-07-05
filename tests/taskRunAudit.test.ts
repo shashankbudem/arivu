@@ -23,7 +23,7 @@ describe("task run audit summaries", () => {
         trustMode: "ask",
         effect: "prompt",
         label: "Requires approval",
-        reason: "shell commands require approval",
+        reason: "commands require approval",
         risky: false,
         scope: {
           kind: "command",
@@ -82,7 +82,7 @@ describe("task run audit summaries", () => {
     expect(audit).toContain("- Run command");
     expect(audit).toContain("1. `run` - Run command - Done - 2.0s");
     expect(audit).toContain("- Arguments: `{\"command\":\"npm test\"}`");
-    expect(audit).toContain("- Policy: Approved - prompt - ask - scope Command npm test: shell commands require approval");
+    expect(audit).toContain("- Policy: Approved - prompt - ask - scope Command npm test: commands require approval");
     expect(audit).toContain("- Approved - Run command - shell - ask - prompt - scope Command npm test: npm test");
     expect(audit).toContain("analysis: low risk - commands: npm");
     expect(audit).toContain("- Status: Failed");

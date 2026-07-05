@@ -25,6 +25,7 @@ export type ApprovalAction =
   | {
       type: "shell";
       command: string;
+      commandMode?: "shell" | "argv";
       cwd?: string;
       destructive?: boolean;
       risk?: "low" | "medium" | "high";

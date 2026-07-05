@@ -10,8 +10,35 @@ describe("approval parsing", () => {
       return;
     }
     expect(view.command).toBe("echo ok\nrm -R dist");
+    expect(view.mode).toBe("shell");
     expect(view.cwd).toBe("/tmp/workspace");
     expect(view.warnings).toContain("rm -rf");
+  });
+
+  it("parses structured command approvals and stops before analysis metadata", () => {
+    const view = parseApprovalMessage(
+      "Structured command: node -e \"process.stdout.write('ok')\"\nCommand mode: argv\nCommand analysis: low risk - commands: node\nWorking directory: /workspace"
+    );
+
+    expect(view.type).toBe("shell");
+    if (view.type !== "shell") {
+      return;
+    }
+    expect(view.destructive).toBe(false);
+    expect(view.mode).toBe("argv");
+    expect(view.command).toBe("node -e \"process.stdout.write('ok')\"");
+    expect(view.cwd).toBe("/workspace");
+    expect(view.executable).toBe("node");
+  });
+
+  it("does not include command analysis in shell command text when cwd is absent", () => {
+    const view = parseApprovalMessage("Shell command: npm test\nCommand analysis: low risk - commands: npm");
+
+    expect(view.type).toBe("shell");
+    if (view.type !== "shell") {
+      return;
+    }
+    expect(view.command).toBe("npm test");
   });
 
   it("parses network approvals with the outgoing query", () => {

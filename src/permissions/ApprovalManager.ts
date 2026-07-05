@@ -70,7 +70,7 @@ export class ApprovalManager {
 
     const label =
       action.type === "shell"
-        ? formatShellApproval(action.command, destructive, action.cwd, shellAnalysis)
+        ? formatShellApproval(action, destructive, shellAnalysis)
         : action.type === "mcp"
           ? formatMcpApproval(action, destructive)
           : action.type === "network"
@@ -123,14 +123,23 @@ function shellAnalysisForAction(action: Extract<ApprovalAction, { type: "shell" 
   };
 }
 
-function formatShellApproval(command: string, destructive: boolean, cwd?: string, analysis?: ShellCommandAnalysis) {
+function formatShellApproval(action: Extract<ApprovalAction, { type: "shell" }>, destructive: boolean, analysis?: ShellCommandAnalysis) {
+  const heading = commandApprovalHeading(action.commandMode, destructive);
   return [
-    `${destructive ? "Destructive shell command" : "Shell command"}: ${command}`,
+    `${heading}: ${action.command}`,
+    action.commandMode ? `Command mode: ${action.commandMode}` : "",
     analysis ? `Command analysis: ${analysis.summary}` : "",
-    cwd ? `Working directory: ${cwd}` : ""
+    action.cwd ? `Working directory: ${action.cwd}` : ""
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function commandApprovalHeading(mode: Extract<ApprovalAction, { type: "shell" }>["commandMode"], destructive: boolean) {
+  if (mode === "argv") {
+    return destructive ? "Destructive structured command" : "Structured command";
+  }
+  return destructive ? "Destructive shell command" : "Shell command";
 }
 
 function formatWriteApproval(action: Extract<ApprovalAction, { type: "write" }>, destructive: boolean) {
