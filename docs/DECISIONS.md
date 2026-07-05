@@ -575,3 +575,9 @@ Reason: loop mode is only useful if users can understand why the agent continued
 Decision: the `run` tool now performs shallow shell-aware command analysis before approval. It tokenizes enough syntax to identify command roots, control operators, pipes, redirects, package/git mutations, privileged/network command roots, and high-risk destructive patterns. Approval prompts include the compact analysis line, and command results persist `commandRisk` plus `commandAnalysis` into task-run command artifacts, Activity details, and copied audits.
 
 Reason: local shell execution remains powerful even when approval-gated. Parser-derived risk metadata gives users a clearer pre-run review signal and preserves command safety evidence after reload without pretending that local host shell execution is a sandbox.
+
+## 2026-07-06: Run supports structured argv execution
+
+Decision: the `run` tool now accepts `argv` as a structured command vector in addition to the existing shell `command` string. Argv mode executes with `shell: false`, is preferred for simple test/build/package commands, records `commandMode: argv` on command artifacts, and uses argv-aware risk analysis for destructive command vectors plus nested shell strings such as `bash -lc`.
+
+Reason: shell strings are still needed for pipelines and redirects, but most agent verification commands do not need shell parsing. Structured argv execution reduces accidental shell interpretation while preserving the same approval, risk, and audit path.

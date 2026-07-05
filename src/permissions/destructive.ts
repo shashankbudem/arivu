@@ -47,6 +47,7 @@ const MEDIUM_RISK_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 ];
 
 const COMMAND_PREFIXES = new Set(["command", "builtin", "env", "nohup", "time", "sudo"]);
+const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "fish"]);
 const CONTROL_OPERATORS = new Set(["&&", "||", ";"]);
 const PIPE_OPERATORS = new Set(["|"]);
 const REDIRECT_OPERATORS = new Set([">", ">>", "<", "<<", "2>", "2>>", "&>", ">&"]);
@@ -83,6 +84,35 @@ export function analyzeShellCommand(command: string): ShellCommandAnalysis {
 
 export function isDestructiveCommand(command: string) {
   return analyzeShellCommand(command).destructive;
+}
+
+export function analyzeArgvCommand(executable: string, args: string[] = []): ShellCommandAnalysis {
+  const words = [executable, ...args].filter((word) => word.trim().length > 0);
+  const commandHeads = commandHeadsFromWords(words);
+  const highRiskReasons = highRiskReasonsFromArgv(words);
+  const nestedShell = nestedShellAnalysis(words);
+  const mediumReasons = [
+    ...mediumPatternReasonsFromArgv(words),
+    ...commandHeads.map((head) => MEDIUM_RISK_HEADS.get(head)).filter((reason): reason is string => Boolean(reason)),
+    nestedShell && nestedShell.risk !== "low" ? `nested shell: ${nestedShell.summary}` : undefined
+  ];
+  const reasons = uniqueStrings([
+    ...highRiskReasons,
+    ...(nestedShell?.destructive ? nestedShell.reasons.map((reason) => `nested shell: ${reason}`) : []),
+    ...mediumReasons.filter((reason): reason is string => Boolean(reason))
+  ]);
+  const risk: ShellCommandRisk = highRiskReasons.length > 0 || nestedShell?.destructive ? "high" : reasons.length > 0 ? "medium" : "low";
+
+  return {
+    risk,
+    destructive: risk === "high",
+    reasons,
+    commandHeads,
+    hasControlOperator: false,
+    hasPipe: false,
+    hasRedirect: false,
+    summary: shellCommandSummary(risk, reasons, commandHeads)
+  };
 }
 
 function tokenizeShell(command: string): ShellToken[] {
@@ -133,7 +163,7 @@ function tokenizeShell(command: string): ShellToken[] {
       index += operator.length - 1;
       continue;
     }
-    if (char === "2" && (next === ">" || (next === ">" && command[index + 2] === ">"))) {
+    if (char === "2" && next === ">") {
       pushWord();
       const operator = command[index + 2] === ">" ? "2>>" : "2>";
       tokens.push({ kind: "operator", value: operator });
@@ -156,15 +186,20 @@ function shellOperatorAt(command: string, index: number) {
 }
 
 function commandHeadsFromTokens(tokens: ShellToken[]) {
+  return commandHeadsFromWords(tokens.filter((token) => token.kind === "word").map((token) => token.value), tokens);
+}
+
+function commandHeadsFromWords(words: string[], tokens?: ShellToken[]) {
   const heads: string[] = [];
   let expectingCommand = true;
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (!token) {
+  const entries = tokens ?? words.map((word): ShellToken => ({ kind: "word", value: word }));
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!entry) {
       continue;
     }
-    if (token.kind === "operator") {
-      if (CONTROL_OPERATORS.has(token.value) || PIPE_OPERATORS.has(token.value)) {
+    if (entry.kind === "operator") {
+      if (CONTROL_OPERATORS.has(entry.value) || PIPE_OPERATORS.has(entry.value)) {
         expectingCommand = true;
       }
       continue;
@@ -172,10 +207,10 @@ function commandHeadsFromTokens(tokens: ShellToken[]) {
     if (!expectingCommand) {
       continue;
     }
-    if (isEnvAssignment(token.value)) {
+    if (isEnvAssignment(entry.value)) {
       continue;
     }
-    const head = normalizeCommandHead(token.value);
+    const head = normalizeCommandHead(entry.value);
     if (!head) {
       continue;
     }
@@ -186,6 +221,105 @@ function commandHeadsFromTokens(tokens: ShellToken[]) {
     expectingCommand = false;
   }
   return uniqueStrings(heads);
+}
+
+function highRiskReasonsFromArgv(words: string[]) {
+  const reasons: string[] = [];
+  const effectiveWords = effectiveArgvWords(words);
+  const head = normalizeCommandHead(effectiveWords[0] ?? "");
+  const args = effectiveWords.slice(1);
+  if (head === "rm" && args.some(isRecursiveFlag)) {
+    reasons.push("recursive remove");
+  }
+  if (head === "git" && args[0] === "reset") {
+    reasons.push("git reset");
+  }
+  if (head === "git" && args[0] === "clean") {
+    reasons.push("git clean");
+  }
+  if (head === "git" && args[0] === "checkout" && args.some((arg) => arg === "-f" || arg === "--force")) {
+    reasons.push("forced git checkout");
+  }
+  if ((head === "chmod" || head === "chown") && args.some((arg) => arg === "-R" || arg === "--recursive")) {
+    reasons.push(head === "chmod" ? "recursive chmod" : "recursive chown");
+  }
+  if (head === "diskutil" && args.some((arg) => arg.toLowerCase() === "erase" || arg.toLowerCase().startsWith("erase"))) {
+    reasons.push("disk erase");
+  }
+  if (head === "mkfs" || head.startsWith("mkfs.")) {
+    reasons.push("filesystem formatting");
+  }
+  if (head === "dd" && args.some((arg) => arg.startsWith("of=/dev/"))) {
+    reasons.push("raw device write");
+  }
+  return uniqueStrings(reasons);
+}
+
+function mediumPatternReasonsFromArgv(words: string[]) {
+  const reasons: string[] = [];
+  const effectiveWords = effectiveArgvWords(words);
+  const head = normalizeCommandHead(effectiveWords[0] ?? "");
+  const subcommand = effectiveWords[1] ?? "";
+  if (["npm", "pnpm", "yarn", "bun"].includes(head) && ["install", "add", "remove", "rm", "update", "upgrade", "link", "ci"].includes(subcommand)) {
+    reasons.push("package mutation");
+  }
+  if (["pip", "pip3", "brew"].includes(head) && ["install", "uninstall", "upgrade", "update"].includes(subcommand)) {
+    reasons.push("package mutation");
+  }
+  if (head === "git" && ["push", "commit", "merge", "rebase", "pull", "checkout", "switch", "restore"].includes(subcommand)) {
+    reasons.push("git mutation possible");
+  }
+  return reasons;
+}
+
+function nestedShellAnalysis(words: string[]) {
+  const effectiveWords = effectiveArgvWords(words);
+  const head = normalizeCommandHead(effectiveWords[0] ?? "");
+  if (!SHELL_INTERPRETERS.has(head)) {
+    return undefined;
+  }
+  for (let index = 1; index < effectiveWords.length; index += 1) {
+    const arg = effectiveWords[index];
+    if (!arg) {
+      continue;
+    }
+    if (arg === "-c" || (arg.endsWith("c") && arg.startsWith("-"))) {
+      const command = effectiveWords[index + 1];
+      return command ? analyzeShellCommand(command) : undefined;
+    }
+  }
+  return undefined;
+}
+
+function effectiveArgvWords(words: string[]) {
+  let index = 0;
+  while (index < words.length) {
+    const value = words[index] ?? "";
+    if (isEnvAssignment(value)) {
+      index += 1;
+      continue;
+    }
+    const head = normalizeCommandHead(value);
+    if (!COMMAND_PREFIXES.has(head)) {
+      break;
+    }
+    index += 1;
+    if (head === "sudo") {
+      while ((words[index] ?? "").startsWith("-")) {
+        index += 1;
+      }
+    }
+    if (head === "env") {
+      while (isEnvAssignment(words[index] ?? "")) {
+        index += 1;
+      }
+    }
+  }
+  return words.slice(index);
+}
+
+function isRecursiveFlag(value: string) {
+  return value === "--recursive" || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(value);
 }
 
 function normalizeCommandHead(value: string) {

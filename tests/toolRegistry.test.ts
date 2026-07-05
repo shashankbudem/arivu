@@ -387,6 +387,22 @@ describe("createToolRegistry", () => {
     expect(result).toContain("exitCode: 0\nstdout:\nprofile-ok");
   });
 
+  it("runs structured argv commands without shell parsing", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("ask", async () => true)
+    });
+
+    const result = await registry.execute("run", {
+      argv: [process.execPath, "-e", "process.stdout.write(process.argv[1])", "argv-ok && echo shell-ran"]
+    });
+    expect(result).toContain("commandMode: argv");
+    expect(result).toContain("commandRisk: low");
+    expect(result).toContain("commandAnalysis: low risk - commands: node");
+    expect(result).toContain("exitCode: 0\nstdout:\nargv-ok && echo shell-ran");
+    expect(result).not.toContain("shell-ran\n");
+  });
+
   it("rejects unconfigured command execution profiles before approval", async () => {
     let prompted = false;
     const registry = createToolRegistry({

@@ -873,6 +873,7 @@ function commandArtifactFromToolResult(
   options: { command?: string; durationMs?: number; workspaceRoot?: string } = {}
 ): AgentTaskRunArtifact {
   const exitCode = numberFromMatch(result.match(/^exitCode:\s*(-?\d+)/m)?.[1]);
+  const commandMode = commandModeFromResult(result);
   const executionProfile = commandExecutionProfileFromResult(result);
   const executionIsolation = stringFromMatch(result.match(/^executionIsolation:\s*(.+)$/m)?.[1]);
   const workingDirectory = stringFromMatch(result.match(/^workingDirectory:\s*(.+)$/m)?.[1]);
@@ -903,6 +904,7 @@ function commandArtifactFromToolResult(
     title: "Command output",
     summary: summaryParts.length > 0 ? summaryParts.join(" - ") : "Command output captured.",
     command: options.command,
+    commandMode,
     commandRisk,
     commandAnalysis,
     executionProfile,
@@ -930,6 +932,14 @@ function commandExecutionProfileFromResult(result: string): CommandExecutionProf
   return undefined;
 }
 
+function commandModeFromResult(result: string): AgentTaskRunArtifact["commandMode"] {
+  const value = stringFromMatch(result.match(/^commandMode:\s*(.+)$/m)?.[1]);
+  if (value === "shell" || value === "argv") {
+    return value;
+  }
+  return undefined;
+}
+
 function commandRiskFromResult(result: string): AgentTaskRunArtifact["commandRisk"] {
   const value = stringFromMatch(result.match(/^commandRisk:\s*(.+)$/m)?.[1]);
   if (value === "low" || value === "medium" || value === "high") {
@@ -942,7 +952,18 @@ function commandTextFromArguments(argumentsValue: unknown): string | undefined {
   if (!isRecord(argumentsValue)) {
     return undefined;
   }
-  return stringValue(argumentsValue.command);
+  return commandTextFromArgv(argumentsValue.argv) ?? stringValue(argumentsValue.command);
+}
+
+function commandTextFromArgv(value: unknown): string | undefined {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    return undefined;
+  }
+  return value.length > 0 ? value.map(formatCommandPart).join(" ") : undefined;
+}
+
+function formatCommandPart(value: string) {
+  return /^[A-Za-z0-9_./:=@%+-]+$/.test(value) ? value : JSON.stringify(value);
 }
 
 function diffTextFromArguments(argumentsValue: unknown): string | undefined {

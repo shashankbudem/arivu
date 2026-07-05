@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { execa } from "execa";
 import { z } from "zod";
 import type { ApprovalManager } from "../permissions/ApprovalManager.js";
-import { analyzeShellCommand } from "../permissions/destructive.js";
+import { analyzeArgvCommand, analyzeShellCommand } from "../permissions/destructive.js";
 import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "../permissions/scopePolicy.js";
 import type { AppConfig } from "../config.js";
 import { resolveCommandExecutionProfile } from "../execution/profile.js";
@@ -570,9 +570,14 @@ export function createToolRegistry(context: ToolContext) {
     schema: {
       name: "run",
       description:
-        "Run a shell command in the workspace. Commands currently execute on the local host process; container/sandbox profiles are explicit future execution-plane targets and return an unsupported-profile error until configured.",
+        "Run a command in the workspace. Prefer argv for simple commands because it avoids shell parsing. Use command only when shell syntax is required. Commands currently execute on the local host process; container/sandbox profiles are explicit future execution-plane targets and return an unsupported-profile error until configured.",
       parameters: objectSchema({
-        command: { type: "string", description: "Shell command to run." },
+        command: { type: "string", description: "Shell command string to run when shell syntax is required." },
+        argv: {
+          type: "array",
+          items: { type: "string" },
+          description: "Structured command vector. First item is the executable, remaining items are literal arguments. Preferred for tests, builds, and package commands."
+        },
         executionProfile: {
           type: "string",
           enum: ["host", "container", "sandbox"],
@@ -583,34 +588,48 @@ export function createToolRegistry(context: ToolContext) {
     async execute(args) {
       const parsed = z
         .object({
-          command: z.string(),
+          command: z.string().trim().min(1).optional(),
+          argv: z.array(z.string().trim().min(1)).min(1).optional(),
           executionProfile: z.enum(["host", "container", "sandbox"]).optional()
         })
         .parse(args);
+      if (!parsed.command && !parsed.argv) {
+        throw new Error("Provide command or argv.");
+      }
       const executionProfile = resolveCommandExecutionProfile(parsed.executionProfile);
       if (!executionProfile.supported) {
         throw new Error(executionProfile.reason ?? `Unsupported execution profile: ${executionProfile.profile}`);
       }
-      const commandAnalysis = analyzeShellCommand(parsed.command);
+      const commandMode = parsed.argv ? "argv" : "shell";
+      const commandText = parsed.argv ? formatCommandVector(parsed.argv) : parsed.command ?? "";
+      const commandAnalysis = parsed.argv ? analyzeArgvCommand(parsed.argv[0] ?? "", parsed.argv.slice(1)) : analyzeShellCommand(commandText);
       await context.approvals.require({
         type: "shell",
-        command: parsed.command,
+        command: commandText,
         cwd: context.workspaceRoot,
         destructive: commandAnalysis.destructive,
         risk: commandAnalysis.risk,
         analysisSummary: commandAnalysis.summary,
         analysisReasons: commandAnalysis.reasons
       });
-      const result = await execa(parsed.command, {
-        cwd: context.workspaceRoot,
-        shell: true,
-        reject: false,
-        timeout: 120_000
-      });
+      const result = parsed.argv
+        ? await execa(parsed.argv[0] ?? "", parsed.argv.slice(1), {
+            cwd: context.workspaceRoot,
+            shell: false,
+            reject: false,
+            timeout: 120_000
+          })
+        : await execa(commandText, {
+            cwd: context.workspaceRoot,
+            shell: true,
+            reject: false,
+            timeout: 120_000
+          });
       return [
         `executionProfile: ${executionProfile.profile}`,
         `executionIsolation: ${executionProfile.isolation}`,
         `workingDirectory: ${context.workspaceRoot}`,
+        `commandMode: ${commandMode}`,
         `commandRisk: ${commandAnalysis.risk}`,
         `commandAnalysis: ${commandAnalysis.summary}`,
         `exitCode: ${result.exitCode}`,
@@ -664,6 +683,14 @@ function objectSchema(properties: Record<string, unknown>) {
     properties,
     additionalProperties: false
   };
+}
+
+function formatCommandVector(argv: string[]) {
+  return argv.map(formatCommandPart).join(" ");
+}
+
+function formatCommandPart(value: string) {
+  return /^[A-Za-z0-9_./:=@%+-]+$/.test(value) ? value : JSON.stringify(value);
 }
 
 function hiddenAgentBrowserMode(): BrowserMode {

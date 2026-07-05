@@ -9197,6 +9197,7 @@ function commandArtifactSummary(artifact?: AgentTaskRunArtifact) {
   }
   const parts = [
     artifact.exitCode === undefined ? undefined : `Exit code ${artifact.exitCode}`,
+    artifact.commandMode ? `Mode ${artifact.commandMode}` : undefined,
     artifact.commandRisk ? `Risk ${artifact.commandRisk}` : undefined,
     artifact.durationMs === undefined ? undefined : formatDurationMs(artifact.durationMs),
     testReportSummary(artifact.testReports) ??
@@ -9209,6 +9210,7 @@ function commandArtifactSummary(artifact?: AgentTaskRunArtifact) {
 function commandArtifactDetail(artifact: AgentTaskRunArtifact) {
   const metadata = [
     artifact.command === undefined ? undefined : `command: ${artifact.command}`,
+    artifact.commandMode === undefined ? undefined : `commandMode: ${artifact.commandMode}`,
     artifact.commandRisk === undefined ? undefined : `commandRisk: ${artifact.commandRisk}`,
     artifact.commandAnalysis === undefined ? undefined : `commandAnalysis: ${artifact.commandAnalysis}`,
     artifact.executionProfile === undefined ? undefined : `executionProfile: ${artifact.executionProfile}`,

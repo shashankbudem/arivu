@@ -275,6 +275,7 @@ type AgentTaskRunArtifact = {
   additions?: number;
   deletions?: number;
   command?: string;
+  commandMode?: "shell" | "argv";
   commandRisk?: "low" | "medium" | "high";
   commandAnalysis?: string;
   executionProfile?: "host" | "container" | "sandbox";

@@ -760,6 +760,45 @@ boom`
     });
   });
 
+  it("records argv command artifacts with execution mode", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 0,
+      prompt: "run a structured command",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_call",
+        call: {
+          id: "call_argv",
+          name: "run",
+          arguments: { argv: ["node", "-e", "process.stdout.write('ok')"] }
+        }
+      },
+      "2026-01-01T00:00:00.000Z"
+    );
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_result",
+        toolCallId: "call_argv",
+        name: "run",
+        result:
+          "executionProfile: host\nexecutionIsolation: local host process\nworkingDirectory: /workspace\ncommandMode: argv\ncommandRisk: low\ncommandAnalysis: low risk - commands: node\nexitCode: 0\nstdout:\nok"
+      },
+      "2026-01-01T00:00:01.000Z"
+    );
+
+    expect(run.artifacts[0]).toMatchObject({
+      command: "node -e \"process.stdout.write('ok')\"",
+      commandMode: "argv",
+      commandRisk: "low",
+      commandAnalysis: "low risk - commands: node"
+    });
+  });
+
   it("parses SARIF report summaries from command artifacts", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "arivu-task-run-sarif-"));
     await mkdir(path.join(workspace, "reports"));

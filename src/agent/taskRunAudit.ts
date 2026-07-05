@@ -274,6 +274,9 @@ function artifactLine(artifact: AgentTaskRunArtifact) {
   if (artifact.exitCode !== undefined) {
     parts.push(`exit ${artifact.exitCode}`);
   }
+  if (artifact.commandMode) {
+    parts.push(`mode ${artifact.commandMode}`);
+  }
   if (artifact.commandRisk) {
     parts.push(`risk ${artifact.commandRisk}`);
   }
