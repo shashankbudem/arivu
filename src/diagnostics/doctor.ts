@@ -1,4 +1,4 @@
-import type { AppConfig } from "../config.js";
+import type { AppConfig, ProviderCapabilityName } from "../config.js";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -12,10 +12,20 @@ export type DoctorCheck = {
   detail?: string;
 };
 
+export type DoctorCapabilityObservation = {
+  capability: ProviderCapabilityName;
+  value: "disabled";
+  source: "doctor";
+  checkId: string;
+  status: DoctorStatus;
+  detail?: string;
+};
+
 export type DoctorReport = {
   generatedAt: string;
   checks: DoctorCheck[];
   summary: Record<DoctorStatus, number>;
+  capabilityObservations?: DoctorCapabilityObservation[];
 };
 
 type DoctorOptions = {
@@ -41,6 +51,7 @@ type ChatJson = {
 export async function runDoctor(config: DoctorConfig, options: DoctorOptions = {}): Promise<DoctorReport> {
   const fetcher = options.fetcher ?? fetch;
   const checks: DoctorCheck[] = [];
+  const capabilityObservations: DoctorCapabilityObservation[] = [];
   const apiKey = config.apiKey?.trim();
 
   checks.push(
@@ -63,9 +74,15 @@ export async function runDoctor(config: DoctorConfig, options: DoctorOptions = {
     checks.push(checkSelectedModel(config.model, models));
     checks.push(await checkBasicChat(config, fetcher));
     checks.push(await checkStreaming(config, fetcher));
-    checks.push(config.toolCalling === "disabled"
-      ? check("tool-calling", "Tool calling", "skip", "Skipped because this provider is configured for plain chat.")
-      : await checkToolCalling(config, fetcher));
+    if (config.toolCalling === "disabled") {
+      checks.push(check("tool-calling", "Tool calling", "skip", "Skipped because this provider is configured for plain chat."));
+    } else {
+      const toolCalling = await checkToolCalling(config, fetcher);
+      checks.push(toolCalling.check);
+      if (toolCalling.observation) {
+        capabilityObservations.push(toolCalling.observation);
+      }
+    }
   }
 
   checks.push(await checkTavily(config, fetcher));
@@ -73,7 +90,8 @@ export async function runDoctor(config: DoctorConfig, options: DoctorOptions = {
   return {
     generatedAt: new Date().toISOString(),
     checks,
-    summary: summarize(checks)
+    summary: summarize(checks),
+    ...(capabilityObservations.length > 0 ? { capabilityObservations } : {})
   };
 }
 
@@ -161,7 +179,7 @@ async function checkStreaming(config: DoctorConfig, fetcher: FetchLike): Promise
   }
 }
 
-async function checkToolCalling(config: DoctorConfig, fetcher: FetchLike): Promise<DoctorCheck> {
+async function checkToolCalling(config: DoctorConfig, fetcher: FetchLike): Promise<{ check: DoctorCheck; observation?: DoctorCapabilityObservation }> {
   const response = await postChat(config, fetcher, {
     model: config.model,
     messages: [{ role: "user", content: "Call diagnostic_ping with message ok." }],
@@ -194,13 +212,30 @@ async function checkToolCalling(config: DoctorConfig, fetcher: FetchLike): Promi
   if (!response.ok) {
     const status = unsupportedTools(response.text) ? "warn" : "fail";
     const message = status === "warn" ? "Endpoint appears not to support tool calling; Markdown fallback will be used." : `Tool-call check failed (${response.status}).`;
-    return check("tool-calling", "Tool calling", status, message, truncate(response.text, 500));
+    const detail = truncate(response.text, 500);
+    return {
+      check: check("tool-calling", "Tool calling", status, message, detail),
+      ...(status === "warn"
+        ? {
+            observation: {
+              capability: "toolCalling" as const,
+              value: "disabled" as const,
+              source: "doctor" as const,
+              checkId: "tool-calling",
+              status,
+              detail
+            }
+          }
+        : {})
+    };
   }
 
   const toolCalls = response.json?.choices?.[0]?.message?.tool_calls ?? [];
-  return toolCalls.length > 0
-    ? check("tool-calling", "Tool calling", "pass", "Endpoint returned a tool call.")
-    : check("tool-calling", "Tool calling", "warn", "Request succeeded but no tool call was returned; Markdown fallback may be needed.");
+  return {
+    check: toolCalls.length > 0
+      ? check("tool-calling", "Tool calling", "pass", "Endpoint returned a tool call.")
+      : check("tool-calling", "Tool calling", "warn", "Request succeeded but no tool call was returned; Markdown fallback may be needed.")
+  };
 }
 
 async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<DoctorCheck> {

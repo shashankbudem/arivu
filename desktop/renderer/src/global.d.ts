@@ -699,10 +699,20 @@ type DoctorCheck = {
   detail?: string;
 };
 
+type DoctorCapabilityObservation = {
+  capability: "toolCalling" | "imageInput";
+  value: "disabled";
+  source: "doctor";
+  checkId: string;
+  status: DoctorStatus;
+  detail?: string;
+};
+
 type DoctorReport = {
   generatedAt: string;
   checks: DoctorCheck[];
   summary: Record<DoctorStatus, number>;
+  capabilityObservations?: DoctorCapabilityObservation[];
 };
 
 type ToolStatus = "enabled" | "approval" | "blocked" | "network" | "privacy";

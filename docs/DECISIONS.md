@@ -545,3 +545,9 @@ Reason: text-only OpenAI-compatible endpoints often reject `image_url` content p
 Decision: when an auto-mode provider rejects OpenAI tool schemas or image content parts during a desktop chat request, Arivu persists the matching provider capability as `disabled`. Explicit `enabled` values are never overwritten automatically.
 
 Reason: the first failed request is useful evidence. Persisting it prevents repeated failing round trips and makes future prompts behave predictably, while respecting explicit user overrides for providers they know are capable.
+
+## 2026-07-05: Settings doctor writes back unsupported tool calling
+
+Decision: Settings doctor emits a structured provider capability observation when the forced tool-calling probe proves the endpoint does not support tools. Desktop persists that observation with the same auto-mode rule used for live chat failures.
+
+Reason: doctor is the user's explicit health-check action. When it has strong evidence that a provider cannot accept tool schemas, saving the setting prevents the next chat from repeating the same failing request while still preserving explicit `enabled` overrides.

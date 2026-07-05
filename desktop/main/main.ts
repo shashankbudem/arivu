@@ -1198,7 +1198,12 @@ class DesktopController {
 
   async doctor(patch: ConfigPatch = {}): Promise<DoctorReport> {
     const config = applyConfigPatch(await this.effectiveConfig(), patch);
-    return runDoctor(config);
+    const report = await runDoctor(config);
+    await this.recordDoctorCapabilityObservations(report, {
+      providerId: patch.activeProviderId,
+      baseUrl: config.baseUrl
+    });
+    return report;
   }
 
   async listTools(): Promise<{ tools: ToolSummary[] }> {
@@ -1940,6 +1945,26 @@ class DesktopController {
       capability: observation.capability,
       value: observation.value
     });
+    if (next !== saved) {
+      await saveConfig(next);
+    }
+  }
+
+  private async recordDoctorCapabilityObservations(report: DoctorReport, target: { providerId?: string; baseUrl: string }) {
+    if (!report.capabilityObservations?.length) {
+      return;
+    }
+
+    let saved = await loadConfig({ includeEnv: false });
+    let next = saved;
+    for (const observation of report.capabilityObservations) {
+      next = applyProviderCapabilityObservation(next, {
+        providerId: target.providerId,
+        baseUrl: target.baseUrl,
+        capability: observation.capability,
+        value: observation.value
+      });
+    }
     if (next !== saved) {
       await saveConfig(next);
     }

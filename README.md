@@ -62,7 +62,7 @@ arivu doctor
 arivu doctor --json
 ```
 
-`arivu doctor` validates the configured API key, model listing, selected model, basic chat completions, streaming, tool calling, and Tavily connectivity. When no API key is configured, network checks are skipped instead of probing a live endpoint.
+`arivu doctor` validates the configured API key, model listing, selected model, basic chat completions, streaming, tool calling, and Tavily connectivity. When no API key is configured, network checks are skipped instead of probing a live endpoint. Desktop Settings doctor also saves Tool calling as `Disabled` for an auto-mode saved provider when the forced tool-call probe proves unsupported.
 
 Supported trust modes:
 

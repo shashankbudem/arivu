@@ -6349,6 +6349,7 @@ function SettingsView({
     setDoctorError(null);
     try {
       const report = await window.arivu.runDoctor({
+        activeProviderId: selectedProvider?.id,
         baseUrl,
         model,
         apiKey: apiKey.trim() || undefined,
@@ -6358,10 +6359,36 @@ function SettingsView({
         trustMode
       });
       setDoctorReport(report);
+      applyDoctorCapabilityObservations(report);
+      if (report.capabilityObservations?.length) {
+        onStateUpdated(await window.arivu.getState());
+      }
     } catch (err) {
       setDoctorError(formatError(err));
     } finally {
       setDoctorRunning(false);
+    }
+  }
+
+  function applyDoctorCapabilityObservations(report: DoctorReport) {
+    if (!selectedProvider || !report.capabilityObservations?.length) {
+      return;
+    }
+
+    const patch: Partial<ProviderFormState> = {};
+    for (const observation of report.capabilityObservations) {
+      if (observation.value !== "disabled") {
+        continue;
+      }
+      if (observation.capability === "toolCalling" && selectedProvider.toolCalling === "auto") {
+        patch.toolCalling = "disabled";
+      }
+      if (observation.capability === "imageInput" && selectedProvider.imageInput === "auto") {
+        patch.imageInput = "disabled";
+      }
+    }
+    if (Object.keys(patch).length > 0) {
+      updateSelectedProvider(patch);
     }
   }
 
@@ -7453,6 +7480,15 @@ function DoctorReportView({ report }: { report: DoctorReport }) {
         </span>
       </div>
       <div className="doctor-checks">
+        {report.capabilityObservations?.map((observation) => (
+          <article key={`${observation.checkId}:${observation.capability}`} className="doctor-check warn">
+            <span className="doctor-status">saved</span>
+            <div>
+              <strong>{doctorCapabilityLabel(observation.capability)}</strong>
+              <p>Saved as Disabled for this provider based on the doctor check.</p>
+            </div>
+          </article>
+        ))}
         {report.checks.map((entry) => (
           <article key={entry.id} className={`doctor-check ${entry.status}`}>
             <span className="doctor-status">{entry.status}</span>
@@ -7466,6 +7502,10 @@ function DoctorReportView({ report }: { report: DoctorReport }) {
       </div>
     </section>
   );
+}
+
+function doctorCapabilityLabel(capability: DoctorCapabilityObservation["capability"]) {
+  return capability === "toolCalling" ? "Tool calling" : "Image input";
 }
 
 function ApprovalDialog({ approval, onRespond }: { approval: ApprovalRequest; onRespond: (approved: boolean) => void }) {

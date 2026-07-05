@@ -57,6 +57,15 @@ describe("doctor diagnostics", () => {
     expect(report.checks.find((check) => check.id === "chat")?.status).toBe("pass");
     expect(report.checks.find((check) => check.id === "streaming")?.status).toBe("pass");
     expect(report.checks.find((check) => check.id === "tool-calling")?.status).toBe("warn");
+    expect(report.capabilityObservations).toMatchObject([
+      {
+        capability: "toolCalling",
+        value: "disabled",
+        source: "doctor",
+        checkId: "tool-calling",
+        status: "warn"
+      }
+    ]);
   });
 
   it("skips tool-calling probe when provider tool calling is disabled", async () => {
