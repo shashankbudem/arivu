@@ -39,7 +39,7 @@ type ActivityLine = {
 type FocusTarget = "input" | "conversation" | "activity";
 export type TuiSlashCommand =
   | { kind: "clear" | "diff" | "exit" | "help" | "status" }
-  | { kind: "sessions"; limit: number; filters?: SessionListFilters }
+  | { kind: "sessions"; limit: number; filters?: SessionListFilters; pick?: boolean }
   | { kind: "resume"; sessionId: string }
   | { kind: "error"; message: string }
   | { kind: "unknown" };
@@ -81,6 +81,7 @@ export class TuiApp {
   private lastMessageCount = 0;
   private streamingAssistantIndex: number | undefined;
   private liveActivity = false;
+  private modalOpen = false;
   private readonly streamingToolRows = new Map<string, number>();
 
   constructor(private readonly options: TuiAppOptions) {}
@@ -222,7 +223,7 @@ export class TuiApp {
 
     this.screen.key(["C-c"], () => this.exit());
     this.screen.key(["escape"], () => {
-      if (!this.busy) {
+      if (!this.busy && !this.modalOpen) {
         this.exit();
       }
     });
@@ -392,7 +393,11 @@ export class TuiApp {
     }
 
     if (command.kind === "sessions") {
-      await this.showSessions(command.limit, command.filters);
+      if (command.pick) {
+        await this.pickSession(command.limit, command.filters);
+      } else {
+        await this.showSessions(command.limit, command.filters);
+      }
       return true;
     }
 
@@ -511,7 +516,7 @@ export class TuiApp {
         "/clear         Clear the visible conversation",
         "/status        Show workspace and model status",
         "/diff          Show staged, unstaged, and untracked git changes",
-        "/sessions [n] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]",
+        "/sessions [n] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]",
         "/resume <id>   Resume a saved session in this TUI",
         "/exit          Quit",
         "",
@@ -578,6 +583,122 @@ export class TuiApp {
       });
       this.setStatus("Session list failed");
     }
+  }
+
+  private async pickSession(limit: number, filters?: SessionListFilters) {
+    try {
+      const sessions = filterSessions(await this.store.list(), filters).slice(0, clampSessionLimit(limit));
+      if (sessions.length === 0) {
+        const filterDescription = describeSessionListFilters(filters);
+        this.log.push({
+          kind: "system",
+          text: filterDescription ? `No saved sessions match filters: ${filterDescription}.` : "No saved sessions.",
+          time: new Date()
+        });
+        this.setStatus("Sessions");
+        return;
+      }
+      await this.openSessionPicker(sessions, filters);
+    } catch (error) {
+      this.log.push({
+        kind: "error",
+        text: `Unable to open session picker: ${error instanceof Error ? error.message : String(error)}`,
+        time: new Date()
+      });
+      this.setStatus("Session picker failed");
+    }
+  }
+
+  private openSessionPicker(sessions: AgentSession[], filters?: SessionListFilters): Promise<void> {
+    return new Promise((resolve) => {
+      const filterDescription = describeSessionListFilters(filters);
+      const screenHeight = Math.max(Number(this.screen.height) || 24, 10);
+      const height = Math.min(Math.max(sessions.length + (filterDescription ? 8 : 6), 10), Math.max(screenHeight - 2, 10));
+      const modal = blessed.box({
+        top: "center",
+        left: "center",
+        width: "86%",
+        height,
+        label: " saved sessions ",
+        tags: true,
+        border: "line",
+        padding: { left: 1, right: 1, top: 1 },
+        style: {
+          bg: "black",
+          fg: "white",
+          border: { fg: "cyan" }
+        }
+      });
+      blessed.box({
+        parent: modal,
+        top: 0,
+        left: 0,
+        right: 0,
+        height: filterDescription ? 3 : 2,
+        tags: true,
+        content: [
+          "{bold}Select a session to resume{/bold}",
+          filterDescription ? `{gray-fg}Filters: ${filterDescription}{/gray-fg}` : undefined
+        ]
+          .filter((line): line is string => Boolean(line))
+          .join("\n")
+      });
+      const list = blessed.list({
+        parent: modal,
+        top: filterDescription ? 3 : 2,
+        left: 0,
+        right: 0,
+        bottom: 2,
+        keys: true,
+        mouse: true,
+        vi: true,
+        tags: true,
+        items: formatTuiSessionPickerItems(sessions),
+        scrollbar: {
+          ch: " ",
+          track: { bg: "black" },
+          style: { bg: "cyan" }
+        },
+        style: {
+          selected: { bg: "blue", fg: "white" },
+          item: { fg: "white" }
+        }
+      });
+      blessed.box({
+        parent: modal,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        height: 1,
+        tags: true,
+        content: "{gray-fg}Enter resume  Up/Down move  Esc cancel{/gray-fg}"
+      });
+      const close = () => {
+        this.modalOpen = false;
+        modal.destroy();
+        this.focusInput();
+        this.render();
+      };
+      list.on("select", (_item, index) => {
+        const session = sessions[index];
+        if (!session) {
+          return;
+        }
+        close();
+        void this.resumeSession(session.id).finally(resolve);
+      });
+      const cancel = () => {
+        close();
+        this.setStatus("Session picker dismissed");
+        resolve();
+      };
+      modal.key(["escape", "q"], cancel);
+      list.key(["escape", "q"], cancel);
+      this.screen.append(modal);
+      this.modalOpen = true;
+      list.focus();
+      this.screen.render();
+    });
   }
 
   private async resumeSession(sessionId: string) {
@@ -950,6 +1071,19 @@ export function formatTuiSessionList(sessions: AgentSession[], limit = DEFAULT_T
   ].join("\n");
 }
 
+export function formatTuiSessionPickerItems(sessions: AgentSession[]) {
+  return sessions.map((session, index) =>
+    [
+      `${index + 1}.`,
+      session.id,
+      formatSessionUpdatedAt(session.updatedAt),
+      sessionWorkspaceName(session),
+      session.pinnedAt ? "{yellow-fg}pinned{/yellow-fg}" : "{gray-fg}unpinned{/gray-fg}",
+      sessionDisplayTitle(session)
+    ].join("  ")
+  );
+}
+
 function parseSessionsCommand(args: string[]): TuiSlashCommand {
   if (args.length === 0) {
     return { kind: "sessions", limit: DEFAULT_TUI_SESSION_LIST_LIMIT };
@@ -960,14 +1094,24 @@ function parseSessionsCommand(args: string[]): TuiSlashCommand {
   if (!args[0]?.startsWith("--")) {
     limit = Number.parseInt(args[0] ?? "", 10);
     if (!Number.isFinite(limit) || limit < 1) {
-      return { kind: "error", message: "Usage: /sessions [positive-limit] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]" };
+      return {
+        kind: "error",
+        message:
+          "Usage: /sessions [positive-limit] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]"
+      };
     }
     index = 1;
   }
 
   const filters: SessionListFilters = {};
+  let pick = false;
   while (index < args.length) {
     const flag = args[index];
+    if (flag === "--pick" || flag === "--interactive") {
+      pick = true;
+      index += 1;
+      continue;
+    }
     if (flag === "--search") {
       const result = readFlagValue(args, index + 1);
       if (!result.value) {
@@ -1022,7 +1166,7 @@ function parseSessionsCommand(args: string[]): TuiSlashCommand {
   }
 
   const hasFilters = Boolean(filters.search || filters.workspace || filters.pinned || filters.project);
-  return { kind: "sessions", limit: clampSessionLimit(limit), ...(hasFilters ? { filters } : {}) };
+  return { kind: "sessions", limit: clampSessionLimit(limit), ...(hasFilters ? { filters } : {}), ...(pick ? { pick } : {}) };
 }
 
 function readFlagValue(args: string[], startIndex: number) {
@@ -1040,7 +1184,7 @@ function sessionUsageError(message?: string): TuiSlashCommand {
     kind: "error",
     message:
       message ??
-      "Usage: /sessions [positive-limit] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]"
+      "Usage: /sessions [positive-limit] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]"
   };
 }
 

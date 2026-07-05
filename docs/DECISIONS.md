@@ -515,3 +515,9 @@ Reason: diagnostic evidence is only useful if the user can jump from the audit t
 Decision: `arivu sessions` and TUI `/sessions` use the same session-list filter helper for search text, workspace path/name, pinned/unpinned state, and project/standalone chat mode. The CLI exposes those as flags, and the TUI accepts the same flags after the optional limit.
 
 Reason: session discovery should stay consistent across non-desktop surfaces. Sharing the filter logic avoids separate matching behavior between scripting-friendly CLI output and in-terminal TUI exploration.
+
+## 2026-07-05: TUI sessions can open an interactive picker
+
+Decision: TUI `/sessions --pick` opens a bounded selectable list using the same optional limit and filters as the text list. Selecting a row resumes that saved session in the live TUI; Escape or `q` dismisses the picker without changing sessions.
+
+Reason: filtered text output is useful for copyable audit-style lists, but terminal users also need a low-friction way to resume without copying ids. Keeping `--pick` opt-in preserves script-like text output while adding an interactive path for daily TUI use.

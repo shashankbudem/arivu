@@ -4,7 +4,13 @@ import path from "node:path";
 import { execa } from "execa";
 import { describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/agent/types.js";
-import { formatTuiGitDiffSummary, formatTuiSessionList, loadTuiGitDiffSummary, parseTuiSlashCommand } from "../src/tui/TuiApp.js";
+import {
+  formatTuiGitDiffSummary,
+  formatTuiSessionList,
+  formatTuiSessionPickerItems,
+  loadTuiGitDiffSummary,
+  parseTuiSlashCommand
+} from "../src/tui/TuiApp.js";
 
 describe("TUI slash commands", () => {
   it("parses session listing and resume commands", () => {
@@ -20,6 +26,15 @@ describe("TUI slash commands", () => {
         project: "project"
       }
     });
+    expect(parseTuiSlashCommand("/sessions --pick --search fallback --standalone")).toEqual({
+      kind: "sessions",
+      limit: 10,
+      pick: true,
+      filters: {
+        search: "fallback",
+        project: "standalone"
+      }
+    });
     expect(parseTuiSlashCommand("/resume abc123")).toEqual({ kind: "resume", sessionId: "abc123" });
     expect(parseTuiSlashCommand("/diff")).toEqual({ kind: "diff" });
   });
@@ -32,7 +47,8 @@ describe("TUI slash commands", () => {
   it("reports invalid command usage", () => {
     expect(parseTuiSlashCommand("/sessions zero")).toEqual({
       kind: "error",
-      message: "Usage: /sessions [positive-limit] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]"
+      message:
+        "Usage: /sessions [positive-limit] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]"
     });
     expect(parseTuiSlashCommand("/sessions --pinned --unpinned")).toEqual({
       kind: "error",
@@ -99,6 +115,33 @@ describe("TUI slash commands", () => {
     expect(output).toContain("Filters: search=provider, pinned, project");
     expect(output).toContain("pinned  2026-01-02T00:00:00Z  arivu  Provider fallback fix");
     expect(output).not.toContain("standalone");
+  });
+
+  it("formats session picker rows with status context", () => {
+    const items = formatTuiSessionPickerItems([
+      {
+        id: "pinned",
+        title: "Pinned work",
+        pinnedAt: "2026-01-02T00:00:00.000Z",
+        cwd: "/tmp/arivu",
+        projectRoot: "/tmp/arivu",
+        trustMode: "ask",
+        messages: [{ role: "user", content: "fallback work" }],
+        createdAt: "2026-01-02T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z"
+      },
+      {
+        id: "loose",
+        cwd: "/tmp/notes",
+        trustMode: "ask",
+        messages: [{ role: "user", content: "loose work" }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      }
+    ]);
+
+    expect(items[0]).toBe("1.  pinned  2026-01-02T00:00:00Z  arivu  {yellow-fg}pinned{/yellow-fg}  Pinned work");
+    expect(items[1]).toBe("2.  loose  2026-01-01T00:00:00Z  notes  {gray-fg}unpinned{/gray-fg}  loose work");
   });
 
   it("formats a filtered empty session list", () => {
