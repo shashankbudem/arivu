@@ -41,6 +41,9 @@ type ToolDefinition = {
 
 const MAX_TOOL_READ_BYTES = 20_000;
 const MAX_TOOL_SEARCH_OUTPUT = 60_000;
+const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+const MIN_COMMAND_TIMEOUT_MS = 1_000;
+const MAX_COMMAND_TIMEOUT_MS = 600_000;
 
 export function createToolRegistry(context: ToolContext) {
   const state = new FileStateTracker();
@@ -582,6 +585,10 @@ export function createToolRegistry(context: ToolContext) {
           type: "string",
           enum: ["host", "container", "sandbox"],
           description: "Execution-plane profile. Use host today; container and sandbox are not configured yet."
+        },
+        timeoutMs: {
+          type: "number",
+          description: "Optional command timeout in milliseconds, from 1000 to 600000. Defaults to 120000."
         }
       })
     },
@@ -590,7 +597,8 @@ export function createToolRegistry(context: ToolContext) {
         .object({
           command: z.string().trim().min(1).optional(),
           argv: z.array(z.string().trim().min(1)).min(1).optional(),
-          executionProfile: z.enum(["host", "container", "sandbox"]).optional()
+          executionProfile: z.enum(["host", "container", "sandbox"]).optional(),
+          timeoutMs: z.number().int().min(MIN_COMMAND_TIMEOUT_MS).max(MAX_COMMAND_TIMEOUT_MS).default(DEFAULT_COMMAND_TIMEOUT_MS)
         })
         .parse(args);
       if (!parsed.command && !parsed.argv) {
@@ -618,22 +626,25 @@ export function createToolRegistry(context: ToolContext) {
             cwd: context.workspaceRoot,
             shell: false,
             reject: false,
-            timeout: 120_000
+            timeout: parsed.timeoutMs
           })
         : await execa(commandText, {
             cwd: context.workspaceRoot,
             shell: true,
             reject: false,
-            timeout: 120_000
+            timeout: parsed.timeoutMs
           });
       return [
         `executionProfile: ${executionProfile.profile}`,
         `executionIsolation: ${executionProfile.isolation}`,
         `workingDirectory: ${context.workspaceRoot}`,
         `commandMode: ${commandMode}`,
+        `timeoutMs: ${parsed.timeoutMs}`,
+        result.timedOut ? "timedOut: true" : "",
+        result.signal ? `signal: ${result.signal}` : "",
         `commandRisk: ${commandAnalysis.risk}`,
         `commandAnalysis: ${commandAnalysis.summary}`,
-        `exitCode: ${result.exitCode}`,
+        result.exitCode === undefined ? "" : `exitCode: ${result.exitCode}`,
         result.stdout ? `stdout:\n${result.stdout}` : "",
         result.stderr ? `stderr:\n${result.stderr}` : ""
       ]

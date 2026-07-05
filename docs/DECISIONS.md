@@ -242,9 +242,15 @@ Reason: full-file create/replace writes are just as important to audit as unifie
 
 ## 2026-06-25: Evidence-derived task-run verification summaries
 
-Decision: finishing a task run derives and persists a verification summary from command artifacts. The summary records command count, failed exits, parsed report count, and failed/passed/unknown report counts, and Activity renders it beside the run metadata.
+Decision: finishing a task run derives and persists a verification summary from command artifacts. The summary records command count, failed exits, timed-out commands, parsed report count, and failed/passed/unknown report counts, and Activity renders it beside the run metadata.
 
 Reason: users need a compact answer to what Arivu actually verified, but that answer must be grounded in tool evidence rather than assistant prose. Persisting verification summaries makes restored or compacted chats easier to audit and prepares report-aware repair loops to connect to task-worktree lifecycle decisions.
+
+## 2026-07-06: Command timeouts are verification evidence
+
+Decision: the `run` tool accepts a bounded `timeoutMs`, records the configured timeout, timeout state, and termination signal on command artifacts, and counts timed-out commands as failed verification evidence.
+
+Reason: a timed-out command is neither a clean pass nor a normal failed exit. Preserving it separately keeps Activity and copied audits honest about long-running or stuck verification while still using the same task-run artifact pipeline.
 
 ## 2026-06-25: Failed verification gates task-worktree promotion
 

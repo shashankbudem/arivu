@@ -10,7 +10,7 @@ Desktop Settings can save stricter capability overrides for the current workspac
 
 Desktop task runs persist approval audit records for automatic allows, policy blocks, requested approvals, approvals, and denials. Each approval audit can include a compact action scope, such as the path being read or written, command, network host, browser target, or MCP server/tool. The Activity rail renders those records beside tool calls so restored sessions keep the control-plane decision history and the relevant target. Path, network, MCP server, and browser target-class scopes are enforceable through workspace scope rules today.
 
-Commands currently run only through the explicit `host` execution profile, which means a local host process in the active workspace or task worktree. The `run` tool prefers structured `argv` execution when shell syntax is not needed and still accepts shell strings for compound commands. It accepts future `container` and `sandbox` profile names, but those profiles fail closed before approval or execution until a real isolated backend is configured.
+Commands currently run only through the explicit `host` execution profile, which means a local host process in the active workspace or task worktree. The `run` tool prefers structured `argv` execution when shell syntax is not needed, still accepts shell strings for compound commands, and enforces a bounded timeout that is recorded with any timeout/signal evidence. It accepts future `container` and `sandbox` profile names, but those profiles fail closed before approval or execution until a real isolated backend is configured.
 
 ### `readonly`
 

@@ -799,6 +799,58 @@ boom`
     });
   });
 
+  it("records timed-out command artifacts as failed verification evidence", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 0,
+      prompt: "run a bounded command",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_call",
+        call: {
+          id: "call_timeout",
+          name: "run",
+          arguments: { argv: ["node", "-e", "setTimeout(() => {}, 2000)"], timeoutMs: 1000 }
+        }
+      },
+      "2026-01-01T00:00:00.000Z"
+    );
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_result",
+        toolCallId: "call_timeout",
+        name: "run",
+        result:
+          "executionProfile: host\nexecutionIsolation: local host process\nworkingDirectory: /workspace\ncommandMode: argv\ntimeoutMs: 1000\ntimedOut: true\nsignal: SIGTERM\ncommandRisk: low\ncommandAnalysis: low risk - commands: node\nstdout:\nstart"
+      },
+      "2026-01-01T00:00:01.000Z"
+    );
+
+    expect(run.artifacts[0]).toMatchObject({
+      command: "node -e \"setTimeout(() => {}, 2000)\"",
+      commandMode: "argv",
+      timeoutMs: 1000,
+      timedOut: true,
+      signal: "SIGTERM",
+      summary: "Timed out - 1.0s"
+    });
+
+    finishTaskRun(run, "completed", undefined, "2026-01-01T00:00:02.000Z");
+
+    expect(run.verification).toMatchObject({
+      status: "failed",
+      summary: "Verification failed: 1 command, no failed exits, 1 timed out.",
+      commandCount: 1,
+      failedCommandCount: 0,
+      timedOutCommandCount: 1,
+      parsedReportCount: 0
+    });
+  });
+
   it("parses SARIF report summaries from command artifacts", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "arivu-task-run-sarif-"));
     await mkdir(path.join(workspace, "reports"));

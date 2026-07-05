@@ -5320,6 +5320,7 @@ function attemptVerificationLabel(run: AgentTaskRun) {
     `${verificationStatusLabel(verification.status)}`,
     `${formatNumber(verification.commandCount)} cmd`,
     verification.failedCommandCount ? `${formatNumber(verification.failedCommandCount)} failed` : undefined,
+    verification.timedOutCommandCount ? `${formatNumber(verification.timedOutCommandCount)} timed out` : undefined,
     verification.parsedReportCount ? `${formatNumber(verification.parsedReportCount)} reports` : undefined,
     verification.failedReportCount ? `${formatNumber(verification.failedReportCount)} failed reports` : undefined
   ].filter((part): part is string => Boolean(part));
@@ -5753,6 +5754,9 @@ function TaskRunVerification({ verification }: { verification: AgentTaskRunVerif
   const counters = [
     `${verification.commandCount} command${verification.commandCount === 1 ? "" : "s"}`,
     verification.failedCommandCount > 0 ? `${verification.failedCommandCount} failed exit${verification.failedCommandCount === 1 ? "" : "s"}` : null,
+    verification.timedOutCommandCount && verification.timedOutCommandCount > 0
+      ? `${verification.timedOutCommandCount} timed out`
+      : null,
     verification.parsedReportCount > 0
       ? `${verification.parsedReportCount} report${verification.parsedReportCount === 1 ? "" : "s"}`
       : null,
@@ -9196,9 +9200,12 @@ function commandArtifactSummary(artifact?: AgentTaskRunArtifact) {
     return undefined;
   }
   const parts = [
+    artifact.timedOut ? "Timed out" : undefined,
     artifact.exitCode === undefined ? undefined : `Exit code ${artifact.exitCode}`,
     artifact.commandMode ? `Mode ${artifact.commandMode}` : undefined,
     artifact.commandRisk ? `Risk ${artifact.commandRisk}` : undefined,
+    artifact.timeoutMs === undefined ? undefined : `Timeout ${formatDurationMs(artifact.timeoutMs)}`,
+    artifact.signal === undefined ? undefined : `Signal ${artifact.signal}`,
     artifact.durationMs === undefined ? undefined : formatDurationMs(artifact.durationMs),
     testReportSummary(artifact.testReports) ??
       (artifact.reportPaths?.length ? `${artifact.reportPaths.length} report path${artifact.reportPaths.length === 1 ? "" : "s"}` : undefined),
@@ -9216,6 +9223,9 @@ function commandArtifactDetail(artifact: AgentTaskRunArtifact) {
     artifact.executionProfile === undefined ? undefined : `executionProfile: ${artifact.executionProfile}`,
     artifact.executionIsolation === undefined ? undefined : `executionIsolation: ${artifact.executionIsolation}`,
     artifact.workingDirectory === undefined ? undefined : `workingDirectory: ${artifact.workingDirectory}`,
+    artifact.timeoutMs === undefined ? undefined : `timeoutMs: ${artifact.timeoutMs}`,
+    artifact.timedOut === undefined ? undefined : `timedOut: ${artifact.timedOut}`,
+    artifact.signal === undefined ? undefined : `signal: ${artifact.signal}`,
     artifact.exitCode === undefined ? undefined : `exitCode: ${artifact.exitCode}`,
     artifact.durationMs === undefined ? undefined : `duration: ${formatDurationMs(artifact.durationMs)}`
   ].filter((part): part is string => Boolean(part));

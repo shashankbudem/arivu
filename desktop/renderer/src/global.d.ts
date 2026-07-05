@@ -281,6 +281,9 @@ type AgentTaskRunArtifact = {
   executionProfile?: "host" | "container" | "sandbox";
   executionIsolation?: string;
   workingDirectory?: string;
+  timeoutMs?: number;
+  timedOut?: boolean;
+  signal?: string;
   exitCode?: number;
   durationMs?: number;
   stdout?: string;
@@ -470,6 +473,7 @@ type AgentTaskRunVerification = {
   summary: string;
   commandCount: number;
   failedCommandCount: number;
+  timedOutCommandCount?: number;
   parsedReportCount: number;
   failedReportCount: number;
   passedReportCount: number;

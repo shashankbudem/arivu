@@ -403,6 +403,25 @@ describe("createToolRegistry", () => {
     expect(result).not.toContain("shell-ran\n");
   });
 
+  it("records timeout metadata for commands that exceed their limit", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("ask", async () => true)
+    });
+
+    const result = await registry.execute("run", {
+      argv: [process.execPath, "-e", "process.stdout.write('start'); setTimeout(() => {}, 2000)"],
+      timeoutMs: 1000
+    });
+
+    expect(result).toContain("commandMode: argv");
+    expect(result).toContain("timeoutMs: 1000");
+    expect(result).toContain("timedOut: true");
+    expect(result).toContain("signal: SIGTERM");
+    expect(result).toContain("stdout:\nstart");
+    expect(result).not.toContain("exitCode:");
+  });
+
   it("rejects unconfigured command execution profiles before approval", async () => {
     let prompted = false;
     const registry = createToolRegistry({

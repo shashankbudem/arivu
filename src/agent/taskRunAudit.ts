@@ -82,11 +82,12 @@ export function buildTaskRunAuditMarkdown(run: AgentTaskRun) {
   }
 
   if (run.verification) {
+    const timedOutCommands = run.verification.timedOutCommandCount ?? 0;
     lines.push("", "## Verification");
     lines.push(`- Status: ${verificationStatusLabel(run.verification.status)}`);
     lines.push(`- Summary: ${inlineText(run.verification.summary)}`);
     lines.push(
-      `- Commands: ${run.verification.commandCount} total, ${run.verification.failedCommandCount} failed exit`
+      `- Commands: ${run.verification.commandCount} total, ${run.verification.failedCommandCount} failed exit, ${timedOutCommands} timed out`
     );
     lines.push(
       `- Reports: ${run.verification.parsedReportCount} parsed, ${run.verification.failedReportCount} failed, ${run.verification.passedReportCount} passed, ${run.verification.unknownReportCount} unknown`
@@ -273,6 +274,15 @@ function artifactLine(artifact: AgentTaskRunArtifact) {
   }
   if (artifact.exitCode !== undefined) {
     parts.push(`exit ${artifact.exitCode}`);
+  }
+  if (artifact.timedOut) {
+    parts.push("timed out");
+  }
+  if (artifact.timeoutMs !== undefined) {
+    parts.push(`timeout ${formatDurationMs(artifact.timeoutMs)}`);
+  }
+  if (artifact.signal) {
+    parts.push(`signal ${artifact.signal}`);
   }
   if (artifact.commandMode) {
     parts.push(`mode ${artifact.commandMode}`);

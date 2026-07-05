@@ -73,6 +73,9 @@ type CommandArtifactInput = {
   stdout?: string;
   stderr?: string;
   exitCode?: number;
+  timeoutMs?: number;
+  timedOut?: boolean;
+  signal?: string;
   durationMs?: number;
   workingDirectory?: string;
   executionProfile?: CommandExecutionProfile;
@@ -277,6 +280,9 @@ export function upsertTaskRunCommandArtifact(run: AgentTaskRun, input: CommandAr
     input.executionProfile ? `executionProfile: ${input.executionProfile}` : undefined,
     input.executionIsolation ? `executionIsolation: ${input.executionIsolation}` : undefined,
     input.workingDirectory ? `workingDirectory: ${input.workingDirectory}` : undefined,
+    input.timeoutMs === undefined ? undefined : `timeoutMs: ${input.timeoutMs}`,
+    input.timedOut === undefined ? undefined : `timedOut: ${input.timedOut}`,
+    input.signal === undefined ? undefined : `signal: ${input.signal}`,
     input.stdout !== undefined ? `stdout:\n${input.stdout}` : undefined,
     input.stderr !== undefined ? `stderr:\n${input.stderr}` : undefined
   ]
@@ -877,6 +883,9 @@ function commandArtifactFromToolResult(
   const executionProfile = commandExecutionProfileFromResult(result);
   const executionIsolation = stringFromMatch(result.match(/^executionIsolation:\s*(.+)$/m)?.[1]);
   const workingDirectory = stringFromMatch(result.match(/^workingDirectory:\s*(.+)$/m)?.[1]);
+  const timeoutMs = numberFromMatch(result.match(/^timeoutMs:\s*(\d+)/m)?.[1]);
+  const timedOut = booleanFromMatch(result.match(/^timedOut:\s*(true|false)$/m)?.[1]);
+  const signal = stringFromMatch(result.match(/^signal:\s*(.+)$/m)?.[1]);
   const commandRisk = commandRiskFromResult(result);
   const commandAnalysis = stringFromMatch(result.match(/^commandAnalysis:\s*(.+)$/m)?.[1]);
   const stdout = extractCommandSection(result, "stdout");
@@ -888,6 +897,7 @@ function commandArtifactFromToolResult(
   const diagnosticStreams = [stdout, stderr].filter((stream): stream is string => Boolean(stream));
   const diagnostics = parseCommandDiagnostics(diagnosticStreams.length > 0 ? diagnosticStreams : [result], options.workspaceRoot);
   const summaryParts = [
+    timedOut ? "Timed out" : undefined,
     exitCode === undefined ? undefined : `Exit code ${exitCode}`,
     options.durationMs === undefined ? undefined : formatDuration(options.durationMs),
     testReports.length > 0
@@ -910,6 +920,9 @@ function commandArtifactFromToolResult(
     executionProfile,
     executionIsolation,
     workingDirectory,
+    timeoutMs,
+    timedOut,
+    signal,
     exitCode,
     durationMs: options.durationMs,
     stdout: boundedStdout?.text,
@@ -1066,11 +1079,12 @@ function verificationFromTaskRun(run: AgentTaskRun, now: string): AgentTaskRunVe
   const commandArtifacts = run.artifacts.filter((artifact) => artifact.kind === "command_output");
   const reports = commandArtifacts.flatMap((artifact) => artifact.testReports ?? []);
   const failedCommandCount = commandArtifacts.filter((artifact) => artifact.exitCode !== undefined && artifact.exitCode !== 0).length;
+  const timedOutCommandCount = commandArtifacts.filter((artifact) => artifact.timedOut).length;
   const failedReportCount = reports.filter((report) => report.status === "failed").length;
   const passedReportCount = reports.filter((report) => report.status === "passed").length;
   const unknownReportCount = reports.filter((report) => report.status === "unknown").length;
   const status =
-    failedCommandCount > 0 || failedReportCount > 0
+    failedCommandCount > 0 || timedOutCommandCount > 0 || failedReportCount > 0
       ? "failed"
       : commandArtifacts.length > 0 || reports.length > 0
         ? "passed"
@@ -1082,6 +1096,7 @@ function verificationFromTaskRun(run: AgentTaskRun, now: string): AgentTaskRunVe
       status,
       commandCount: commandArtifacts.length,
       failedCommandCount,
+      timedOutCommandCount,
       parsedReportCount: reports.length,
       failedReportCount,
       passedReportCount,
@@ -1089,6 +1104,7 @@ function verificationFromTaskRun(run: AgentTaskRun, now: string): AgentTaskRunVe
     }),
     commandCount: commandArtifacts.length,
     failedCommandCount,
+    timedOutCommandCount,
     parsedReportCount: reports.length,
     failedReportCount,
     passedReportCount,
@@ -1108,6 +1124,9 @@ function verificationSummary(stats: Omit<AgentTaskRunVerification, "summary" | "
       : stats.commandCount > 0
         ? "no failed exits"
         : undefined,
+    stats.timedOutCommandCount && stats.timedOutCommandCount > 0
+      ? `${stats.timedOutCommandCount} timed out`
+      : undefined,
     stats.parsedReportCount > 0
       ? `${stats.parsedReportCount} parsed report${stats.parsedReportCount === 1 ? "" : "s"}`
       : undefined,
@@ -1158,6 +1177,16 @@ function numberFromMatch(value?: string): number | undefined {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function booleanFromMatch(value?: string): boolean | undefined {
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  return undefined;
 }
 
 function extractCommandSection(result: string, label: "stdout" | "stderr"): string | undefined {
