@@ -175,35 +175,40 @@ const PROVIDER_PRESETS: LlmProviderPatch[] = [
     name: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-4.1",
-    toolCalling: "auto"
+    toolCalling: "auto",
+    imageInput: "auto"
   },
   {
     id: "nvidia",
     name: "NVIDIA NIM",
     baseUrl: "https://integrate.api.nvidia.com/v1",
     model: "moonshotai/kimi-k2.6",
-    toolCalling: "auto"
+    toolCalling: "auto",
+    imageInput: "auto"
   },
   {
     id: "openrouter",
     name: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
     model: "openai/gpt-4.1",
-    toolCalling: "auto"
+    toolCalling: "auto",
+    imageInput: "auto"
   },
   {
     id: "groq",
     name: "Groq",
     baseUrl: "https://api.groq.com/openai/v1",
     model: "llama-3.3-70b-versatile",
-    toolCalling: "auto"
+    toolCalling: "auto",
+    imageInput: "auto"
   },
   {
     id: "local",
     name: "Local / Ollama",
     baseUrl: "http://localhost:11434/v1",
     model: "llama3.1",
-    toolCalling: "auto"
+    toolCalling: "auto",
+    imageInput: "auto"
   }
 ];
 const DEFAULT_COLLAPSED_SECTIONS: Record<SidebarSectionId, boolean> = {
@@ -6274,6 +6279,7 @@ function SettingsView({
       baseUrl: "",
       model: "",
       toolCalling: "auto",
+      imageInput: "auto",
       apiKey: ""
     };
     setProviders((current) => [...current, nextProvider]);
@@ -6301,6 +6307,7 @@ function SettingsView({
         baseUrl: providerPatch.activeProvider.baseUrl,
         model: providerPatch.activeProvider.model,
         toolCalling: providerPatch.activeProvider.toolCalling,
+        imageInput: providerPatch.activeProvider.imageInput,
         trustMode,
         mcpServers,
         workspacePolicies: updateWorkspacePoliciesForRoot(
@@ -6347,6 +6354,7 @@ function SettingsView({
         apiKey: apiKey.trim() || undefined,
         tavilyApiKey: tavilyApiKey.trim() || undefined,
         toolCalling: selectedProvider?.toolCalling ?? "auto",
+        imageInput: selectedProvider?.imageInput ?? "auto",
         trustMode
       });
       setDoctorReport(report);
@@ -6532,6 +6540,18 @@ function SettingsView({
             <option value="disabled">Disabled</option>
           </select>
           <small className="field-note">Disable for plain-chat endpoints that reject OpenAI tool schemas.</small>
+        </label>
+        <label>
+          <span>Image input</span>
+          <select
+            value={selectedProvider?.imageInput ?? "auto"}
+            onChange={(event) => updateSelectedProvider({ imageInput: event.target.value as ProviderImageInputMode })}
+          >
+            <option value="auto">Auto</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          <small className="field-note">Disable for text-only endpoints; enable for models that accept OpenAI image parts.</small>
         </label>
         <label className="tavily-key-field">
           <span>Tavily API key</span>
@@ -7728,6 +7748,7 @@ function providerFormsFromConfig(config: DesktopState["config"]): ProviderFormSt
       baseUrl: provider.baseUrl,
       model: provider.model,
       toolCalling: provider.toolCalling ?? "auto",
+      imageInput: provider.imageInput ?? "auto",
       apiKey: "",
       apiKeyPresent: provider.apiKeyPresent
     }));
@@ -7741,6 +7762,7 @@ function providerFormsFromConfig(config: DesktopState["config"]): ProviderFormSt
       baseUrl: config.baseUrl,
       model: config.model,
       toolCalling: config.toolCalling,
+      imageInput: config.imageInput,
       apiKey: "",
       apiKeyPresent: config.apiKeyPresent
     }
@@ -7885,6 +7907,7 @@ function validateProviderForms(
       baseUrl: normalizeProviderUrl(baseUrl, name),
       model,
       toolCalling: provider.toolCalling ?? "auto",
+      imageInput: provider.imageInput ?? "auto",
       ...(provider.apiKey?.trim() ? { apiKey: provider.apiKey.trim() } : {})
     });
   }

@@ -115,6 +115,7 @@ type PublicConfig = {
   baseUrl: string;
   model: string;
   toolCalling: AppConfig["toolCalling"];
+  imageInput: AppConfig["imageInput"];
   activeProviderId?: string;
   providers: PublicLlmProviderProfile[];
   trustMode: AppConfig["trustMode"];
@@ -287,6 +288,7 @@ type ConfigPatch = {
   baseUrl?: string;
   model?: string;
   toolCalling?: AppConfig["toolCalling"];
+  imageInput?: AppConfig["imageInput"];
   activeProviderId?: string;
   providers?: LlmProviderPatch[];
   trustMode?: AppConfig["trustMode"];
@@ -1120,6 +1122,9 @@ class DesktopController {
     if (patch.toolCalling) {
       next.toolCalling = patch.toolCalling;
     }
+    if (patch.imageInput) {
+      next.imageInput = patch.imageInput;
+    }
     if (patch.trustMode) {
       next.trustMode = patch.trustMode;
     }
@@ -1146,6 +1151,7 @@ class DesktopController {
           next.baseUrl = activeProvider.baseUrl;
           next.model = activeProvider.model;
           next.toolCalling = activeProvider.toolCalling;
+          next.imageInput = activeProvider.imageInput;
           next.apiKey = activeProvider.apiKey;
         }
       }
@@ -2134,6 +2140,7 @@ function configForModelSelection(config: AppConfig, selection: ModelSelection): 
     model: selection.model,
     baseUrl: selection.baseUrl,
     toolCalling: selection.toolCalling ?? config.toolCalling,
+    imageInput: selection.imageInput ?? config.imageInput,
     apiKey: selection.apiKey ?? (selection.baseUrl === config.baseUrl ? config.apiKey : undefined)
   };
 }
@@ -2189,6 +2196,7 @@ function toPublicConfig(config: AppConfig): PublicConfig {
     baseUrl: config.baseUrl,
     model: config.model,
     toolCalling: config.toolCalling,
+    imageInput: config.imageInput,
     activeProviderId: config.activeProviderId,
     providers: config.providers.map(toPublicProvider),
     trustMode: config.trustMode,
@@ -2207,6 +2215,7 @@ function toPublicProvider(provider: LlmProviderProfile): PublicLlmProviderProfil
     baseUrl: provider.baseUrl,
     model: provider.model,
     toolCalling: provider.toolCalling,
+    imageInput: provider.imageInput,
     apiKeyPresent: Boolean(provider.apiKey)
   };
 }
@@ -2507,6 +2516,7 @@ function normalizeProviders(providers: LlmProviderPatch[], existingProviders: Ll
       baseUrl,
       model,
       toolCalling: provider.toolCalling ?? "auto",
+      imageInput: provider.imageInput ?? "auto",
       ...(apiKey ? { apiKey } : {})
     });
   }
@@ -2515,7 +2525,7 @@ function normalizeProviders(providers: LlmProviderPatch[], existingProviders: Ll
 }
 
 function updateProviderRuntime(providers: LlmProviderProfile[], activeProviderId: string, patch: ConfigPatch): LlmProviderProfile[] {
-  if (!patch.baseUrl?.trim() && !patch.model?.trim() && !patch.apiKey?.trim() && !patch.toolCalling) {
+  if (!patch.baseUrl?.trim() && !patch.model?.trim() && !patch.apiKey?.trim() && !patch.toolCalling && !patch.imageInput) {
     return providers;
   }
 
@@ -2529,6 +2539,7 @@ function updateProviderRuntime(providers: LlmProviderProfile[], activeProviderId
       baseUrl: patch.baseUrl?.trim() || provider.baseUrl,
       model: patch.model?.trim() || provider.model,
       toolCalling: patch.toolCalling ?? provider.toolCalling,
+      imageInput: patch.imageInput ?? provider.imageInput,
       ...(apiKey ? { apiKey } : {})
     };
   });
@@ -2667,6 +2678,7 @@ function applyConfigPatch(config: AppConfig, patch: ConfigPatch): AppConfig {
     baseUrl: patch.baseUrl?.trim() || config.baseUrl,
     model: patch.model?.trim() || config.model,
     toolCalling: patch.toolCalling ?? config.toolCalling,
+    imageInput: patch.imageInput ?? config.imageInput,
     trustMode: patch.trustMode ?? config.trustMode,
     mcpServers: patch.mcpServers ? mergeRedactedMcpServers(patch.mcpServers, config.mcpServers) : config.mcpServers,
     workspacePolicies: patch.workspacePolicies ?? config.workspacePolicies,

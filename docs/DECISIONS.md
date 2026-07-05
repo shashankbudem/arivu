@@ -533,3 +533,9 @@ Reason: terminal and scripting workflows should not have to open desktop just to
 Decision: saved OpenAI-compatible providers have a `toolCalling` mode: `auto`, `enabled`, or `disabled`. Auto preserves the existing send-tools-then-downgrade behavior, enabled surfaces tool-schema failures, and disabled sends Markdown/no-tools requests immediately. Doctor skips the tool-calling probe when the provider is explicitly configured for plain chat.
 
 Reason: some OpenAI-compatible endpoints work for chat but fail on tool schemas. Persisting the known provider behavior avoids repeating a failing schema round trip on every request while keeping strict users able to force tool support and see real errors.
+
+## 2026-07-05: Providers can disable image input
+
+Decision: saved OpenAI-compatible providers have an `imageInput` mode: `auto`, `enabled`, or `disabled`. Auto preserves the existing OpenAI-compatible image-part behavior, enabled marks a provider as known image-capable for routing, and disabled fails multimodal prompts before a provider request is sent.
+
+Reason: text-only OpenAI-compatible endpoints often reject `image_url` content parts. A provider-level flag gives the user an explicit escape hatch, avoids leaking image data to endpoints known not to support it, and lets Auto routing prefer image-capable providers when multiple providers are configured.

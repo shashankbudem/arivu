@@ -30,7 +30,7 @@ Implemented:
 - Desktop workspace open and create flows.
 - Desktop expandable project chat groups, standalone Chats section, and draft-chat project selector in the prompt `+` menu.
 - Desktop searchable model switching dialog, backed by the active OpenAI-compatible provider's `GET /models`.
-- Desktop multiple-provider settings for OpenAI-compatible LLM providers. Each saved provider has a unique name, base URL, model id, tool-calling capability mode, and optional API key.
+- Desktop multiple-provider settings for OpenAI-compatible LLM providers. Each saved provider has a unique name, base URL, model id, tool-calling capability mode, image-input capability mode, and optional API key.
 - Desktop image attachments and pasted/dropped-image upload in the composer for PNG, JPEG, WebP, and GIF prompts.
 - Desktop workspace file-context attachments from the prompt `+` menu and `/files`, with bounded UTF-8 text sent as quoted prompt context.
 - Desktop compact header/sidebar chrome, icon-only header actions with tooltips, and light/dark mode.
@@ -120,6 +120,7 @@ Desktop provider behavior:
 
 - The active provider supplies the runtime base URL, model, and API key.
 - The active provider also supplies the runtime tool-calling mode: `auto` sends tools and downgrades on provider schema errors, `enabled` sends tools and surfaces errors, and `disabled` starts in Markdown/no-tools mode for plain-chat endpoints.
+- The active provider also supplies the runtime image-input mode: `auto` keeps OpenAI-compatible image parts enabled, `enabled` marks the provider as a known image-capable endpoint for Auto routing, and `disabled` fails image prompts before sending image data.
 - The model picker loads and searches models for only the selected provider.
 - Manual model picker lists are not combined across providers because duplicate model ids can exist and a manual model choice must imply a provider/base URL/key.
 - `auto` is a first-class model mode. At send time, Electron main classifies the prompt and resolves `auto` into a concrete provider/model using `src/agent/modelRouter.ts` plus cached `/models` results when available.
@@ -180,7 +181,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Task worktree open/sync/merge/discard/cleanup and PR creation are local desktop actions. Create PR requires GitHub CLI credentials and a usable origin remote. Conflict resolution is Activity-driven today: open the managed folder or individual conflicted files from the conflict card, resolve files, then Continue or Abort the recorded sync conflict.
 - Approval prompts are action-aware for shell and write actions, but still need more polish for a production-grade UX.
 - Automatic provider capability detection is not implemented. Tool support can be configured manually per provider, while automatic persistence from observed fallback outcomes remains future work.
-- Provider-specific multimodal capability detection is not implemented; image prompts require a model endpoint that accepts OpenAI-compatible image content parts.
+- Automatic provider-specific multimodal capability detection is not implemented. Image support can be configured manually per provider, and disabled providers fail image prompts before a network call.
 - Desktop history exists with deletion, and the CLI can list/filter recent sessions with `arivu sessions`.
 - Workspace creation currently creates an empty folder; there is no project template or git initialization flow yet.
 - No packaging or release workflow beyond `npm link` and local build.
@@ -196,6 +197,6 @@ High-value tasks:
 - Add signed or centrally managed workspace policy distribution for teams that need stronger provenance than a checked-in bundle file.
 - Polish stale-path recovery and cleanup for recent workspace rows.
 - Add richer remediation and automatic provider capability persistence from doctor/fallback outcomes.
-- Add provider capability flags for multimodal image support.
+- Add automatic provider capability persistence for multimodal image support from observed failures or doctor-style probes.
 - Add first-run setup flow for base URL, model, API key, and trust mode.
 - Add tests around TUI command handling by extracting pure command logic.

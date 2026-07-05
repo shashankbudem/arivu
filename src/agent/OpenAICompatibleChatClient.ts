@@ -1,9 +1,9 @@
 import type { AppConfig } from "../config.js";
-import { chatContentHasText, chatContentToText, type ChatContent, type ChatImagePart } from "./content.js";
+import { chatContentHasImage, chatContentHasText, chatContentToText, type ChatContent, type ChatImagePart } from "./content.js";
 import type { ChatClient, ChatMessage, ChatRequest, ChatResponse, ChatStreamHandler, ToolCall } from "./types.js";
 
 type OpenAICompatibleConfig = Pick<AppConfig, "apiKey" | "baseUrl" | "model" | "trustMode"> &
-  Partial<Pick<AppConfig, "toolCalling" | "tavilyApiKey" | "mcpServers">>;
+  Partial<Pick<AppConfig, "toolCalling" | "imageInput" | "tavilyApiKey" | "mcpServers">>;
 
 type OpenAIContentPart =
   | {
@@ -69,6 +69,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
     if (!this.config.apiKey) {
       throw new Error("Missing ARIVU_API_KEY, legacy SHANKINSTER_API_KEY, or saved apiKey config.");
     }
+    assertImageInputAllowed(this.config, request);
 
     const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
@@ -104,6 +105,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
     if (!this.config.apiKey) {
       throw new Error("Missing ARIVU_API_KEY, legacy SHANKINSTER_API_KEY, or saved apiKey config.");
     }
+    assertImageInputAllowed(this.config, request);
 
     const mode = initialCompletionMode(this.config);
     const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -241,6 +243,16 @@ type CompletionMode = "tool_calls" | "markdown";
 
 function initialCompletionMode(config: OpenAICompatibleConfig): CompletionMode {
   return config.toolCalling === "disabled" ? "markdown" : "tool_calls";
+}
+
+function assertImageInputAllowed(config: OpenAICompatibleConfig, request: ChatRequest) {
+  if (config.imageInput !== "disabled") {
+    return;
+  }
+  if (!request.messages.some((message) => chatContentHasImage(message.content))) {
+    return;
+  }
+  throw new Error("Image input is disabled for this provider. Enable Image input in Settings or choose an image-capable provider/model.");
 }
 
 function toOpenAIRequestBody(model: string, request: ChatRequest, stream: boolean, mode: CompletionMode) {

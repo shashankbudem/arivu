@@ -68,6 +68,7 @@ describe("config", () => {
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4.1",
       toolCalling: "auto",
+      imageInput: "auto",
       trustMode: "ask"
     });
   });
@@ -106,6 +107,7 @@ describe("config", () => {
           baseUrl: "https://api.openai.com/v1",
           model: "gpt-4.1",
           toolCalling: "auto",
+          imageInput: "auto",
           apiKey: "provider-key"
         }
       ],
@@ -185,16 +187,18 @@ describe("config", () => {
     await expect(loadConfig()).resolves.toMatchObject({ tavilyApiKey: "tvly-standard" });
   });
 
-  it("persists provider tool-calling capability flags", async () => {
+  it("persists provider capability flags", async () => {
     await writeFile(configPath(), `${JSON.stringify({
       toolCalling: "disabled",
+      imageInput: "enabled",
       providers: [
         {
           id: "plain",
           name: "Plain Chat",
           baseUrl: "https://api.example.test/v1",
           model: "plain-model",
-          toolCalling: "disabled"
+          toolCalling: "disabled",
+          imageInput: "disabled"
         },
         {
           id: "legacy-default",
@@ -208,9 +212,10 @@ describe("config", () => {
     const loaded = await loadConfig({ includeEnv: false });
 
     expect(loaded.toolCalling).toBe("disabled");
+    expect(loaded.imageInput).toBe("enabled");
     expect(loaded.providers).toMatchObject([
-      { id: "plain", toolCalling: "disabled" },
-      { id: "legacy-default", toolCalling: "auto" }
+      { id: "plain", toolCalling: "disabled", imageInput: "disabled" },
+      { id: "legacy-default", toolCalling: "auto", imageInput: "auto" }
     ]);
   });
 

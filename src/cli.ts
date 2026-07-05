@@ -273,7 +273,7 @@ function isTrustMode(value: string): value is AppConfig["trustMode"] {
 }
 
 function isConfigKey(key: string): key is ConfigKey {
-  return ["apiKey", "tavilyApiKey", "baseUrl", "model", "toolCalling", "trustMode"].includes(key);
+  return ["apiKey", "tavilyApiKey", "baseUrl", "model", "toolCalling", "imageInput", "trustMode"].includes(key);
 }
 
 function formatCliDate(value: string) {

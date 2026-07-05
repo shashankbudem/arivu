@@ -1,4 +1,4 @@
-import type { AppConfig, ProviderToolCallingMode } from "../config.js";
+import type { AppConfig, ProviderImageInputMode, ProviderToolCallingMode } from "../config.js";
 import { chatContentToText, type ChatContent } from "./content.js";
 import type { AgentSession } from "./types.js";
 
@@ -13,6 +13,7 @@ export type ModelProviderCandidate = {
   model: string;
   apiKey?: string;
   toolCalling?: ProviderToolCallingMode;
+  imageInput?: ProviderImageInputMode;
   active: boolean;
   models?: string[];
 };
@@ -23,6 +24,7 @@ export type ModelSelection = {
   baseUrl: string;
   apiKey?: string;
   toolCalling?: ProviderToolCallingMode;
+  imageInput?: ProviderImageInputMode;
   providerId?: string;
   providerName: string;
   task: AutoModelTask;
@@ -103,6 +105,7 @@ export function providerCandidatesFromConfig(config: AppConfig): ModelProviderCa
         model: config.model,
         apiKey: config.apiKey,
         toolCalling: config.toolCalling,
+        imageInput: config.imageInput,
         active: true
       }
     ];
@@ -117,6 +120,7 @@ export function providerCandidatesFromConfig(config: AppConfig): ModelProviderCa
       model: provider.model,
       apiKey: provider.apiKey || (active ? config.apiKey : undefined),
       toolCalling: provider.toolCalling,
+      imageInput: provider.imageInput,
       active
     };
   });
@@ -139,6 +143,7 @@ export function resolveModelForPrompt(
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
       toolCalling: active?.toolCalling ?? config.toolCalling,
+      imageInput: active?.imageInput ?? config.imageInput,
       providerId: active?.id,
       providerName: active?.name ?? "OpenAI-compatible",
       task: "general",
@@ -159,6 +164,7 @@ export function resolveModelForPrompt(
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
     toolCalling: provider.toolCalling,
+    imageInput: provider.imageInput,
     providerId: provider.id,
     providerName: provider.name,
     task,
@@ -211,6 +217,13 @@ function providerScore(provider: ModelProviderCandidate, task: AutoModelTask): n
   }
   if (provider.apiKey) {
     score += 2;
+  }
+  if (task === "vision") {
+    if (provider.imageInput === "disabled") {
+      score -= 80;
+    } else if (provider.imageInput === "enabled") {
+      score += 12;
+    }
   }
   if (!isAutoModel(provider.model)) {
     score += 1;

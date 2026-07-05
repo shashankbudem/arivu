@@ -282,6 +282,36 @@ describe("OpenAICompatibleChatClient", () => {
     expect(JSON.stringify(messages[0]?.content)).not.toContain("diagram.png");
   });
 
+  it("fails before sending images when provider image input is disabled", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      imageInput: "disabled"
+    });
+
+    await expect(
+      client.complete({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this." },
+              { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "low" } }
+            ]
+          }
+        ],
+        tools: []
+      })
+    ).rejects.toThrow("Image input is disabled for this provider");
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("falls back to markdown when an endpoint rejects empty assistant tool-call content", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {

@@ -2,6 +2,7 @@
 
 type TrustMode = "ask" | "readonly" | "trusted";
 type ProviderToolCallingMode = "auto" | "enabled" | "disabled";
+type ProviderImageInputMode = "auto" | "enabled" | "disabled";
 type BrowserMode = "visible" | "background";
 
 type BrowserBounds = {
@@ -26,6 +27,7 @@ type LlmProviderProfile = {
   baseUrl: string;
   model: string;
   toolCalling: ProviderToolCallingMode;
+  imageInput: ProviderImageInputMode;
   apiKeyPresent: boolean;
 };
 
@@ -533,6 +535,7 @@ type DesktopState = {
     baseUrl: string;
     model: string;
     toolCalling: ProviderToolCallingMode;
+    imageInput: ProviderImageInputMode;
     activeProviderId?: string;
     providers: LlmProviderProfile[];
     trustMode: TrustMode;
@@ -667,6 +670,7 @@ type ConfigPatch = {
   baseUrl?: string;
   model?: string;
   toolCalling?: ProviderToolCallingMode;
+  imageInput?: ProviderImageInputMode;
   activeProviderId?: string;
   providers?: LlmProviderPatch[];
   trustMode?: TrustMode;
