@@ -227,7 +227,7 @@ type AgentTaskRunTestReport = {
 };
 
 type AgentTaskRunDiagnostic = {
-  source: "typescript";
+  source: "typescript" | "eslint";
   severity: "error" | "warning" | "info" | "hint";
   message: string;
   code?: string;

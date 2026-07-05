@@ -205,7 +205,7 @@ export type AgentTaskRunReportFinding = {
 export type AgentTaskRunDiagnosticSeverity = "error" | "warning" | "info" | "hint";
 
 export type AgentTaskRunDiagnostic = {
-  source: "typescript";
+  source: "typescript" | "eslint";
   severity: AgentTaskRunDiagnosticSeverity;
   message: string;
   code?: string;

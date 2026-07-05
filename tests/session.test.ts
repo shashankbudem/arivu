@@ -213,6 +213,15 @@ describe("session store", () => {
                   column: 8,
                   code: "TS2305",
                   message: "Module './types.js' has no exported member 'AgentTaskRunDiagnostic'."
+                },
+                {
+                  source: "eslint",
+                  severity: "warning",
+                  path: "src/app.ts",
+                  line: 7,
+                  column: 3,
+                  code: "no-console",
+                  message: "Unexpected console statement"
                 }
               ],
               createdAt: "2026-01-01T00:01:55.000Z"
@@ -368,6 +377,15 @@ describe("session store", () => {
                   column: 8,
                   code: "TS2305",
                   message: "Module './types.js' has no exported member 'AgentTaskRunDiagnostic'."
+                },
+                {
+                  source: "eslint",
+                  severity: "warning",
+                  path: "src/app.ts",
+                  line: 7,
+                  column: 3,
+                  code: "no-console",
+                  message: "Unexpected console statement"
                 }
               ]
             }

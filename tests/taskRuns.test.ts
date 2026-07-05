@@ -218,6 +218,83 @@ describe("agent task runs", () => {
     });
   });
 
+  it("captures ESLint diagnostics from command output", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 5,
+      prompt: "lint",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_call",
+        call: {
+          id: "call_lint",
+          name: "run",
+          arguments: { command: "npm run lint" }
+        }
+      },
+      "2026-01-01T00:00:01.000Z"
+    );
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_result",
+        toolCallId: "call_lint",
+        name: "run",
+        result: [
+          "exitCode: 1",
+          "executionProfile: host",
+          "workingDirectory: /workspace",
+          "stdout:",
+          "/workspace/src/app.ts",
+          "  7:3  warning  Unexpected console statement  no-console",
+          "  8:7  error  'unused' is assigned a value but never used  @typescript-eslint/no-unused-vars",
+          "",
+          "src/legacy.js:4:1: Expected indentation of 2 spaces but found 0. [Error/indent]"
+        ].join("\n")
+      },
+      "2026-01-01T00:00:02.000Z",
+      { workspaceRoot: "/workspace" }
+    );
+
+    expect(run.artifacts[0]).toMatchObject({
+      id: "call_lint:command_output",
+      kind: "command_output",
+      summary: "Exit code 1 - 1.0s - 3 diagnostics",
+      diagnostics: [
+        {
+          source: "eslint",
+          severity: "warning",
+          path: "src/app.ts",
+          line: 7,
+          column: 3,
+          code: "no-console",
+          message: "Unexpected console statement"
+        },
+        {
+          source: "eslint",
+          severity: "error",
+          path: "src/app.ts",
+          line: 8,
+          column: 7,
+          code: "@typescript-eslint/no-unused-vars",
+          message: "'unused' is assigned a value but never used"
+        },
+        {
+          source: "eslint",
+          severity: "error",
+          path: "src/legacy.js",
+          line: 4,
+          column: 1,
+          code: "indent",
+          message: "Expected indentation of 2 spaces but found 0."
+        }
+      ]
+    });
+  });
+
   it("records approval decisions as durable run state", () => {
     const run = createAgentTaskRun({
       userMessageIndex: 1,

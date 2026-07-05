@@ -163,7 +163,7 @@ const AgentTaskRunTestReportSchema = z.object({
 });
 
 const AgentTaskRunDiagnosticSchema = z.object({
-  source: z.enum(["typescript"]),
+  source: z.enum(["typescript", "eslint"]),
   severity: z.enum(["error", "warning", "info", "hint"]),
   message: z.string(),
   code: z.string().optional(),

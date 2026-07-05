@@ -435,7 +435,7 @@ describe("task history helpers", () => {
     expect(review?.completionNotes[1].evidence).toContain("Matched PR check: lint: passed");
   });
 
-  it("uses TypeScript diagnostics as item-specific plan evidence", () => {
+  it("uses command diagnostics as item-specific plan evidence", () => {
     const source = taskRun({
       id: "run-plan",
       planMode: { enabled: true },
@@ -444,7 +444,10 @@ describe("task history helpers", () => {
         updatedAt: "2026-06-27T00:01:00.000Z"
       },
       plan: {
-        items: [{ text: "Repair taskRuns type diagnostic TS2322", status: "pending" }],
+        items: [
+          { text: "Repair taskRuns type diagnostic TS2322", status: "pending" },
+          { text: "Fix app console lint no-console", status: "pending" }
+        ],
         updatedAt: "2026-06-27T00:00:30.000Z"
       }
     });
@@ -484,6 +487,15 @@ describe("task history helpers", () => {
               column: 9,
               code: "TS2322",
               message: "Type 'string' is not assignable to type 'AgentTaskRunDiagnostic'."
+            },
+            {
+              source: "eslint",
+              severity: "warning",
+              path: "src/app.ts",
+              line: 7,
+              column: 3,
+              code: "no-console",
+              message: "Unexpected console statement"
             }
           ],
           createdAt: "2026-06-27T00:04:00.000Z"
@@ -502,6 +514,9 @@ describe("task history helpers", () => {
     expect(review?.completionNotes[0].evidence).toContain(
       "Matched diagnostic: src/agent/taskRuns.ts:42:9: TS2322 Type 'string' is not assignable to type 'AgentTaskRu..."
     );
+    expect(review?.completionNotes[1].matchedPaths).toEqual([]);
+    expect(review?.completionNotes[1].matchedDiagnostics).toEqual(["src/app.ts:7:3: no-console Unexpected console statement"]);
+    expect(review?.completionNotes[1].evidence).toContain("Matched diagnostic: src/app.ts:7:3: no-console Unexpected console statement");
   });
 
   it("uses assistant-authored completion notes as item-specific plan evidence", () => {

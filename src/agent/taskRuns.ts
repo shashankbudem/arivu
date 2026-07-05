@@ -1122,31 +1122,49 @@ function parseTestReports(workspaceRoot: string | undefined, reportPaths: string
 function parseCommandDiagnostics(streams: string[], workspaceRoot: string | undefined): AgentTaskRunDiagnostic[] {
   const diagnostics: AgentTaskRunDiagnostic[] = [];
   const seen = new Set<string>();
+  const addDiagnostic = (diagnostic: AgentTaskRunDiagnostic | undefined) => {
+    if (!diagnostic || diagnostics.length >= MAX_COMMAND_DIAGNOSTICS) {
+      return;
+    }
+    const key = [
+      diagnostic.source,
+      diagnostic.severity,
+      diagnostic.path ?? "",
+      diagnostic.line ?? "",
+      diagnostic.column ?? "",
+      diagnostic.code ?? "",
+      diagnostic.message
+    ].join("\0");
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    diagnostics.push(diagnostic);
+  };
 
   for (const stream of streams) {
     const lines = stripAnsi(stream).replace(/\r\n/g, "\n").split("\n");
+    let eslintStylishPath: string | undefined;
     for (const line of lines) {
       if (diagnostics.length >= MAX_COMMAND_DIAGNOSTICS) {
         return diagnostics;
       }
-      const diagnostic = parseTypeScriptDiagnosticLine(line, workspaceRoot);
-      if (!diagnostic) {
+      const typeScriptDiagnostic = parseTypeScriptDiagnosticLine(line, workspaceRoot);
+      if (typeScriptDiagnostic) {
+        addDiagnostic(typeScriptDiagnostic);
         continue;
       }
-      const key = [
-        diagnostic.source,
-        diagnostic.severity,
-        diagnostic.path ?? "",
-        diagnostic.line ?? "",
-        diagnostic.column ?? "",
-        diagnostic.code ?? "",
-        diagnostic.message
-      ].join("\0");
-      if (seen.has(key)) {
+      const eslintUnixDiagnostic = parseEslintUnixDiagnosticLine(line, workspaceRoot);
+      if (eslintUnixDiagnostic) {
+        addDiagnostic(eslintUnixDiagnostic);
         continue;
       }
-      seen.add(key);
-      diagnostics.push(diagnostic);
+      const eslintStylishDiagnostic = parseEslintStylishDiagnosticLine(line, eslintStylishPath, workspaceRoot);
+      if (eslintStylishDiagnostic) {
+        addDiagnostic(eslintStylishDiagnostic);
+        continue;
+      }
+      eslintStylishPath = eslintStylishFileHeader(line, workspaceRoot) ?? eslintStylishPath;
     }
   }
 
@@ -1196,6 +1214,91 @@ function parseTypeScriptDiagnosticLine(line: string, workspaceRoot: string | und
   }
 
   return undefined;
+}
+
+function parseEslintStylishDiagnosticLine(
+  line: string,
+  diagnosticPath: string | undefined,
+  workspaceRoot: string | undefined
+): AgentTaskRunDiagnostic | undefined {
+  if (!diagnosticPath) {
+    return undefined;
+  }
+  const match = /^\s*(\d+):(\d+)\s+(error|warning)\s+(.+?)(?:\s{2,}([@\w./-]+(?:\/[\w.-]+)?))?\s*$/i.exec(line);
+  if (!match) {
+    return undefined;
+  }
+  return eslintDiagnostic({
+    path: diagnosticPath,
+    line: match[1],
+    column: match[2],
+    severity: match[3],
+    message: match[4],
+    code: match[5],
+    workspaceRoot
+  });
+}
+
+function parseEslintUnixDiagnosticLine(line: string, workspaceRoot: string | undefined): AgentTaskRunDiagnostic | undefined {
+  const match = /^(.+?):(\d+):(\d+):\s+(.+?)\s+\[(Error|Warning)\/([^\]]+)]\s*$/i.exec(line.trim());
+  if (!match) {
+    return undefined;
+  }
+  return eslintDiagnostic({
+    path: match[1],
+    line: match[2],
+    column: match[3],
+    message: match[4],
+    severity: match[5],
+    code: match[6],
+    workspaceRoot
+  });
+}
+
+function eslintStylishFileHeader(line: string, workspaceRoot: string | undefined): string | undefined {
+  const trimmed = line.trim();
+  if (!/\.(?:[cm]?[jt]sx?|vue|svelte|astro)$/i.test(trimmed) || /\s/.test(trimmed)) {
+    return undefined;
+  }
+  return cleanDiagnosticPath(trimmed, workspaceRoot);
+}
+
+function eslintDiagnostic(options: {
+  path?: string;
+  line?: string;
+  column?: string;
+  severity?: string;
+  code?: string;
+  message?: string;
+  workspaceRoot?: string;
+}): AgentTaskRunDiagnostic | undefined {
+  const severity = diagnosticSeverity(options.severity);
+  const message = truncateDiagnosticText(options.message ?? "");
+  if (!severity || !message) {
+    return undefined;
+  }
+  const diagnostic: AgentTaskRunDiagnostic = {
+    source: "eslint",
+    severity,
+    message
+  };
+  const code = truncateOptionalDetailText(options.code);
+  const diagnosticPath = cleanDiagnosticPath(options.path, options.workspaceRoot);
+  const line = positiveIntegerStringValue(options.line);
+  const column = positiveIntegerStringValue(options.column);
+  if (code) {
+    diagnostic.code = code;
+  }
+  if (diagnosticPath) {
+    diagnostic.path = diagnosticPath;
+  }
+  if (line !== undefined) {
+    diagnostic.line = line;
+  }
+  if (column !== undefined) {
+    diagnostic.column = column;
+  }
+  return diagnostic;
 }
 
 function typeScriptDiagnostic(options: {
