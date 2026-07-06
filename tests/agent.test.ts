@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Agent } from "../src/agent/Agent.js";
 import type { AgentRunEvent, AgentSession, ChatClient, ChatRequest, ChatResponse } from "../src/agent/types.js";
+import { createAgentTaskRun } from "../src/agent/taskRuns.js";
 import { ApprovalManager } from "../src/permissions/ApprovalManager.js";
 import type { BrowserToolController } from "../src/tools/browserControl.js";
 
@@ -270,6 +271,113 @@ describe("agent", () => {
     expect(result.output).toBe("Summary complete.");
     expect(session.messages.filter((message) => message.role === "user")).toHaveLength(1);
     expect(session.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
+  });
+
+  it("keeps task-run user message indexes aligned when inserting the base system prompt", async () => {
+    const now = new Date().toISOString();
+    const session: AgentSession = {
+      id: "pre-saved-task-run-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages: [{ role: "user", content: "summarize" }],
+      taskRuns: [createAgentTaskRun({ userMessageIndex: 0, prompt: "summarize", now })],
+      createdAt: now,
+      updatedAt: now
+    };
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "Summary complete."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    await agent.run("summarize", { promptAlreadyInSession: true });
+
+    expect(session.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
+    expect(session.taskRuns?.[0]?.userMessageIndex).toBe(1);
+  });
+
+  it("restores task-run user message indexes when system-prompt insertion rolls back", async () => {
+    const now = new Date().toISOString();
+    const session: AgentSession = {
+      id: "failed-pre-saved-task-run-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages: [{ role: "user", content: "summarize" }],
+      taskRuns: [createAgentTaskRun({ userMessageIndex: 0, prompt: "summarize", now })],
+      createdAt: now,
+      updatedAt: now
+    };
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "   "
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    await expect(agent.run("summarize", { promptAlreadyInSession: true })).rejects.toThrow("empty assistant response");
+
+    expect(session.messages).toEqual([{ role: "user", content: "summarize" }]);
+    expect(session.taskRuns?.[0]?.userMessageIndex).toBe(0);
+  });
+
+  it("keeps task-run user message indexes aligned when loading skills before a saved prompt", async () => {
+    const skillDir = path.join(skillsHome, "qa-check");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      path.join(skillDir, "SKILL.md"),
+      ["# QA Check", "description: Verify the rendered workflow.", "", "Run the UI and capture evidence."].join("\n"),
+      "utf8"
+    );
+    const now = new Date().toISOString();
+    const session: AgentSession = {
+      id: "pre-saved-skill-task-run-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages: [{ role: "user", content: "check this" }],
+      taskRuns: [createAgentTaskRun({ userMessageIndex: 0, prompt: "check this", now })],
+      createdAt: now,
+      updatedAt: now
+    };
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "QA complete."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    await agent.run("check this", { promptAlreadyInSession: true, skillNames: ["qa-check"] });
+
+    expect(session.messages.map((message) => message.role)).toEqual(["system", "system", "user", "assistant"]);
+    expect(String(session.messages[1]?.content)).toContain("Skill loaded into chat: qa-check");
+    expect(session.taskRuns?.[0]?.userMessageIndex).toBe(2);
   });
 
   it("continues an existing transcript without adding a synthetic user message", async () => {

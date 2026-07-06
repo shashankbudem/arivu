@@ -50,6 +50,7 @@ export class Agent {
     mode: "prompt" | "continue"
   ): Promise<{ output: string; session: AgentSession }> {
     const rollbackMessages = cloneMessages(this.session.messages);
+    const rollbackTaskRunIndexes = taskRunIndexSnapshot(this.session);
     const promptAlreadyInSession = runOptions.promptAlreadyInSession === true;
     const existingPromptMessage = promptAlreadyInSession ? this.session.messages.at(-1) : undefined;
     if (promptAlreadyInSession && mode !== "prompt") {
@@ -83,6 +84,7 @@ export class Agent {
         role: "system",
         content: systemPrompt(workspace.root)
       });
+      shiftTaskRunMessageIndexes(this.session, 0, 1);
     } else {
       const existingSystemContent = chatContentToText(existingSystem.content);
       const additions = [
@@ -117,7 +119,9 @@ export class Agent {
         return;
       }
       const promptIndex = this.session.messages.indexOf(existingPromptMessage);
-      this.session.messages.splice(promptIndex >= 0 ? promptIndex : this.session.messages.length, 0, message);
+      const insertionIndex = promptIndex >= 0 ? promptIndex : this.session.messages.length;
+      this.session.messages.splice(insertionIndex, 0, message);
+      shiftTaskRunMessageIndexes(this.session, insertionIndex, 1);
     };
 
     const loadedSkillNames = loadedSkillNamesForSession(this.session.messages);
@@ -201,6 +205,7 @@ export class Agent {
       };
     } catch (error) {
       this.session.messages.splice(0, this.session.messages.length, ...rollbackMessages);
+      restoreTaskRunMessageIndexes(this.session, rollbackTaskRunIndexes);
       throw error;
     }
   }
@@ -344,6 +349,27 @@ function loadedSkillNameFromMessage(message: ChatMessage) {
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function taskRunIndexSnapshot(session: AgentSession) {
+  return new Map((session.taskRuns ?? []).map((run) => [run.id, run.userMessageIndex]));
+}
+
+function shiftTaskRunMessageIndexes(session: AgentSession, insertionIndex: number, amount: number) {
+  for (const run of session.taskRuns ?? []) {
+    if (run.userMessageIndex >= insertionIndex) {
+      run.userMessageIndex += amount;
+    }
+  }
+}
+
+function restoreTaskRunMessageIndexes(session: AgentSession, indexes: Map<string, number>) {
+  for (const run of session.taskRuns ?? []) {
+    const index = indexes.get(run.id);
+    if (index !== undefined) {
+      run.userMessageIndex = index;
+    }
+  }
 }
 
 function shouldRefreshBrowserEvidence(prompt: ChatContent, mode: "prompt" | "continue", messages: ChatMessage[]) {
