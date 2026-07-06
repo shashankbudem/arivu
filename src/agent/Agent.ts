@@ -99,6 +99,9 @@ export class Agent {
           : "",
         !existingSystemContent.includes("If browser_snapshot is empty but browser_screenshot returns visual elements")
           ? "If browser_snapshot is empty but browser_screenshot returns visual elements or a usable screenshot, continue with browser_click or browser_click_at; do not conclude the page is unloaded solely from an empty snapshot."
+          : "",
+        !existingSystemContent.includes("For current browser, latest page, active tab, or user-changed browser questions")
+          ? "For current browser, latest page, active tab, or user-changed browser questions, call browser_state first, then inspect the active or intended tab with browser_snapshot or browser_screenshot in the same turn before answering. Do not answer from older browser evidence."
           : ""
       ].filter(Boolean);
       if (additions.length > 0) {
@@ -248,6 +251,7 @@ function systemPrompt(workspaceRoot: string) {
     "Use Arivu browser tools as hidden/background tools by default. Use visible browser mode only when the user explicitly asks to see a separate browser window.",
     "For screenshot or visual browser checks, prefer Chrome DevTools MCP through mcp_list_tools and mcp_call_tool when it is configured; fall back to browser_screenshot only when Chrome tooling is unavailable.",
     "If browser_snapshot is empty but browser_screenshot returns visual elements or a usable screenshot, continue with browser_click or browser_click_at; do not conclude the page is unloaded solely from an empty snapshot.",
+    "For current browser, latest page, active tab, or user-changed browser questions, call browser_state first, then inspect the active or intended tab with browser_snapshot or browser_screenshot in the same turn before answering. Do not answer from older browser evidence.",
     "Do not use emojis in assistant replies.",
     `The active workspace root is ${workspaceRoot}.`
   ].join("\n");

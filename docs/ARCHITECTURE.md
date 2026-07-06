@@ -132,6 +132,8 @@ The current tool set is:
 - `read_skill`
 - `mcp_list_tools`
 - `mcp_call_tool`
+- `browser_state` (desktop only)
+- `browser_select_tab` (desktop only)
 - `browser_open` (desktop only)
 - `browser_screenshot` (desktop only)
 - `browser_snapshot` (desktop only)
@@ -153,7 +155,7 @@ The `run` tool accepts either a structured `argv` vector or a shell `command` st
 
 `mcp_list_tools` and `mcp_call_tool` connect to configured MCP servers using the official TypeScript SDK's stdio client transport. Each call opens a short-lived client, connects, performs the list/call request with a timeout, formats MCP content blocks into text, and closes the client.
 
-Browser tools are registered only when the desktop main process provides a `BrowserToolController`. `browser_open` normalizes localhost-style URLs, direct HTTP/HTTPS/file URLs, and likely hostnames; plain non-URL text becomes a Google search URL. It opens the hidden isolated browser target by default, or the separate visible window when `mode: "visible"` is supplied. In visible mode, `browser_open` can create a new tab with `newTab: true` or target a known tab with `tabId`; follow-up screenshot/snapshot/console/click/type tools also accept `tabId` and otherwise use the active visible tab. `browser_snapshot` returns compact page text and key interactable elements, `browser_console` returns collected console entries, `browser_screenshot` writes a temporary PNG, `browser_click`/`browser_type` operate by selector or visible label text, and `browser_click_at` clicks exact screenshot/CSS coordinates when selectors fail. Browser open/screenshot/snapshot/console/click/type actions route through the capability policy table and workspace scope rules; default trust modes allow isolated browser control without approval, while workspace overrides can prompt/block and browser target-class allowlists can restrict hidden/background, visible, local, file, or public browser targets.
+Browser tools are registered only when the desktop main process provides a `BrowserToolController`. `browser_state` returns active mode, active visible tab id, visible tab URL/title/loading/freshness metadata, and the background target so model turns can refresh tab awareness before answering current-browser questions. `browser_select_tab` switches the active visible tab by `tabId`. `browser_open` normalizes localhost-style URLs, direct HTTP/HTTPS/file URLs, and likely hostnames; plain non-URL text becomes a Google search URL. It opens the hidden isolated browser target by default, or the separate visible window when `mode: "visible"` is supplied. In visible mode, `browser_open` can create a new tab with `newTab: true` or target a known tab with `tabId`; follow-up screenshot/snapshot/console/click/type tools also accept `tabId` and otherwise use the active visible tab. `browser_snapshot` returns compact page text and key interactable elements, `browser_console` returns collected console entries, `browser_screenshot` writes a temporary PNG, `browser_click`/`browser_type` operate by selector or visible label text, and `browser_click_at` clicks exact screenshot/CSS coordinates when selectors fail. Browser state/select/open/screenshot/snapshot/console/click/type actions route through the capability policy table and workspace scope rules; default trust modes allow isolated browser control without approval, while workspace overrides can prompt/block and browser target-class allowlists can restrict hidden/background, visible, local, file, or public browser targets.
 
 ## Desktop IPC
 

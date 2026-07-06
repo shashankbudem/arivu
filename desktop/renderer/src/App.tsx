@@ -10226,6 +10226,12 @@ function summarizeToolCall(call: ToolCall) {
 function summarizeBrowserToolCall(name: string, args: Record<string, unknown>) {
   const mode = stringValue(args.mode) ?? "active";
   const tabLabel = browserTabLabel(args);
+  if (name === "browser_state") {
+    return "Inspect browser tabs and active page state.";
+  }
+  if (name === "browser_select_tab") {
+    return `Select browser tab ${stringValue(args.tabId) ?? "tab"}.`;
+  }
   if (name === "browser_open") {
     if (args.newTab === true) {
       return `Open ${stringValue(args.url) ?? "URL"} in a new ${mode} browser tab.`;
@@ -10316,6 +10322,10 @@ function buildToolResultActivity(message: ChatMessage): Pick<ActivityItem, "deta
 
 function browserActionLabel(action: string) {
   switch (action) {
+    case "state":
+      return "Read browser state";
+    case "select_tab":
+      return "Selected tab";
     case "open":
       return "Opened page";
     case "screenshot":

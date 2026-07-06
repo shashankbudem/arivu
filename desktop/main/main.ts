@@ -3039,8 +3039,9 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
   }
   browserController.selectVisibleTab(firstTabId);
   const firstScreenshot = await browserController.screenshot({ mode: "visible", tabId: firstTabId });
-  browserController.selectVisibleTab(secondTabId);
+  const selectedSecond = await browserController.selectTab({ tabId: secondTabId });
   const secondScreenshot = await browserController.screenshot({ mode: "visible", tabId: secondTabId });
+  const browserState = browserController.getState();
   const browserWindow = BrowserWindow.getAllWindows().find((candidate) => candidate !== window && candidate.getTitle() === "Arivu Browser");
   let chromeScreenshotPath: string | undefined;
   if (browserWindow && !browserWindow.isDestroyed()) {
@@ -3052,8 +3053,14 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
     JSON.stringify(
       {
         browserSmoke: true,
-        tabs: browserController.getState().visible.tabs?.map((tab) => ({ id: tab.id, title: tab.title, url: tab.url })),
-        activeTabId: browserController.getState().visible.activeTabId,
+        tabs: browserState.visible.tabs?.map((tab) => ({
+          id: tab.id,
+          title: tab.title,
+          url: tab.url,
+          lastScreenshotAt: tab.lastScreenshotAt
+        })),
+        activeTabId: browserState.visible.activeTabId,
+        selectedTabId: selectedSecond.tabId,
         firstScreenshotPath: firstScreenshot.screenshotPath,
         secondScreenshotPath: secondScreenshot.screenshotPath,
         chromeScreenshotPath

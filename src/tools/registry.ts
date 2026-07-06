@@ -21,7 +21,8 @@ import {
   isLocalBrowserUrl,
   normalizeBrowserUrl,
   type BrowserMode,
-  type BrowserToolController
+  type BrowserToolController,
+  type BrowserToolResult
 } from "./browserControl.js";
 
 type ToolContext = {
@@ -151,6 +152,50 @@ export function createToolRegistry(context: ToolContext) {
 
   const browser = context.browser;
   if (browser) {
+    register({
+      schema: {
+        name: "browser_state",
+        description:
+          "Inspect Arivu browser state before answering questions about the current page, latest page, visible browser, tabs, or user-driven browser changes. Returns active mode, active visible tab id, visible tabs, background target, URLs, titles, loading state, and last snapshot/screenshot timestamps.",
+        parameters: objectSchema({})
+      },
+      async execute() {
+        const mode = browserActionMode(browser, undefined);
+        await context.approvals.require({
+          type: "browser",
+          action: "state",
+          target: "browser tabs",
+          url: browserTargetUrl(browser, mode, undefined),
+          mode,
+          destructive: false
+        });
+        return formatBrowserToolResult("state", browser.getState() as unknown as BrowserToolResult);
+      }
+    });
+
+    register({
+      schema: {
+        name: "browser_select_tab",
+        description:
+          "Select a visible Arivu browser tab by tabId. Use browser_state first to discover tab ids, then select the intended tab before browser_snapshot, browser_screenshot, browser_click, browser_click_at, or browser_type.",
+        parameters: objectSchema({
+          tabId: { type: "string", description: "Visible browser tab id from browser_state." }
+        })
+      },
+      async execute(args) {
+        const parsed = z.object({ tabId: z.string().trim().min(1) }).parse(args);
+        await context.approvals.require({
+          type: "browser",
+          action: "select tab",
+          target: parsed.tabId,
+          url: browserTargetUrl(browser, "visible", parsed.tabId),
+          mode: "visible",
+          destructive: false
+        });
+        return formatBrowserToolResult("select_tab", await browser.selectTab(parsed));
+      }
+    });
+
     register({
       schema: {
         name: "browser_open",

@@ -34,6 +34,8 @@ describe("createToolRegistry", () => {
     const names = withBrowser.schemas.map((schema) => schema.name);
 
     expect(names).toContain("browser_open");
+    expect(names).toContain("browser_state");
+    expect(names).toContain("browser_select_tab");
     expect(names).toContain("browser_snapshot");
     expect(names).toContain("browser_click");
     expect(names).toContain("browser_click_at");
@@ -54,6 +56,24 @@ describe("createToolRegistry", () => {
       unknown
     >;
     expect(visibleResult.mode).toBe("visible");
+
+    const stateResult = JSON.parse(await withBrowser.execute("browser_state", {})) as Record<string, unknown>;
+    expect(stateResult.action).toBe("state");
+    expect(stateResult.activeMode).toBe("visible");
+    expect(stateResult.visible).toMatchObject({
+      activeTabId: "visible-tab-1",
+      tabs: expect.arrayContaining([
+        expect.objectContaining({
+          id: "visible-tab-1",
+          lastSnapshotAt: "2026-07-06T21:00:00.000Z"
+        })
+      ])
+    });
+
+    const selectResult = JSON.parse(await withBrowser.execute("browser_select_tab", { tabId: "visible-tab-1" })) as Record<string, unknown>;
+    expect(selectResult.action).toBe("select_tab");
+    expect(selectResult.mode).toBe("visible");
+    expect(selectResult.activeTabId).toBe("visible-tab-1");
 
     const followUpResult = JSON.parse(await withBrowser.execute("browser_snapshot", {})) as Record<string, unknown>;
     expect(followUpResult.mode).toBe("visible");
@@ -601,7 +621,10 @@ function createFakeBrowser(): BrowserToolController {
           title: "Fake visible browser",
           loading: false,
           canGoBack: false,
-          canGoForward: false
+          canGoForward: false,
+          lastSnapshotAt: "2026-07-06T21:00:00.000Z",
+          lastScreenshotAt: "2026-07-06T21:01:00.000Z",
+          lastScreenshotPath: "/tmp/fake-browser.png"
         }
       ]
     },
@@ -618,6 +641,16 @@ function createFakeBrowser(): BrowserToolController {
   return {
     getState() {
       return state();
+    },
+    async selectTab(args) {
+      activeMode = "visible";
+      return {
+        mode: activeMode,
+        tabId: args.tabId,
+        activeTabId: args.tabId,
+        url: "http://localhost:5173/",
+        title: "Fake visible browser"
+      };
     },
     async open(args) {
       activeMode = args.mode ?? activeMode;

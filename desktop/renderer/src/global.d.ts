@@ -589,6 +589,8 @@ type BrowserTargetState = {
   canGoBack: boolean;
   canGoForward: boolean;
   lastError?: string;
+  lastSnapshotAt?: string;
+  lastScreenshotAt?: string;
   lastScreenshotPath?: string;
 };
 

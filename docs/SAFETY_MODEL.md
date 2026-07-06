@@ -25,7 +25,7 @@ Allowed:
 - `current_location`
 - `list_skills`
 - `read_skill`
-- browser tools against isolated Arivu browser targets: `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, `browser_type`
+- browser tools against isolated Arivu browser targets: `browser_state`, `browser_select_tab`, `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, `browser_type`
 - `git_status`
 
 Requires approval:
@@ -155,7 +155,7 @@ The background browser target and visible tabbed browser window share Arivu's pe
 
 Browser control policy:
 
-- `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, and `browser_type` route through the capability policy table.
+- `browser_state`, `browser_select_tab`, `browser_open`, `browser_screenshot`, `browser_snapshot`, `browser_console`, `browser_click`, `browser_click_at`, and `browser_type` route through the capability policy table.
 - In `readonly`, `ask`, and `trusted`, browser open/read/click/type actions are allowed without approval by default.
 - Browser actions are still recorded in the task-run audit trail as browser-control activity.
 - Workspace capability overrides can require approval or block browser control for sensitive workspaces.

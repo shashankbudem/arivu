@@ -206,6 +206,15 @@ export class DesktopBrowserController implements BrowserToolController {
     return this.getState();
   }
 
+  async selectTab(args: { tabId: string }): Promise<BrowserToolResult> {
+    const target = this.selectVisibleTabById(args.tabId);
+    this.emitState();
+    return this.resultForMode("visible", {
+      activeTabId: this.activeVisibleTabId,
+      tabs: this.publicVisibleTarget().tabs ?? []
+    }, target);
+  }
+
   closeVisibleTab(tabId: string) {
     this.closeVisibleTabById(tabId);
     this.emitState();
@@ -250,6 +259,7 @@ export class DesktopBrowserController implements BrowserToolController {
     await mkdir(screenshotDir, { recursive: true });
     const screenshotPath = path.join(screenshotDir, `arivu-browser-${mode}-${target.id}-${Date.now()}.png`);
     await writeFile(screenshotPath, image.toPNG());
+    target.lastScreenshotAt = new Date().toISOString();
     target.lastScreenshotPath = screenshotPath;
     target.lastScreenshotSize = size;
     target.lastViewport = visual.viewport;
@@ -273,6 +283,8 @@ export class DesktopBrowserController implements BrowserToolController {
     assertPageLoaded(contents, mode);
     const maxLength = clampNumber(args.maxLength ?? 12_000, 1_000, 20_000);
     const snapshot = await this.inspectPage(mode, contents, maxLength);
+    target.lastSnapshotAt = new Date().toISOString();
+    this.emitState();
     return this.resultForMode(mode, { snapshot }, target);
   }
 
@@ -718,6 +730,7 @@ export class DesktopBrowserController implements BrowserToolController {
       url: target.url,
       title: target.title,
       loading: target.loading,
+      activeTabId: this.activeVisibleTabId,
       ...result
     };
   }
@@ -1575,6 +1588,8 @@ function publicTarget(target: BrowserTargetRecord): BrowserTargetState {
     canGoBack: target.canGoBack,
     canGoForward: target.canGoForward,
     ...(target.lastError ? { lastError: target.lastError } : {}),
+    ...(target.lastSnapshotAt ? { lastSnapshotAt: target.lastSnapshotAt } : {}),
+    ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
     ...(target.lastScreenshotPath ? { lastScreenshotPath: target.lastScreenshotPath } : {})
   };
 }
@@ -1588,6 +1603,8 @@ function publicTab(target: BrowserTabRecord) {
     canGoBack: target.canGoBack,
     canGoForward: target.canGoForward,
     ...(target.lastError ? { lastError: target.lastError } : {}),
+    ...(target.lastSnapshotAt ? { lastSnapshotAt: target.lastSnapshotAt } : {}),
+    ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
     ...(target.lastScreenshotPath ? { lastScreenshotPath: target.lastScreenshotPath } : {})
   };
 }

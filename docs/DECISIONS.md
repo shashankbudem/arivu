@@ -599,3 +599,9 @@ Reason: users need to see the trust boundary before approving a command, not onl
 Decision: desktop session summaries include whether each saved project folder still exists. The Workspaces sidebar marks missing folders unavailable and exposes a forget action that rehomes those saved project chats to standalone history instead of deleting them.
 
 Reason: stale workspace paths should be easy to clean up without losing conversation history. Treating cleanup as a metadata rehome keeps the recent-workspace list accurate while preserving saved chats for reference and search.
+
+## 2026-07-07: Browser current-page answers require fresh tab state
+
+Decision: browser control exposes `browser_state` and `browser_select_tab` to the agent. Browser targets now record last snapshot and screenshot timestamps, and the agent prompt requires current/latest-page or user-changed-browser questions to refresh browser state and inspect the active or intended tab in the same turn before answering.
+
+Reason: users can manually open, close, or switch visible browser tabs outside the agent's previous tool call. Treating old snapshots as current evidence causes stale answers, especially after login or new-tab flows.

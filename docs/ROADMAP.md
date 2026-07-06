@@ -30,6 +30,7 @@ This roadmap is ordered by development leverage for the current MVP.
 - Add provider capability config for tool-calling support. Manual per-provider `auto`/`enabled`/`disabled` tool-calling modes, automatic persistence from observed schema failures, and Settings doctor writeback from unsupported tool probes are implemented; richer remediation remains future work.
 - Add provider capability config for multimodal image support. Manual per-provider `auto`/`enabled`/`disabled` image-input modes and automatic persistence from observed image-part failures are implemented; proactive probes remain future work.
 - Add clearer remediation copy for tool schema, streaming, and no-tools fallback failures.
+- Fix invalid historical tool-call arguments so malformed model-emitted JSON is not preserved as structured tool-call history and cannot poison future retries when tool calling is enabled.
 - Add better model error formatting.
 - Add optional per-provider presets, starting with NVIDIA and OpenAI.
 - Add web-search provider health checks and usage visibility for Tavily credits.

@@ -23,6 +23,8 @@ export type BrowserTabState = {
   canGoBack: boolean;
   canGoForward: boolean;
   lastError?: string;
+  lastSnapshotAt?: string;
+  lastScreenshotAt?: string;
   lastScreenshotPath?: string;
 };
 
@@ -45,6 +47,7 @@ export type BrowserToolResult = Record<string, unknown>;
 
 export type BrowserToolController = {
   getState(): BrowserState;
+  selectTab(args: { tabId: string }): Promise<BrowserToolResult>;
   open(args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }): Promise<BrowserToolResult>;
   screenshot(args: { mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
   snapshot(args: { mode?: BrowserMode; tabId?: string; maxLength?: number }): Promise<BrowserToolResult>;
