@@ -101,6 +101,7 @@ import {
   type WorkspacePolicyTransferPayload
 } from "../../../src/permissions/workspacePolicyTransfer";
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
+import { resolveAppKeyboardShortcut } from "./keyboardShortcuts";
 
 type ViewMode = "chat" | "history" | "settings" | "ui";
 type SidebarSectionId = "projects" | "chats";
@@ -1248,6 +1249,22 @@ export function App() {
     void loadSkills();
   }
 
+  async function showToolsPopover() {
+    const tools = await loadTools();
+    setToolsPopoverOpen(true);
+    setSkillsPopoverOpen(false);
+    setComposerOptionsOpen(false);
+    setStatus(`Showing ${formatNumber((tools ?? availableTools).length)} tools`);
+  }
+
+  async function showSkillsPopover() {
+    const skills = await loadSkills();
+    setSkillsPopoverOpen(true);
+    setToolsPopoverOpen(false);
+    setComposerOptionsOpen(false);
+    setStatus(`Showing ${formatNumber((skills ?? availableSkills).length)} skills`);
+  }
+
   function loadSkillForNextPrompt(skill: SkillSummary) {
     if (loadedSkillNames.includes(skill.name)) {
       setStatus(`$${skill.name} is already loaded in this chat`);
@@ -1937,10 +1954,7 @@ export function App() {
     }
 
     if (command.id === "skills") {
-      const skills = await loadSkills();
-      setSkillsPopoverOpen(true);
-      setToolsPopoverOpen(false);
-      setStatus(`Showing ${formatNumber((skills ?? availableSkills).length)} skills`);
+      await showSkillsPopover();
       requestAnimationFrame(() => promptInputRef.current?.focus());
       return;
     }
@@ -1959,10 +1973,7 @@ export function App() {
       return;
     }
 
-    const tools = await loadTools();
-    setToolsPopoverOpen(true);
-    setSkillsPopoverOpen(false);
-    setStatus(`Showing ${formatNumber((tools ?? availableTools).length)} tools`);
+    await showToolsPopover();
     requestAnimationFrame(() => promptInputRef.current?.focus());
   }
 
@@ -2280,6 +2291,81 @@ export function App() {
     setApproval(null);
     setStatus(approved ? "Approved" : "Denied");
   }
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !state) {
+        return;
+      }
+
+      const shortcut = resolveAppKeyboardShortcut(event);
+      if (!shortcut) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      setCommandOutput(null);
+
+      if (shortcut === "focus_composer") {
+        setView("chat");
+        setChatSearchOpen(false);
+        setStatus("Composer focused");
+        requestAnimationFrame(() => promptInputRef.current?.focus());
+        return;
+      }
+
+      if (shortcut === "new_chat") {
+        void startNewChat();
+        return;
+      }
+
+      if (shortcut === "search_chat") {
+        setView("chat");
+        setChatSearchOpen(true);
+        setStatus("Search chat");
+        requestAnimationFrame(() => chatSearchInputRef.current?.focus());
+        return;
+      }
+
+      if (shortcut === "settings") {
+        const nextView = view === "settings" ? "chat" : "settings";
+        setSettingsFocus(null);
+        setView(nextView);
+        setToolsPopoverOpen(false);
+        setSkillsPopoverOpen(false);
+        setComposerOptionsOpen(false);
+        setStatus(nextView === "settings" ? "Settings opened" : "Chat opened");
+        return;
+      }
+
+      if (shortcut === "refresh_state") {
+        void refresh();
+        return;
+      }
+
+      if (shortcut === "toggle_browser") {
+        void setBrowserPaneOpen(!browserState?.paneOpen);
+        return;
+      }
+
+      if (shortcut === "show_tools") {
+        setView("chat");
+        void showToolsPopover();
+        requestAnimationFrame(() => promptInputRef.current?.focus());
+        return;
+      }
+
+      if (shortcut === "show_skills") {
+        setView("chat");
+        void showSkillsPopover();
+        requestAnimationFrame(() => promptInputRef.current?.focus());
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  });
 
   if (!state) {
     return (
