@@ -496,6 +496,81 @@ describe("session store", () => {
     });
   });
 
+  it("repairs task-run indexes that drifted before a saved user prompt", async () => {
+    const driftedSession = {
+      id: "drifted-task-run",
+      cwd: "/tmp/project",
+      trustMode: "trusted",
+      taskRuns: [
+        {
+          id: "run-drifted",
+          userMessageIndex: 0,
+          promptPreview: "Can you see the website opened in the browser?",
+          status: "completed",
+          capabilities: ["browser_control"],
+          tools: [],
+          approvals: [],
+          artifacts: [],
+          startedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+          completedAt: "2026-01-01T00:00:01.000Z"
+        }
+      ],
+      messages: [
+        { role: "system", content: "You are Arivu, a local CLI coding agent." },
+        { role: "user", content: "Can you see the website opened in the browser?" },
+        { role: "assistant", content: "Yes." }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z"
+    };
+    await writeFile(path.join(tempDir, "drifted-task-run.json"), `${JSON.stringify(driftedSession)}\n`, "utf8");
+
+    const store = new SessionStore(tempDir);
+
+    await expect(store.load("drifted-task-run")).resolves.toMatchObject({
+      taskRuns: [{ id: "run-drifted", userMessageIndex: 1 }]
+    });
+    await expect(store.list()).resolves.toMatchObject([{ id: "drifted-task-run", taskRuns: [{ userMessageIndex: 1 }] }]);
+  });
+
+  it("repairs truncated task-run prompt previews when saving sessions", async () => {
+    const store = new SessionStore(tempDir);
+    const prompt = `Inspect ${"the browser page ".repeat(20)}`.trim();
+    const promptPreview = `${prompt.replace(/\s+/g, " ").slice(0, 179).trimEnd()}...`;
+    await store.save({
+      id: "save-drifted-task-run",
+      cwd: "/tmp/project",
+      trustMode: "trusted",
+      taskRuns: [
+        {
+          id: "run-save-drifted",
+          userMessageIndex: 0,
+          promptPreview,
+          status: "completed",
+          capabilities: ["browser_control"],
+          tools: [],
+          approvals: [],
+          artifacts: [],
+          startedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+          completedAt: "2026-01-01T00:00:01.000Z"
+        }
+      ],
+      messages: [
+        { role: "system", content: "You are Arivu, a local CLI coding agent." },
+        { role: "user", content: prompt },
+        { role: "assistant", content: "Done." }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z"
+    });
+
+    await expect(store.load("save-drifted-task-run")).resolves.toMatchObject({
+      taskRuns: [{ id: "run-save-drifted", userMessageIndex: 1 }]
+    });
+  });
+
   it("skips malformed session files when listing", async () => {
     const store = new SessionStore(tempDir);
     await writeFile(path.join(tempDir, "broken.json"), "{", "utf8");

@@ -2,6 +2,7 @@ import { chmod, mkdir, readdir, readFile, stat, unlink, writeFile } from "node:f
 import path from "node:path";
 import { z } from "zod";
 import { appDataDir } from "../config.js";
+import { chatContentToText } from "../agent/content.js";
 import type { AgentSession } from "../agent/types.js";
 
 const TextPartSchema = z.object({
@@ -482,6 +483,7 @@ export class SessionStore {
   constructor(private readonly root = path.join(appDataDir(), "sessions")) {}
 
   async save(session: AgentSession) {
+    normalizeTaskRunUserMessageIndexes(session);
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     const file = this.fileFor(session.id);
     await writeFile(file, `${JSON.stringify(session, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -490,7 +492,7 @@ export class SessionStore {
 
   async load(id: string): Promise<AgentSession> {
     const raw = await readFile(this.fileFor(id), "utf8");
-    return SessionSchema.parse(JSON.parse(raw)) as AgentSession;
+    return normalizeTaskRunUserMessageIndexes(SessionSchema.parse(JSON.parse(raw)) as AgentSession);
   }
 
   async delete(id: string) {
@@ -527,7 +529,7 @@ export class SessionStore {
         return undefined;
       }
       const raw = await readFile(filePath, "utf8");
-      return SessionSchema.parse(JSON.parse(raw)) as AgentSession;
+      return normalizeTaskRunUserMessageIndexes(SessionSchema.parse(JSON.parse(raw)) as AgentSession);
     } catch {
       return undefined;
     }
@@ -552,4 +554,51 @@ function compareSessionsForList(left: AgentSession, right: AgentSession) {
     return right.pinnedAt.localeCompare(left.pinnedAt);
   }
   return right.updatedAt.localeCompare(left.updatedAt);
+}
+
+function normalizeTaskRunUserMessageIndexes(session: AgentSession) {
+  for (const run of session.taskRuns ?? []) {
+    const current = session.messages[run.userMessageIndex];
+    if (current?.role === "user" && taskRunMatchesUserMessage(run.promptPreview, current.content)) {
+      continue;
+    }
+
+    const matchingIndexes = session.messages
+      .map((message, index) => ({ message, index }))
+      .filter(({ message }) => message.role === "user" && taskRunMatchesUserMessage(run.promptPreview, message.content))
+      .map(({ index }) => index);
+    const repairedIndex = closestUniqueIndex(matchingIndexes, run.userMessageIndex);
+    if (repairedIndex !== undefined) {
+      run.userMessageIndex = repairedIndex;
+    }
+  }
+  return session;
+}
+
+function taskRunMatchesUserMessage(promptPreview: string, content: AgentSession["messages"][number]["content"]) {
+  const preview = normalizePromptPreview(promptPreview);
+  if (!preview) {
+    return false;
+  }
+  const messageText = normalizePromptPreview(chatContentToText(content));
+  if (preview.endsWith("...")) {
+    const prefix = preview.slice(0, -3).trimEnd();
+    return prefix.length >= 12 && messageText.startsWith(prefix);
+  }
+  return messageText === preview;
+}
+
+function closestUniqueIndex(indexes: number[], target: number) {
+  if (indexes.length === 0) {
+    return undefined;
+  }
+  const [best, second] = [...indexes].sort((left, right) => Math.abs(left - target) - Math.abs(right - target));
+  if (second !== undefined && Math.abs(second - target) === Math.abs((best ?? 0) - target)) {
+    return undefined;
+  }
+  return best;
+}
+
+function normalizePromptPreview(value: string) {
+  return value.replace(/\s+/g, " ").trim();
 }
