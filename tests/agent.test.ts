@@ -3,8 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Agent } from "../src/agent/Agent.js";
-import type { AgentSession, ChatClient, ChatRequest, ChatResponse } from "../src/agent/types.js";
+import type { AgentRunEvent, AgentSession, ChatClient, ChatRequest, ChatResponse } from "../src/agent/types.js";
 import { ApprovalManager } from "../src/permissions/ApprovalManager.js";
+import type { BrowserToolController } from "../src/tools/browserControl.js";
 
 let tempDir: string;
 let skillsHome: string;
@@ -381,6 +382,94 @@ describe("agent", () => {
     expect(result.session.messages.filter((message) => message.role === "tool")).toHaveLength(1);
   });
 
+  it("refreshes browser evidence before answering current browser prompts", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "The browser is showing the fake ServiceNow page."
+        }
+      }
+    ]);
+    const browser = createFakeBrowser();
+    const events: AgentRunEvent[] = [];
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      browser
+    });
+
+    const result = await agent.run("Can you see the website opened in the browser?", {
+      onEvent: (event) => {
+        events.push(event);
+      }
+    });
+
+    expect(result.output).toBe("The browser is showing the fake ServiceNow page.");
+    expect(events.flatMap((event) => (event.type === "tool_call" ? [event.call.name] : []))).toEqual(["browser_state", "browser_snapshot"]);
+    expect(result.session.messages.filter((message) => message.role === "tool").map((message) => message.name)).toEqual([
+      "browser_state",
+      "browser_snapshot"
+    ]);
+    expect(client.requests[0]?.messages.filter((message) => message.role === "tool").map((message) => message.name)).toEqual([
+      "browser_state",
+      "browser_snapshot"
+    ]);
+    expect(browser.snapshotCalls).toEqual([{ mode: "visible", tabId: "visible-tab-1", maxLength: 12_000 }]);
+  });
+
+  it("does not refresh browser evidence for ordinary page-code prompts", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "I will inspect the page component source."
+        }
+      }
+    ]);
+    const browser = createFakeBrowser();
+    const events: AgentRunEvent[] = [];
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      browser
+    });
+
+    await agent.run("check the page component code", {
+      onEvent: (event) => {
+        events.push(event);
+      }
+    });
+
+    expect(events.flatMap((event) => (event.type === "tool_call" ? [event.call.name] : []))).toEqual([]);
+    expect(browser.snapshotCalls).toEqual([]);
+  });
+
+  it("does not accept empty assistant responses without tool calls as completed runs", async () => {
+    const session = createTestSession();
+    const originalMessages = structuredClone(session.messages);
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "   "
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    await expect(agent.run("summarize")).rejects.toThrow("empty assistant response");
+
+    expect(session.messages).toEqual(originalMessages);
+  });
+
   it("saves a visible assistant message when max tool depth is reached", async () => {
     const client = new ScriptedClient(
       Array.from({ length: 20 }, (_entry, index) => ({
@@ -445,5 +534,112 @@ function createTestSession(): AgentSession {
     ],
     createdAt: now,
     updatedAt: now
+  };
+}
+
+function createFakeBrowser(): BrowserToolController & { snapshotCalls: Array<Record<string, unknown>> } {
+  const snapshotCalls: Array<Record<string, unknown>> = [];
+  return {
+    snapshotCalls,
+    getState() {
+      return {
+        paneOpen: true,
+        defaultMode: "background",
+        activeMode: "visible",
+        visible: {
+          id: "visible-tab-1",
+          mode: "visible",
+          url: "https://developer.servicenow.com/dev.do#!/manage-instance",
+          title: "ServiceNow Developers",
+          loading: false,
+          canGoBack: false,
+          canGoForward: false,
+          activeTabId: "visible-tab-1",
+          tabs: [
+            {
+              id: "visible-tab-1",
+              url: "https://developer.servicenow.com/dev.do#!/manage-instance",
+              title: "ServiceNow Developers",
+              loading: false,
+              canGoBack: false,
+              canGoForward: false
+            }
+          ]
+        },
+        background: {
+          id: "background",
+          mode: "background",
+          url: "",
+          title: "",
+          loading: false,
+          canGoBack: false,
+          canGoForward: false
+        }
+      };
+    },
+    async selectTab(args) {
+      return {
+        mode: "visible",
+        activeTabId: args.tabId,
+        tabId: args.tabId,
+        url: "https://developer.servicenow.com/dev.do#!/manage-instance",
+        title: "ServiceNow Developers"
+      };
+    },
+    async open(args) {
+      return {
+        mode: args.mode ?? "background",
+        url: args.url,
+        title: "Opened"
+      };
+    },
+    async screenshot(args) {
+      return {
+        mode: args.mode ?? "visible",
+        tabId: args.tabId,
+        screenshotPath: "/tmp/arivu-fake-browser.png"
+      };
+    },
+    async snapshot(args) {
+      snapshotCalls.push({ ...args });
+      return {
+        mode: args.mode ?? "visible",
+        tabId: args.tabId,
+        snapshot: { text: "Fake ServiceNow page" }
+      };
+    },
+    async console(args) {
+      return {
+        mode: args.mode ?? "visible",
+        tabId: args.tabId,
+        logs: []
+      };
+    },
+    async click(args) {
+      return {
+        mode: args.mode ?? "visible",
+        tabId: args.tabId,
+        target: args.target,
+        ok: true
+      };
+    },
+    async clickAt(args) {
+      return {
+        mode: args.mode ?? "visible",
+        tabId: args.tabId,
+        x: args.x,
+        y: args.y,
+        ok: true
+      };
+    },
+    async type(args) {
+      return {
+        mode: args.mode ?? "visible",
+        tabId: args.tabId,
+        target: args.target,
+        text: args.text,
+        ok: true
+      };
+    }
   };
 }

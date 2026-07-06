@@ -115,7 +115,8 @@ Desktop task-run audit check:
 15. Confirm parsed report results and TypeScript/ESLint diagnostic results show compact open-report/source buttons, and that clicking one opens only the attached evidence path from the session/worktree root.
 16. Confirm failed parsed report results show Draft fix, and that clicking it fills the composer with a focused repair prompt containing the report path and bounded failing test or SARIF finding details.
 17. When Loop is enabled and a report-producing iteration ends with `Loop: continue`, confirm the next iteration receives one hidden `Arivu report remediation evidence artifact:` system message for the latest failed report artifact only once.
-18. For browser prompts that call `browser_screenshot`, confirm the Activity rail shows a screenshot artifact and the task-run metadata reports an artifact count.
+18. For a current-browser prompt such as "Can you see the website opened in the browser?", confirm the run records `browser_state` followed by a targeted `browser_snapshot` before the answer even if the model did not explicitly ask for those tools.
+19. For browser prompts that call `browser_screenshot`, confirm the Activity rail shows a screenshot artifact and the task-run metadata reports an artifact count.
 
 Desktop plan-approval check:
 

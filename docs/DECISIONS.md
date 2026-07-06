@@ -602,6 +602,12 @@ Reason: stale workspace paths should be easy to clean up without losing conversa
 
 ## 2026-07-07: Browser current-page answers require fresh tab state
 
-Decision: browser control exposes `browser_state` and `browser_select_tab` to the agent. Browser targets now record last snapshot and screenshot timestamps, and the agent prompt requires current/latest-page or user-changed-browser questions to refresh browser state and inspect the active or intended tab in the same turn before answering.
+Decision: browser control exposes `browser_state` and `browser_select_tab` to the agent. Browser targets now record last snapshot and screenshot timestamps. For current/latest/open-browser, page, tab, or recent browser-task continuation prompts, the harness automatically records `browser_state` and then a targeted `browser_snapshot` before the first model answer attempt. The agent prompt still tells the model to refresh browser state for these questions, but correctness no longer depends only on model compliance.
 
 Reason: users can manually open, close, or switch visible browser tabs outside the agent's previous tool call. Treating old snapshots as current evidence causes stale answers, especially after login or new-tab flows.
+
+## 2026-07-07: Empty no-tool assistant replies fail the run
+
+Decision: when a model returns an assistant message with no tool calls and no non-whitespace content, the agent treats the run as failed and rolls the session back to the pre-run state instead of saving an empty completed assistant turn.
+
+Reason: several OpenAI-compatible models can produce an empty final assistant message after a tool call. Saving that as completed hides the real failure, leaves the user with no Retry affordance on a failed prompt, and can pollute future provider requests with useless blank history.

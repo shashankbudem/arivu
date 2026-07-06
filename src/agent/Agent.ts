@@ -5,11 +5,13 @@ import type { BrowserToolController } from "../tools/browserControl.js";
 import { detectWorkspace } from "../workspace.js";
 import { chatContentToText, trimChatContent, type ChatContent } from "./content.js";
 import { discoverSkills, readSkill, skillsSystemMessage } from "./skills.js";
-import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse } from "./types.js";
+import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCall } from "./types.js";
 import type { AppConfig } from "../config.js";
 
 const MAX_STEPS = 20;
 const WEB_SEARCH_TOOL = "web_search";
+const BROWSER_STATE_TOOL = "browser_state";
+const BROWSER_SNAPSHOT_TOOL = "browser_snapshot";
 const LOADED_SKILL_PREFIX = "Skill loaded into chat:";
 
 export class Agent {
@@ -139,6 +141,14 @@ export class Agent {
 
       const allowedToolNames = runOptions.allowedToolNames ? new Set(runOptions.allowedToolNames) : undefined;
       const toolSchemas = allowedToolNames ? tools.schemas.filter((tool) => allowedToolNames.has(tool.name)) : tools.schemas;
+      if (
+        shouldRefreshBrowserEvidence(prompt, mode, this.session.messages) &&
+        hasTool(toolSchemas, BROWSER_STATE_TOOL) &&
+        hasTool(toolSchemas, BROWSER_SNAPSHOT_TOOL)
+      ) {
+        await refreshBrowserEvidence(tools, runOptions, this.session.messages);
+      }
+
       for (let step = 0; step < MAX_STEPS; step += 1) {
         const availableTools = webSearchCalls > 0 ? [] : toolSchemas;
         const response = await this.complete({
@@ -150,9 +160,13 @@ export class Agent {
         this.session.messages.push(message);
 
         if (!toolCalls || toolCalls.length === 0) {
+          const output = chatContentToText(message.content);
+          if (output.trim().length === 0) {
+            throw new Error("Model returned an empty assistant response without tool calls.");
+          }
           this.touch();
           return {
-            output: chatContentToText(message.content),
+            output,
             session: this.session
           };
         }
@@ -330,6 +344,144 @@ function loadedSkillNameFromMessage(message: ChatMessage) {
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function shouldRefreshBrowserEvidence(prompt: ChatContent, mode: "prompt" | "continue", messages: ChatMessage[]) {
+  if (mode !== "prompt") {
+    return false;
+  }
+
+  const text = chatContentToText(prompt).toLowerCase().replace(/\s+/g, " ").trim();
+  if (!text) {
+    return false;
+  }
+
+  const hasBrowserSubject = /\b(browser|chrome|tab|tabs|website|web site|webpage|web page|portal)\b/.test(text);
+  const hasCurrentPageSubject =
+    /\b(current|latest|active|opened|open|visible|loaded)\s+(?:page|site)\b/.test(text) ||
+    /\b(?:page|site)\s+(?:opened|open|visible|loaded)\b/.test(text);
+  const browserTarget = "(?:browser|tab|tabs|website|web site|webpage|web page|portal)";
+  const currentPageTarget = "(?:current|latest|active|opened|open|visible|loaded)\\s+(?:page|site)";
+  const asksForCurrentBrowser =
+    /\b(can you see|do you see|look at|what is on|what's on|what is in|what's in)\b/.test(text) ||
+    new RegExp(`\\b(?:check|inspect)\\s+(?:the\\s+)?(?:current|latest|active|opened|open|visible|loaded)?\\s*${browserTarget}\\b`).test(
+      text
+    ) ||
+    new RegExp(`\\b(?:check|inspect)\\s+(?:the\\s+)?${currentPageTarget}\\b`).test(text) ||
+    /\b(current|latest|active|opened|open|visible|loaded)\s+(?:browser|tab|page|website|web site|webpage|web page|site|portal)\b/.test(text) ||
+    /\b(?:browser|tab|page|website|web site|webpage|web page|site|portal)\s+(?:opened|open|visible|loaded)\b/.test(text);
+  if ((hasBrowserSubject || hasCurrentPageSubject) && asksForCurrentBrowser) {
+    return true;
+  }
+
+  const browserTaskContinuation = /\b(logged in|i have logged|i'm logged|login|continue|proceed|done|fire up|request instance|open instance|instance)\b/.test(
+    text
+  );
+  return browserTaskContinuation && hasRecentBrowserActivity(messages);
+}
+
+function hasRecentBrowserActivity(messages: ChatMessage[]) {
+  return messages.slice(-16).some((message) => {
+    if (message.role === "tool" && message.name?.startsWith("browser_")) {
+      return true;
+    }
+    return message.toolCalls?.some((call) => call.name.startsWith("browser_")) ?? false;
+  });
+}
+
+async function refreshBrowserEvidence(
+  tools: { execute(name: string, args: unknown): Promise<string> },
+  runOptions: AgentRunOptions,
+  messages: ChatMessage[]
+) {
+  const stateResult = await executeSyntheticToolCall(tools, runOptions, messages, {
+    id: syntheticToolCallId(BROWSER_STATE_TOOL),
+    name: BROWSER_STATE_TOOL,
+    arguments: {}
+  });
+  await executeSyntheticToolCall(tools, runOptions, messages, {
+    id: syntheticToolCallId(BROWSER_SNAPSHOT_TOOL),
+    name: BROWSER_SNAPSHOT_TOOL,
+    arguments: browserSnapshotArgsFromStateResult(stateResult)
+  });
+}
+
+async function executeSyntheticToolCall(
+  tools: { execute(name: string, args: unknown): Promise<string> },
+  runOptions: AgentRunOptions,
+  messages: ChatMessage[],
+  call: ToolCall
+) {
+  messages.push({ role: "assistant", content: "", toolCalls: [call] });
+  await runOptions.onEvent?.({ type: "tool_call", call });
+  const result = await tools.execute(call.name, call.arguments);
+  await runOptions.onEvent?.({
+    type: "tool_result",
+    toolCallId: call.id,
+    name: call.name,
+    result
+  });
+  messages.push({
+    role: "tool",
+    toolCallId: call.id,
+    name: call.name,
+    content: result
+  });
+  return result;
+}
+
+function syntheticToolCallId(name: string) {
+  return `${name}_${crypto.randomUUID()}`;
+}
+
+function browserSnapshotArgsFromStateResult(result: string): Record<string, unknown> {
+  const args: Record<string, unknown> = { maxLength: 12_000 };
+  const state = parseJsonRecord(result);
+  const activeMode = stringField(state, "activeMode");
+  if (activeMode === "visible") {
+    args.mode = "visible";
+    const visible = recordField(state, "visible");
+    const tabId = stringField(visible, "activeTabId") ?? stringField(visible, "id") ?? firstBrowserTabId(visible);
+    if (tabId) {
+      args.tabId = tabId;
+    }
+  } else if (activeMode === "background") {
+    args.mode = "background";
+  }
+  return args;
+}
+
+function parseJsonRecord(value: string) {
+  try {
+    return asRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function recordField(record: Record<string, unknown> | undefined, key: string) {
+  return asRecord(record?.[key]);
+}
+
+function stringField(record: Record<string, unknown> | undefined, key: string) {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function firstBrowserTabId(record: Record<string, unknown> | undefined) {
+  const tabs = record?.tabs;
+  if (!Array.isArray(tabs)) {
+    return undefined;
+  }
+  return tabs.map(asRecord).map((tab) => stringField(tab, "id")).find((id): id is string => Boolean(id));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function hasTool(tools: ChatRequest["tools"], name: string) {
+  return tools.some((tool) => tool.name === name);
 }
 
 function messagesForStep(messages: ChatMessage[], webSearchCalls: number, skillInstructions: Array<ChatMessage | undefined>): ChatMessage[] {
