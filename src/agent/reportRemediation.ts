@@ -82,9 +82,7 @@ export function buildTaskRunVerificationRepairPrompt(taskRun: AgentTaskRun): str
   }
 
   const commandArtifacts = taskRun.artifacts.filter((artifact) => artifact.kind === "command_output");
-  const failedCommands = commandArtifacts.filter(
-    (artifact) => (artifact.exitCode !== undefined && artifact.exitCode !== 0) || artifact.testReports?.some(reportHasRemediationEvidence)
-  );
+  const failedCommands = commandArtifacts.filter(commandHasVerificationFollowupEvidence);
   const commandEvidence = failedCommands.slice(-MAX_VERIFICATION_COMMANDS);
   const reportPrompt = [...commandEvidence]
     .reverse()
@@ -380,7 +378,7 @@ export function buildTaskRunReplayFailureReviewPrompt(
   const commands = verificationCommandsFromRuns(failedReplayRuns.at(-1) ?? evidenceRun, evidenceRun);
   const commandEvidence = failedReplayRuns
     .flatMap((run) => run.artifacts.filter((artifact) => artifact.kind === "command_output"))
-    .filter((artifact) => (artifact.exitCode !== undefined && artifact.exitCode !== 0) || artifact.testReports?.some(reportHasRemediationEvidence))
+    .filter(commandHasVerificationFollowupEvidence)
     .slice(-MAX_VERIFICATION_COMMANDS);
   const failingCommands = repeatedFailedCommands(failedReplayRuns);
   const latestFailure = failedReplayRuns.at(-1);
@@ -450,7 +448,7 @@ function repeatedFailedCommands(runs: AgentTaskRun[]) {
       if (
         artifact.kind !== "command_output" ||
         !artifact.command ||
-        !((artifact.exitCode !== undefined && artifact.exitCode !== 0) || artifact.testReports?.some(reportHasRemediationEvidence))
+        !commandHasVerificationFollowupEvidence(artifact)
       ) {
         continue;
       }
@@ -468,6 +466,15 @@ function repeatedFailedCommands(runs: AgentTaskRun[]) {
 
 function reportHasRemediationEvidence(report: AgentTaskRunTestReport) {
   return report.status === "failed" || Boolean(report.failedTests?.length) || Boolean(report.findingDetails?.length);
+}
+
+function commandHasVerificationFollowupEvidence(artifact: AgentTaskRunArtifact) {
+  return (
+    artifact.kind === "command_output" &&
+    ((artifact.exitCode !== undefined && artifact.exitCode !== 0) ||
+      Boolean(artifact.timedOut) ||
+      Boolean(artifact.testReports?.some(reportHasRemediationEvidence)))
+  );
 }
 
 function formatReportEvidence(report: AgentTaskRunTestReport) {
@@ -496,6 +503,8 @@ function formatCommandEvidence(artifact: AgentTaskRunArtifact) {
   const lines = [
     `- ${artifact.command ?? artifact.title}`,
     artifact.exitCode !== undefined ? `  - exit code: ${artifact.exitCode}` : undefined,
+    artifact.timedOut ? `  - timed out${artifact.timeoutMs !== undefined ? ` after ${formatEvidenceDuration(artifact.timeoutMs)}` : ""}` : undefined,
+    artifact.signal ? `  - signal: ${artifact.signal}` : undefined,
     artifact.workingDirectory ? `  - cwd: ${artifact.workingDirectory}` : undefined
   ].filter((line): line is string => line !== undefined);
   const stderr = boundedText(artifact.stderr, MAX_REMEDIATION_STREAM_TEXT);
@@ -511,12 +520,7 @@ function formatCommandEvidence(artifact: AgentTaskRunArtifact) {
 
 function verificationCommandsFromRuns(taskRun: AgentTaskRun, sourceRun?: AgentTaskRun) {
   const artifacts = [...(sourceRun?.artifacts ?? []), ...taskRun.artifacts].filter((artifact) => artifact.kind === "command_output" && artifact.command);
-  const prioritized = [
-    ...artifacts.filter(
-      (artifact) => (artifact.exitCode !== undefined && artifact.exitCode !== 0) || artifact.testReports?.some(reportHasRemediationEvidence)
-    ),
-    ...artifacts
-  ];
+  const prioritized = [...artifacts.filter(commandHasVerificationFollowupEvidence), ...artifacts];
   const commands: string[] = [];
   for (const artifact of prioritized) {
     const command = artifact.command?.trim();
@@ -529,6 +533,19 @@ function verificationCommandsFromRuns(taskRun: AgentTaskRun, sourceRun?: AgentTa
     }
   }
   return commands;
+}
+
+function formatEvidenceDuration(durationMs: number) {
+  if (durationMs < 1_000) {
+    return `${durationMs} ms`;
+  }
+  if (durationMs < 60_000) {
+    const seconds = durationMs / 1_000;
+    return `${Number.isInteger(seconds) ? seconds.toFixed(0) : seconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.round((durationMs % 60_000) / 1_000);
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }
 
 function boundedText(value: string | undefined, limit = MAX_REMEDIATION_TEXT) {

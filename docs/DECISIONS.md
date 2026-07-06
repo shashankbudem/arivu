@@ -248,7 +248,7 @@ Reason: users need a compact answer to what Arivu actually verified, but that an
 
 ## 2026-07-06: Command timeouts are verification evidence
 
-Decision: the `run` tool accepts a bounded `timeoutMs`, records the configured timeout, timeout state, and termination signal on command artifacts, and counts timed-out commands as failed verification evidence.
+Decision: the `run` tool accepts a bounded `timeoutMs`, records the configured timeout, timeout state, and termination signal on command artifacts, counts timed-out commands as failed verification evidence, and treats those commands as actionable input for repair/rerun prompts.
 
 Reason: a timed-out command is neither a clean pass nor a normal failed exit. Preserving it separately keeps Activity and copied audits honest about long-running or stuck verification while still using the same task-run artifact pipeline.
 

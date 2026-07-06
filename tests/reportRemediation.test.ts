@@ -219,6 +219,96 @@ describe("report remediation prompts", () => {
     expect(prompt).toContain("expected true to be false");
   });
 
+  it("builds worktree repair and rerun prompts from timed-out command evidence", () => {
+    const taskRun: AgentTaskRun = {
+      id: "run-timeout",
+      userMessageIndex: 0,
+      promptPreview: "run the slow tests",
+      status: "completed",
+      worktree: {
+        enabled: true,
+        status: "ready",
+        originalRoot: "/repo",
+        path: "/worktree",
+        branch: "arivu/task-timeout"
+      },
+      verification: {
+        status: "failed",
+        summary: "Verification failed: 1 command, no failed exits, 1 timed out.",
+        commandCount: 1,
+        failedCommandCount: 0,
+        timedOutCommandCount: 1,
+        parsedReportCount: 0,
+        failedReportCount: 0,
+        passedReportCount: 0,
+        unknownReportCount: 0,
+        updatedAt: "2026-07-06T00:00:00.000Z"
+      },
+      capabilities: ["run_command"],
+      tools: [],
+      approvals: [],
+      artifacts: [
+        {
+          id: "artifact-timeout",
+          kind: "command_output",
+          title: "Command output",
+          command: "npm test -- --runInBand",
+          workingDirectory: "/worktree",
+          timeoutMs: 1000,
+          timedOut: true,
+          signal: "SIGTERM",
+          stdout: "starting slow tests",
+          createdAt: "2026-07-06T00:00:00.000Z"
+        }
+      ],
+      startedAt: "2026-07-06T00:00:00.000Z",
+      updatedAt: "2026-07-06T00:00:01.000Z"
+    };
+
+    const repairPrompt = buildTaskRunVerificationRepairPrompt(taskRun);
+
+    expect(repairPrompt).toContain("Verification failed: 1 command, no failed exits, 1 timed out.");
+    expect(repairPrompt).toContain("npm test -- --runInBand");
+    expect(repairPrompt).toContain("timed out after 1s");
+    expect(repairPrompt).toContain("signal: SIGTERM");
+    expect(repairPrompt).toContain("starting slow tests");
+
+    const rerunPrompt = buildTaskRunVerificationRerunPrompt(
+      {
+        ...taskRun,
+        id: "run-timeout-repair",
+        userMessageIndex: 1,
+        status: "completed",
+        worktree: {
+          enabled: true,
+          status: "ready",
+          originalRoot: "/repo",
+          path: "/worktree",
+          branch: "arivu/task-timeout",
+          continuedFromTaskRunId: "run-timeout"
+        },
+        verification: {
+          status: "unknown",
+          summary: "Verification unknown: No command verification evidence captured.",
+          commandCount: 0,
+          failedCommandCount: 0,
+          parsedReportCount: 0,
+          failedReportCount: 0,
+          passedReportCount: 0,
+          unknownReportCount: 0,
+          updatedAt: "2026-07-06T00:05:00.000Z"
+        },
+        artifacts: [],
+        updatedAt: "2026-07-06T00:05:00.000Z"
+      },
+      taskRun
+    );
+
+    expect(rerunPrompt).toContain("Previous verification: Verification failed: 1 command, no failed exits, 1 timed out.");
+    expect(rerunPrompt).toContain("Suggested verification commands:");
+    expect(rerunPrompt).toContain("npm test -- --runInBand");
+  });
+
   it("does not build a worktree repair prompt for passed verification", () => {
     const taskRun: AgentTaskRun = {
       id: "run-passed",
