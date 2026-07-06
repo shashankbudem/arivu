@@ -593,3 +593,9 @@ Reason: shell strings are still needed for pipelines and redirects, but most age
 Decision: command approval prompts now distinguish structured argv execution from shell execution. Structured commands are labeled `Structured command`, include `Command mode: argv`, and the renderer approval parser stops command extraction before command-mode, analysis, and working-directory metadata.
 
 Reason: users need to see the trust boundary before approving a command, not only after it finishes. Keeping mode visible in the prompt and parsed modal prevents argv execution from being misrepresented as shell execution and keeps command text clean in the approval UI.
+
+## 2026-07-06: Missing workspace cleanup preserves chats
+
+Decision: desktop session summaries include whether each saved project folder still exists. The Workspaces sidebar marks missing folders unavailable and exposes a forget action that rehomes those saved project chats to standalone history instead of deleting them.
+
+Reason: stale workspace paths should be easy to clean up without losing conversation history. Treating cleanup as a metadata rehome keeps the recent-workspace list accurate while preserving saved chats for reference and search.

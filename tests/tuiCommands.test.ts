@@ -12,6 +12,13 @@ import {
   parseTuiSlashCommand,
   resolveTuiPaneScrollShortcut
 } from "../src/tui/TuiApp.js";
+import {
+  detachSessionFromProject,
+  filterSessions,
+  sessionBelongsToProject,
+  sessionProjectRoot,
+  sessionWorkspacePath
+} from "../src/sessions/sessionList.js";
 
 describe("TUI slash commands", () => {
   it("maps pane scroll shortcuts", () => {
@@ -135,6 +142,56 @@ describe("TUI slash commands", () => {
     expect(output).toContain("Filters: search=provider, pinned, project");
     expect(output).toContain("pinned  2026-01-02T00:00:00Z  arivu  Provider fallback fix");
     expect(output).not.toContain("standalone");
+  });
+
+  it("keeps project filtering explicit while allowing desktop legacy project fallback", () => {
+    const legacySession: AgentSession = {
+      id: "legacy",
+      cwd: "/tmp/legacy-project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "legacy project chat" }],
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z"
+    };
+    const standaloneSession: AgentSession = {
+      id: "standalone",
+      cwd: "/tmp/just-chats",
+      projectRoot: null,
+      trustMode: "ask",
+      messages: [{ role: "user", content: "standalone chat" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    };
+
+    expect(sessionProjectRoot(legacySession)).toBeNull();
+    expect(sessionProjectRoot(legacySession, { legacyCwdAsProject: true })).toBe("/tmp/legacy-project");
+    expect(sessionWorkspacePath(legacySession)).toBe("/tmp/legacy-project");
+    expect(sessionBelongsToProject(legacySession, "/tmp/legacy-project")).toBe(false);
+    expect(sessionBelongsToProject(legacySession, "/tmp/legacy-project", { legacyCwdAsProject: true })).toBe(true);
+    expect(filterSessions([legacySession, standaloneSession], { project: "project" }).map((session) => session.id)).toEqual([]);
+    expect(filterSessions([legacySession, standaloneSession], { project: "standalone" }).map((session) => session.id)).toEqual([
+      "legacy",
+      "standalone"
+    ]);
+  });
+
+  it("detaches a missing project session without changing chat metadata", () => {
+    const session: AgentSession = {
+      id: "project",
+      cwd: "/tmp/project",
+      projectRoot: "/tmp/project",
+      title: "Project chat",
+      trustMode: "trusted",
+      messages: [{ role: "user", content: "keep me" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z"
+    };
+
+    expect(detachSessionFromProject(session, "/tmp/arivu/just-chats")).toEqual({
+      ...session,
+      cwd: "/tmp/arivu/just-chats",
+      projectRoot: null
+    });
   });
 
   it("formats session picker rows with status context", () => {

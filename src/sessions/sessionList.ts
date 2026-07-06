@@ -21,10 +21,10 @@ export function filterSessions(sessions: AgentSession[], filters: SessionListFil
     if (normalized.pinned === "unpinned" && session.pinnedAt) {
       return false;
     }
-    if (normalized.project === "project" && !session.projectRoot) {
+    if (normalized.project === "project" && sessionProjectRoot(session) === null) {
       return false;
     }
-    if (normalized.project === "standalone" && session.projectRoot) {
+    if (normalized.project === "standalone" && sessionProjectRoot(session) !== null) {
       return false;
     }
     if (normalized.workspace && !matchesTokens(sessionWorkspaceFields(session), normalized.workspace)) {
@@ -67,7 +67,26 @@ export function sessionDisplayTitle(session: AgentSession) {
 }
 
 export function sessionWorkspacePath(session: AgentSession) {
-  return session.projectRoot ?? session.cwd;
+  return sessionProjectRoot(session) ?? session.cwd;
+}
+
+export function sessionProjectRoot(session: AgentSession, options: { legacyCwdAsProject?: boolean } = {}) {
+  if (session.projectRoot !== undefined) {
+    return session.projectRoot;
+  }
+  return options.legacyCwdAsProject ? session.cwd : null;
+}
+
+export function sessionBelongsToProject(session: AgentSession, projectRoot: string, options: { legacyCwdAsProject?: boolean } = {}) {
+  return sessionProjectRoot(session, options) === projectRoot;
+}
+
+export function detachSessionFromProject(session: AgentSession, fallbackCwd: string): AgentSession {
+  return {
+    ...session,
+    cwd: fallbackCwd,
+    projectRoot: null
+  };
 }
 
 export function sessionWorkspaceName(session: AgentSession) {
@@ -82,19 +101,19 @@ function sessionSearchFields(session: AgentSession) {
     sessionDisplayTitle(session),
     firstUserMessage ? chatContentToText(firstUserMessage.content) : undefined,
     session.cwd,
-    session.projectRoot ?? undefined,
+    sessionProjectRoot(session) ?? undefined,
     session.model,
     session.selectedModel,
     session.selectedProviderName,
     session.baseUrl,
     session.trustMode,
     session.pinnedAt ? "pinned" : "unpinned",
-    session.projectRoot ? "project" : "standalone"
+    sessionProjectRoot(session) ? "project" : "standalone"
   ];
 }
 
 function sessionWorkspaceFields(session: AgentSession) {
-  return [session.cwd, session.projectRoot ?? undefined, sessionWorkspaceName(session)];
+  return [session.cwd, sessionProjectRoot(session) ?? undefined, sessionWorkspaceName(session)];
 }
 
 function matchesTokens(fields: Array<string | undefined>, query: string) {

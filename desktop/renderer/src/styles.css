@@ -398,10 +398,19 @@ body.is-resizing .panel-resize-handle::after {
   text-align: left;
 }
 
+.project-row.with-action {
+  grid-template-columns: 24px minmax(0, 1fr) 26px;
+}
+
 .project-row:hover,
 .project-group.active > .project-row {
   border-color: #34302a;
   background: #24211d;
+}
+
+.project-group.missing > .project-row {
+  border-color: #4a3725;
+  background: #211b15;
 }
 
 .project-group.active > .project-row {
@@ -412,8 +421,13 @@ body.is-resizing .panel-resize-handle::after {
   color: #e5b95c;
 }
 
+.project-group.missing .project-folder-icon {
+  color: #e59a4d;
+}
+
 .project-expand-button,
-.project-open-button {
+.project-open-button,
+.project-forget-button {
   min-width: 0;
   border: 0;
   background: transparent;
@@ -452,6 +466,33 @@ body.is-resizing .panel-resize-handle::after {
 .project-open-button:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+.project-group.missing .project-open-button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.project-forget-button {
+  width: 24px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: #d7a15a;
+  cursor: pointer;
+}
+
+.project-forget-button:hover,
+.project-forget-button:focus-visible {
+  background: rgb(229 154 77 / 0.12);
+  color: #ffd09a;
+}
+
+.project-forget-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .project-chat-list {
@@ -6659,6 +6700,22 @@ html[data-theme="light"] .model-result:hover,
 html[data-theme="light"] .model-result.selected {
   border-color: #1ca889;
   background: #e8f4ef;
+}
+
+html[data-theme="light"] .project-group.missing > .project-row {
+  border-color: #e0bc8b;
+  background: #fff4e5;
+}
+
+html[data-theme="light"] .project-group.missing .project-folder-icon,
+html[data-theme="light"] .project-forget-button {
+  color: #9a611c;
+}
+
+html[data-theme="light"] .project-forget-button:hover,
+html[data-theme="light"] .project-forget-button:focus-visible {
+  background: rgb(154 97 28 / 0.1);
+  color: #70420f;
 }
 
 html[data-theme="light"] .model-switcher select,

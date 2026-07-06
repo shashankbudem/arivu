@@ -10,6 +10,7 @@ const desktopApi = {
   createWorkspace: (options: unknown) => ipcRenderer.invoke("workspace:create", options),
   openJustChats: () => ipcRenderer.invoke("project:justChats"),
   selectChatProject: (projectRoot: string | null) => ipcRenderer.invoke("project:selectForChat", projectRoot),
+  forgetMissingProject: (projectRoot: string) => ipcRenderer.invoke("project:forgetMissing", projectRoot),
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   openSession: (id: string) => ipcRenderer.invoke("sessions:open", id),
   newChat: () => ipcRenderer.invoke("sessions:new"),

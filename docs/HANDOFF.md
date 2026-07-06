@@ -145,7 +145,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Desktop chat history is backed by the same JSON session store used by CLI/TUI resume.
 - Desktop workspace creation uses Electron's save dialog to create a directory and switch into it.
 - Desktop startup and `New chat` start unassigned; the prompt `+` menu can route the draft to no project, a recent project, or an opened workspace before the first prompt locks the chat target.
-- The sidebar Workspaces section doubles as the recent workspace list: folder/name rows reopen a saved workspace directly, while the chevron expands that workspace's chats.
+- The sidebar Workspaces section doubles as the recent workspace list: folder/name rows reopen a saved workspace directly, while the chevron expands that workspace's chats. Missing workspace folders are marked unavailable and can be forgotten by moving their saved chats to standalone history.
 - `blessed` remains for the TUI fallback.
 - OpenAI-compatible API support is the provider layer for v1; direct provider-specific SDKs are deferred.
 - Model listing is provider-scoped. A combined model picker would need grouped provider rows and would need to switch both provider and model together.

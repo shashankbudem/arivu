@@ -353,6 +353,7 @@ type DiffPreview = {
 type ProjectSummary = {
   projectRoot: string;
   name: string;
+  projectRootExists: boolean;
   latestSessionId?: string;
   updatedAt?: string;
   pinnedAt?: string;
@@ -363,6 +364,7 @@ type ProjectSummary = {
 type ProjectOption = {
   projectRoot: string;
   name: string;
+  projectRootExists?: boolean;
   updatedAt?: string;
 };
 
@@ -597,6 +599,7 @@ export function App() {
   const [pasteReview, setPasteReview] = useState<PasteReview | null>(null);
   const [workspaceScaffoldOpen, setWorkspaceScaffoldOpen] = useState(false);
   const [openingWorkspaceRoot, setOpeningWorkspaceRoot] = useState<string | null>(null);
+  const [forgettingProjectRoot, setForgettingProjectRoot] = useState<string | null>(null);
   const [openChatMenuId, setOpenChatMenuId] = useState<string | null>(null);
   const [openHistoryMenuId, setOpenHistoryMenuId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadPersistedUiState().sidebarCollapsed ?? false);
@@ -924,9 +927,14 @@ export function App() {
       byRoot.set(projectRoot, { projectRoot, name });
     }
     for (const project of projects) {
+      if (!project.projectRootExists) {
+        byRoot.delete(project.projectRoot);
+        continue;
+      }
       byRoot.set(project.projectRoot, {
         projectRoot: project.projectRoot,
         name: project.name,
+        projectRootExists: project.projectRootExists,
         updatedAt: project.updatedAt
       });
     }
@@ -951,6 +959,9 @@ export function App() {
   useEffect(() => {
     const nextProjects = new Map<string, string>();
     for (const project of projects) {
+      if (!project.projectRootExists) {
+        continue;
+      }
       nextProjects.set(project.projectRoot, project.name);
     }
     if (state?.projectRoot) {
@@ -1061,6 +1072,50 @@ export function App() {
       setStatus("Open workspace failed");
     } finally {
       setOpeningWorkspaceRoot((current) => (current === projectRoot ? null : current));
+    }
+  }
+
+  async function forgetMissingProject(project: ProjectSummary) {
+    if (forgettingProjectRoot || project.projectRootExists) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Forget missing workspace "${project.name}"?\n\nArivu will remove the unavailable folder from Workspaces and keep its ${formatNumber(
+        project.chatCount
+      )} chat${project.chatCount === 1 ? "" : "s"} in standalone history.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setForgettingProjectRoot(project.projectRoot);
+    setError(null);
+    try {
+      const next = await window.arivu.forgetMissingProject(project.projectRoot);
+      applyDesktopState(next);
+      await loadSessions();
+      setRememberedProjectOptions((current) => {
+        if (!(project.projectRoot in current)) {
+          return current;
+        }
+        const updated = { ...current };
+        delete updated[project.projectRoot];
+        return updated;
+      });
+      setExpandedProjectRoots((current) => {
+        if (!(project.projectRoot in current)) {
+          return current;
+        }
+        const updated = { ...current };
+        delete updated[project.projectRoot];
+        return updated;
+      });
+      setStatus(`Forgot missing workspace: ${project.name}`);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Forget workspace failed");
+    } finally {
+      setForgettingProjectRoot((current) => (current === project.projectRoot ? null : current));
     }
   }
 
@@ -2461,13 +2516,35 @@ export function App() {
             {recentProjects.map((project) => {
               const expanded = expandedProjectRoots[project.projectRoot] ?? project.projectRoot === state.projectRoot;
               const projectOpenBusy = openingWorkspaceRoot === project.projectRoot;
+              const projectForgetBusy = forgettingProjectRoot === project.projectRoot;
+              const projectMissing = !project.projectRootExists;
+              const projectRowClassName = [
+                "project-row",
+                projectMissing ? "missing with-action" : ""
+              ]
+                .filter(Boolean)
+                .join(" ");
+              const projectGroupClassName = [
+                "project-group",
+                project.projectRoot === state.projectRoot ? "active" : "",
+                projectMissing ? "missing" : ""
+              ]
+                .filter(Boolean)
+                .join(" ");
+              const projectStatus = projectMissing
+                ? `Missing folder - ${formatNumber(project.chatCount)} chat${project.chatCount === 1 ? "" : "s"}`
+                : projectOpenBusy
+                  ? "Opening..."
+                  : project.chatCount === 0
+                    ? "Current workspace"
+                    : `${project.chatCount} chats`;
               return (
                 <div
                   key={project.projectRoot}
-                  className={project.projectRoot === state.projectRoot ? "project-group active" : "project-group"}
+                  className={projectGroupClassName}
                 >
                   <div
-                    className="project-row"
+                    className={projectRowClassName}
                     title={project.projectRoot}
                   >
                     <button
@@ -2483,17 +2560,35 @@ export function App() {
                     <button
                       className="project-open-button"
                       type="button"
-                      disabled={Boolean(openingWorkspaceRoot)}
+                      disabled={Boolean(openingWorkspaceRoot) || projectMissing}
                       onClick={() => void openWorkspace(project.projectRoot)}
-                      title={`Open workspace ${project.projectRoot}`}
+                      title={projectMissing ? `Workspace folder missing: ${project.projectRoot}` : `Open workspace ${project.projectRoot}`}
                       aria-current={project.projectRoot === state.projectRoot ? "page" : undefined}
                     >
-                      {projectOpenBusy ? <RefreshCw className="project-folder-icon spinning" size={14} /> : <FolderOpen className="project-folder-icon" size={14} />}
+                      {projectMissing ? (
+                        <AlertTriangle className="project-folder-icon" size={14} />
+                      ) : projectOpenBusy ? (
+                        <RefreshCw className="project-folder-icon spinning" size={14} />
+                      ) : (
+                        <FolderOpen className="project-folder-icon" size={14} />
+                      )}
                       <span className="recent-project-main">
                         <strong>{project.name}</strong>
-                        <span>{projectOpenBusy ? "Opening..." : project.chatCount === 0 ? "Current workspace" : `${project.chatCount} chats`}</span>
+                        <span>{projectStatus}</span>
                       </span>
                     </button>
+                    {projectMissing ? (
+                      <button
+                        className="project-forget-button"
+                        type="button"
+                        onClick={() => void forgetMissingProject(project)}
+                        disabled={projectForgetBusy}
+                        title="Forget missing workspace and keep chats"
+                        aria-label={`Forget missing workspace ${project.name}`}
+                      >
+                        {projectForgetBusy ? <RefreshCw className="spinning" size={13} /> : <X size={13} />}
+                      </button>
+                    ) : null}
                   </div>
                   {expanded ? (
                     <div className="project-chat-list">
@@ -8478,6 +8573,7 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
       projectsByRoot.set(session.projectRoot, {
         projectRoot: session.projectRoot,
         name: basename(session.projectRoot),
+        projectRootExists: session.projectRootExists !== false,
         latestSessionId: session.id,
         updatedAt: session.updatedAt,
         pinnedAt: session.pinnedAt,
@@ -8489,6 +8585,9 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
 
     existing.chatCount += 1;
     existing.sessions.push(session);
+    if (session.projectRootExists === false) {
+      existing.projectRootExists = false;
+    }
     if (session.pinnedAt && (!existing.pinnedAt || session.pinnedAt > existing.pinnedAt)) {
       existing.pinnedAt = session.pinnedAt;
     }
@@ -8507,9 +8606,11 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
     return projects;
   }
 
-  const activeProject = projectsByRoot.get(state.projectRoot) ?? {
+  const existingActiveProject = projectsByRoot.get(state.projectRoot);
+  const activeProject = existingActiveProject ?? {
     projectRoot: state.projectRoot,
     name: state.workspace.packageName ?? basename(state.workspace.root),
+    projectRootExists: true,
     chatCount: 0,
     sessions: []
   };

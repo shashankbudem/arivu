@@ -5,7 +5,7 @@ This roadmap is ordered by development leverage for the current MVP.
 ## Milestone 1: Desktop MVP quality
 
 - Polish approval modals for clearer risk summaries and cleaner copy.
-- Polish stale-path recovery and cleanup for recent workspace rows.
+- Polish stale-path recovery and cleanup for recent workspace rows. Missing saved workspace folders are detected in the sidebar and can be forgotten while preserving chats as standalone history.
 - Expand file/diff preview panels beyond task worktrees.
 - Polish doctor/model health-check remediation. Desktop Settings health checks and CLI `arivu doctor` are implemented.
 - Add keyboard shortcuts for common desktop actions.

@@ -614,6 +614,7 @@ type SessionSummary = {
   pinnedAt?: string;
   cwd: string;
   projectRoot: string | null;
+  projectRootExists?: boolean;
   model?: string;
   modelMode?: "manual" | "auto";
   selectedModel?: string;
@@ -887,6 +888,7 @@ type DesktopApi = {
   createWorkspace(options?: WorkspaceScaffoldOptions): Promise<DesktopState>;
   openJustChats(): Promise<DesktopState>;
   selectChatProject(projectRoot: string | null): Promise<DesktopState>;
+  forgetMissingProject(projectRoot: string): Promise<DesktopState>;
   listSessions(): Promise<SessionListResult>;
   openSession(id: string): Promise<DesktopState>;
   newChat(): Promise<DesktopState>;

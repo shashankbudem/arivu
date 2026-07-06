@@ -238,6 +238,7 @@ Desktop workflows to check manually after UI changes:
 - For browser tool QA, verify `browser_open` with `mode: "visible"` opens the active visible tab, `browser_open` with `newTab: true` creates a visible tab, `tabId` targets a specific visible tab, and `browser_screenshot` produces a fresh Activity screenshot preview for the intended tab.
 - Verify browser opens, clicks, coordinate clicks, and typing do not show approval dialogs by default, while the Activity rail still records browser-control activity. Then set the current workspace browser-control policy override to `Require approval` or `Block` in Settings and confirm the override is honored.
 - `Refresh state` reloads workspace, config, and active session state.
+- Recent workspace rows mark missing folders and expose a forget action that moves those saved chats to standalone history instead of deleting them.
 - `Compact context` summarizes older saved messages locally, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.
 - Browser tools appear in the Tools drawer in desktop mode. Verify `browser_open`, `browser_snapshot`, `browser_console`, `browser_screenshot`, `browser_click`, and `browser_type` are listed with hidden-browser status.

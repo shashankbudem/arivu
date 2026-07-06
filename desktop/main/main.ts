@@ -104,6 +104,7 @@ import {
   type WorkspacePolicyBundle
 } from "../../src/permissions/workspacePolicyBundles.js";
 import { SessionStore } from "../../src/sessions/SessionStore.js";
+import { detachSessionFromProject, sessionBelongsToProject, sessionProjectRoot } from "../../src/sessions/sessionList.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
 import type { BrowserBounds, BrowserMode, BrowserState } from "../../src/tools/browserControl.js";
@@ -187,6 +188,7 @@ type SessionSummary = {
   pinnedAt?: string;
   cwd: string;
   projectRoot: string | null;
+  projectRootExists?: boolean;
   model?: string;
   modelMode?: "manual" | "auto";
   selectedModel?: string;
@@ -583,6 +585,41 @@ class DesktopController {
     return {
       sessions: await this.sessionSummaries()
     };
+  }
+
+  async forgetMissingProject(projectRoot: string) {
+    const normalizedProjectRoot = path.resolve(projectRoot);
+    if (await pathExistsAsDirectory(normalizedProjectRoot)) {
+      throw new Error(`Workspace still exists: ${normalizedProjectRoot}`);
+    }
+
+    const sessions = await this.store.list();
+    const matching = sessions.filter((session) => sessionBelongsToProject(session, normalizedProjectRoot, { legacyCwdAsProject: true }));
+    if (matching.length === 0) {
+      return this.state();
+    }
+
+    const running = matching.find((session) => this.runningSessionIds.has(session.id));
+    if (running) {
+      throw new Error(`Wait for "${sessionTitle(running)}" to finish before forgetting this workspace.`);
+    }
+
+    const fallbackCwd = await justChatsCwd();
+    const detachedSessions = new Map<string, AgentSession>();
+    for (const session of matching) {
+      const detached = detachSessionFromProject(session, fallbackCwd);
+      detachedSessions.set(detached.id, detached);
+      await this.store.save(detached);
+    }
+
+    if (this.session && detachedSessions.has(this.session.id)) {
+      this.session = detachedSessions.get(this.session.id);
+      this.cwd = fallbackCwd;
+      this.projectRoot = null;
+      this.markActiveViewChanged();
+    }
+
+    return this.state();
   }
 
   async openSession(id: string) {
@@ -1880,25 +1917,44 @@ class DesktopController {
 
   private async sessionSummaries(): Promise<SessionSummary[]> {
     const sessions = await this.store.list();
-    return sessions.map((session) => ({
-      id: session.id,
-      title: sessionTitle(session),
-      pinnedAt: session.pinnedAt,
-      cwd: session.cwd,
-      projectRoot: session.projectRoot === undefined ? session.cwd : session.projectRoot,
-      model: session.model,
-      modelMode: session.modelMode,
-      selectedModel: session.selectedModel,
-      selectedProviderName: session.selectedProviderName,
-      modelSelectionReason: session.modelSelectionReason,
-      agentLoop: session.agentLoop,
-      taskRuns: session.taskRuns,
-      trustMode: session.trustMode,
-      messageCount: session.messages.filter((message) => message.role !== "system").length,
-      running: this.runningSessionIds.has(session.id),
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt
-    }));
+    const projectExistsCache = new Map<string, Promise<boolean>>();
+    const projectRootExists = (projectRoot: string | null) => {
+      if (projectRoot === null) {
+        return undefined;
+      }
+      let cached = projectExistsCache.get(projectRoot);
+      if (!cached) {
+        cached = pathExistsAsDirectory(projectRoot);
+        projectExistsCache.set(projectRoot, cached);
+      }
+      return cached;
+    };
+
+    return Promise.all(
+      sessions.map(async (session) => {
+        const projectRoot = sessionProjectRoot(session, { legacyCwdAsProject: true });
+        return {
+          id: session.id,
+          title: sessionTitle(session),
+          pinnedAt: session.pinnedAt,
+          cwd: session.cwd,
+          projectRoot,
+          projectRootExists: await projectRootExists(projectRoot),
+          model: session.model,
+          modelMode: session.modelMode,
+          selectedModel: session.selectedModel,
+          selectedProviderName: session.selectedProviderName,
+          modelSelectionReason: session.modelSelectionReason,
+          agentLoop: session.agentLoop,
+          taskRuns: session.taskRuns,
+          trustMode: session.trustMode,
+          messageCount: session.messages.filter((message) => message.role !== "system").length,
+          running: this.runningSessionIds.has(session.id),
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt
+        };
+      })
+    );
   }
 
   private async sendSessionLifecycleEvent(type: SessionLifecycleEvent["type"], session: AgentSession, extra: Pick<SessionLifecycleEvent, "output" | "error"> = {}) {
@@ -3095,6 +3151,7 @@ handleFromMain("files:chooseContext", () => controller.chooseContextFiles());
 handleFromMain("workspace:create", (_event, options: WorkspaceScaffoldOptions) => controller.createWorkspace(options));
 handleFromMain("project:justChats", () => controller.openJustChats());
 handleFromMain("project:selectForChat", (_event, projectRoot: string | null) => controller.selectChatProject(projectRoot));
+handleFromMain("project:forgetMissing", (_event, projectRoot: string) => controller.forgetMissingProject(projectRoot));
 handleFromMain("sessions:list", () => controller.listSessions());
 handleFromMain("sessions:open", (_event, id: string) => controller.openSession(id));
 handleFromMain("sessions:new", () => controller.newChat());
