@@ -270,6 +270,7 @@ Inside the TUI:
 - `/resume <session-id>` switches the live TUI into that session.
 - `/clear` clears visible conversation.
 - `/exit` exits.
+- `PageUp`/`PageDown`, `Shift+PageUp`/`Shift+PageDown`, and the `Ctrl+Home`/`Ctrl+End` variants scroll or jump the conversation and activity panes.
 
 Use a terminal wider than about 100 columns to see the activity pane.
 
@@ -280,7 +281,7 @@ The TUI is in `src/tui/TuiApp.ts`. Keep these behaviors intact:
 - Default `arivu` opens the TUI.
 - One-shot mode stays non-interactive.
 - `sessions` prints recent saved sessions newest first, supports `--search`, `--workspace`, `--pinned`, `--unpinned`, `--project`, and `--standalone`; `resume <session-id>` opens the TUI with session history; and `compact <session-id>` compacts a saved transcript with `--recent`, `--entry-limit`, and `--dry-run` controls.
-- Inside the TUI, `/compact [n]` compacts the active saved session, `/sessions [n]` lists recent saved sessions, accepts the same filter flags, `/sessions --pick` opens a keyboard-selectable resume picker, `/resume <session-id>` switches the live TUI into that session, and `/diff` shows a local git change summary.
+- Inside the TUI, `/compact [n]` compacts the active saved session, `/sessions [n]` lists recent saved sessions, accepts the same filter flags, `/sessions --pick` opens a keyboard-selectable resume picker, `/resume <session-id>` switches the live TUI into that session, `/diff` shows a local git change summary, and pane scrolling shortcuts keep long conversation/activity logs reachable without mouse support.
 - Narrow terminals remain usable.
 - Approval prompts still resolve the same permission promise.
 

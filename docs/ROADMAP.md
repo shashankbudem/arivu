@@ -14,7 +14,7 @@ This roadmap is ordered by development leverage for the current MVP.
 ## Milestone 2: TUI fallback quality
 
 - Improve text wrapping and spacing in narrow terminals.
-- Add keyboard shortcuts for scrolling conversation/activity panes.
+- Add keyboard shortcuts for scrolling conversation/activity panes. PageUp/PageDown, Shift-PageUp/Shift-PageDown, and Ctrl-Home/Ctrl-End variants are implemented.
 - Keep the TUI usable for SSH/headless workflows.
 
 ## Milestone 3: Session ergonomics

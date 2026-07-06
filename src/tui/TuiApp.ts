@@ -38,6 +38,12 @@ type ActivityLine = {
 };
 
 type FocusTarget = "input" | "conversation" | "activity";
+type TuiPaneScrollTarget = "focused" | "activity";
+type TuiPaneScrollAction = "page-up" | "page-down" | "top" | "bottom";
+export type TuiPaneScrollShortcut = {
+  target: TuiPaneScrollTarget;
+  action: TuiPaneScrollAction;
+};
 export type TuiSlashCommand =
   | { kind: "clear" | "diff" | "exit" | "help" | "status" }
   | { kind: "compact"; recentMessageCount?: number }
@@ -59,6 +65,16 @@ export type TuiGitDiffSummary = {
 const SPINNER = ["-", "\\", "|", "/"];
 const DEFAULT_TUI_SESSION_LIST_LIMIT = 10;
 const MAX_TUI_SESSION_LIST_LIMIT = 50;
+const TUI_PANE_SCROLL_KEY_BINDINGS: Array<{ keys: string[]; shortcut: TuiPaneScrollShortcut }> = [
+  { keys: ["pageup"], shortcut: { target: "focused", action: "page-up" } },
+  { keys: ["pagedown"], shortcut: { target: "focused", action: "page-down" } },
+  { keys: ["S-pageup"], shortcut: { target: "activity", action: "page-up" } },
+  { keys: ["S-pagedown"], shortcut: { target: "activity", action: "page-down" } },
+  { keys: ["C-home"], shortcut: { target: "focused", action: "top" } },
+  { keys: ["C-end"], shortcut: { target: "focused", action: "bottom" } },
+  { keys: ["C-S-home"], shortcut: { target: "activity", action: "top" } },
+  { keys: ["C-S-end"], shortcut: { target: "activity", action: "bottom" } }
+];
 
 export class TuiApp {
   private screen!: blessed.Widgets.Screen;
@@ -233,6 +249,13 @@ export class TuiApp {
     this.screen.key(["S-tab"], () => this.focusPrevious());
     this.screen.key(["C-l"], () => this.clearConversation());
     this.screen.key(["C-r"], () => this.render());
+    for (const binding of TUI_PANE_SCROLL_KEY_BINDINGS) {
+      this.screen.key(binding.keys, () => {
+        if (!this.modalOpen) {
+          this.scrollPane(binding.shortcut);
+        }
+      });
+    }
 
     this.input.key(["C-c"], () => this.exit());
     this.input.on("submit", (value) => void this.submit(String(value ?? "")));
@@ -530,6 +553,10 @@ export class TuiApp {
         "",
         "Keys:",
         "Tab / Shift-Tab changes focus",
+        "PageUp / PageDown scrolls the focused pane",
+        "Shift-PageUp / Shift-PageDown scrolls Activity",
+        "Ctrl-Home / Ctrl-End jumps the focused pane",
+        "Ctrl-Shift-Home / Ctrl-Shift-End jumps Activity",
         "Ctrl-L clears the visible conversation",
         "Ctrl-C exits"
       ].join("\n"),
@@ -909,7 +936,8 @@ export class TuiApp {
       ` ${this.busy ? "Running" : "Ready"}`,
       `focus: ${focus}`,
       "Enter Submit",
-      "Up/Down Scroll",
+      "PgUp/PgDn Scroll",
+      "Shift-Pg Activity",
       "Tab Cycle Focus",
       "Ctrl-L Clear",
       "Esc Close",
@@ -975,6 +1003,19 @@ export class TuiApp {
     this.activity.focus();
   }
 
+  private scrollPane(shortcut: TuiPaneScrollShortcut) {
+    const pane = shortcut.target === "activity" ? this.activity : this.focusTarget === "activity" ? this.activity : this.conversation;
+    if (shortcut.action === "top") {
+      pane.setScrollPerc(0);
+    } else if (shortcut.action === "bottom") {
+      pane.setScrollPerc(100);
+    } else {
+      const pageLines = Math.max(4, Math.floor(Number(this.screen.height || 24) / 2));
+      pane.scroll(shortcut.action === "page-up" ? -pageLines : pageLines);
+    }
+    this.screen.render();
+  }
+
   private clearConversation() {
     this.log.splice(0, this.log.length, {
       kind: "system",
@@ -1022,6 +1063,30 @@ function indent(value: string) {
     .split("\n")
     .map((line) => `  ${line}`)
     .join("\n");
+}
+
+export function resolveTuiPaneScrollShortcut(keyName: string): TuiPaneScrollShortcut | null {
+  const normalized = normalizeTuiKeyName(keyName);
+  for (const binding of TUI_PANE_SCROLL_KEY_BINDINGS) {
+    if (binding.keys.some((key) => normalizeTuiKeyName(key) === normalized)) {
+      return binding.shortcut;
+    }
+  }
+  return null;
+}
+
+function normalizeTuiKeyName(keyName: string) {
+  return keyName
+    .trim()
+    .toLowerCase()
+    .replace(/^shift-/, "s-")
+    .replace(/^ctrl-/, "c-")
+    .replace(/^control-/, "c-")
+    .replace(/^c-shift-/, "c-s-")
+    .replace(/^shift-c-/, "c-s-")
+    .replace(/^s-c-/, "c-s-")
+    .replace(/^pgup$/, "pageup")
+    .replace(/^pgdn$/, "pagedown");
 }
 
 function shortenPath(value: string, max: number) {

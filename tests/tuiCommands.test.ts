@@ -9,10 +9,20 @@ import {
   formatTuiSessionList,
   formatTuiSessionPickerItems,
   loadTuiGitDiffSummary,
-  parseTuiSlashCommand
+  parseTuiSlashCommand,
+  resolveTuiPaneScrollShortcut
 } from "../src/tui/TuiApp.js";
 
 describe("TUI slash commands", () => {
+  it("maps pane scroll shortcuts", () => {
+    expect(resolveTuiPaneScrollShortcut("pageup")).toEqual({ target: "focused", action: "page-up" });
+    expect(resolveTuiPaneScrollShortcut("PgDn")).toEqual({ target: "focused", action: "page-down" });
+    expect(resolveTuiPaneScrollShortcut("Shift-PageUp")).toEqual({ target: "activity", action: "page-up" });
+    expect(resolveTuiPaneScrollShortcut("C-home")).toEqual({ target: "focused", action: "top" });
+    expect(resolveTuiPaneScrollShortcut("Ctrl-Shift-End")).toEqual({ target: "activity", action: "bottom" });
+    expect(resolveTuiPaneScrollShortcut("C-x")).toBeNull();
+  });
+
   it("parses session listing and resume commands", () => {
     expect(parseTuiSlashCommand("/sessions")).toEqual({ kind: "sessions", limit: 10 });
     expect(parseTuiSlashCommand("/sessions 3")).toEqual({ kind: "sessions", limit: 3 });
