@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Agent } from "../src/agent/Agent.js";
+import type { ChatContent } from "../src/agent/content.js";
 import type { AgentRunEvent, AgentSession, ChatClient, ChatRequest, ChatResponse } from "../src/agent/types.js";
 import { createAgentTaskRun } from "../src/agent/taskRuns.js";
 import { ApprovalManager } from "../src/permissions/ApprovalManager.js";
@@ -619,6 +620,47 @@ describe("agent", () => {
     expect(session.messages.some((message) => message.role === "tool" && message.content === oversizedSnapshot)).toBe(true);
   });
 
+  it("preserves multimodal active prompts when a later tool result triggers compaction", async () => {
+    const imageUrl = "data:image/png;base64,aGVsbG8=";
+    const promptContent: ChatContent = [
+      { type: "text", text: `Inspect this screenshot and continue.\n${"details ".repeat(200)}` },
+      { type: "image_url", image_url: { url: imageUrl, detail: "low" }, name: "screen.png", mimeType: "image/png", size: 128 }
+    ];
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_browser", name: "browser_snapshot", arguments: { mode: "visible", maxLength: 20000 } }]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "Screenshot handled."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session: createTestSession(),
+      browser: createFakeBrowser("x".repeat(260_000))
+    });
+
+    await agent.run(promptContent);
+
+    const secondRequest = client.requests[1];
+    const pinnedPrompt = secondRequest?.messages.find((message) => message.role === "user" && Array.isArray(message.content));
+    const pinnedParts = Array.isArray(pinnedPrompt?.content) ? pinnedPrompt.content : [];
+
+    expect(secondRequest?.messages.map((message) => String(message.content)).join("\n")).toContain("Context compacted locally");
+    expect(pinnedParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl, detail: "low" }, name: "screen.png", mimeType: "image/png", size: 128 });
+    expect(pinnedParts.find((part) => part.type === "text")?.text).toContain("Inspect this screenshot");
+    expect(JSON.stringify(secondRequest?.messages)).not.toContain("x".repeat(10_000));
+  });
+
   it("retries context-length failures with aggressive request compaction", async () => {
     const client = new ContextLengthRetryClient();
     const agent = new Agent({
@@ -722,7 +764,7 @@ function createTestSession(): AgentSession {
   };
 }
 
-function createFakeBrowser(): BrowserToolController & { snapshotCalls: Array<Record<string, unknown>> } {
+function createFakeBrowser(snapshotText = "Fake ServiceNow page"): BrowserToolController & { snapshotCalls: Array<Record<string, unknown>> } {
   const snapshotCalls: Array<Record<string, unknown>> = [];
   return {
     snapshotCalls,
@@ -790,7 +832,7 @@ function createFakeBrowser(): BrowserToolController & { snapshotCalls: Array<Rec
       return {
         mode: args.mode ?? "visible",
         tabId: args.tabId,
-        snapshot: { text: "Fake ServiceNow page" }
+        snapshot: { text: snapshotText }
       };
     },
     async console(args) {
