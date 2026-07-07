@@ -1,4 +1,4 @@
-import { chatContentToText } from "./content.js";
+import { chatContentToText, type ChatContent, type ChatContentPart } from "./content.js";
 import type { ChatMessage } from "./types.js";
 
 export const COMPACT_RECENT_MESSAGE_COUNT = 8;
@@ -58,13 +58,14 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
   const latestUserMessage = latestUserMessageIndex >= 0 ? nonSystemMessages[latestUserMessageIndex] : undefined;
   const pinnedLatestUser =
     latestUserMessage && latestUserMessageIndex < recentStart
-      ? [toPlainTranscriptMessage(latestUserMessage, activeUserMessageCharacterLimit)]
+      ? [toPinnedUserMessage(latestUserMessage, activeUserMessageCharacterLimit)]
       : [];
   const olderMessages = nonSystemMessages.filter((_message, index) => index < recentStart && index !== latestUserMessageIndex);
   const recentMessages = nonSystemMessages.slice(recentStart).map((message, index) =>
     toPlainTranscriptMessage(
       message,
-      recentStart + index === latestUserMessageIndex ? activeUserMessageCharacterLimit : recentEntryCharacterLimit
+      recentStart + index === latestUserMessageIndex ? activeUserMessageCharacterLimit : recentEntryCharacterLimit,
+      recentStart + index === latestUserMessageIndex && preserveLatestUserMessage
     )
   );
   const compactedAt = (options.now ?? new Date()).toISOString();
@@ -173,7 +174,11 @@ function isPinnableUserMessage(message: ChatMessage) {
   return !content.startsWith("Local tool result");
 }
 
-function toPlainTranscriptMessage(message: ChatMessage, entryCharacterLimit?: number): ChatMessage {
+function toPlainTranscriptMessage(message: ChatMessage, entryCharacterLimit?: number, preserveUserContent = false): ChatMessage {
+  if (preserveUserContent && message.role === "user") {
+    return toPinnedUserMessage(message, entryCharacterLimit);
+  }
+
   const content = truncateTranscriptContent(transcriptContent(message), entryCharacterLimit);
   if (message.role === "tool") {
     return {
@@ -193,6 +198,41 @@ function toPlainTranscriptMessage(message: ChatMessage, entryCharacterLimit?: nu
     role: message.role,
     content
   };
+}
+
+function toPinnedUserMessage(message: ChatMessage, entryCharacterLimit?: number): ChatMessage {
+  return {
+    role: "user",
+    content: truncateChatContent(message.content, entryCharacterLimit)
+  };
+}
+
+function truncateChatContent(content: ChatContent, entryCharacterLimit: number | undefined): ChatContent {
+  if (typeof content === "string") {
+    return truncateTranscriptContent(content, entryCharacterLimit);
+  }
+  if (!entryCharacterLimit) {
+    return content.map((part) => (part.type === "text" ? { ...part } : { ...part, image_url: { ...part.image_url } }));
+  }
+
+  let remainingTextCharacters = entryCharacterLimit;
+  return content
+    .map((part) => {
+      if (part.type === "image_url") {
+        return { ...part, image_url: { ...part.image_url } };
+      }
+      if (remainingTextCharacters <= 0) {
+        return undefined;
+      }
+      if (part.text.length <= remainingTextCharacters) {
+        remainingTextCharacters -= part.text.length;
+        return { ...part };
+      }
+      const text = truncateTranscriptContent(part.text, remainingTextCharacters);
+      remainingTextCharacters = 0;
+      return text ? { ...part, text } : undefined;
+    })
+    .filter((part): part is ChatContentPart => Boolean(part));
 }
 
 function transcriptContent(message: ChatMessage) {
@@ -226,5 +266,8 @@ function truncateTranscriptContent(content: string, entryCharacterLimit: number 
   if (!entryCharacterLimit || content.length <= entryCharacterLimit) {
     return content;
   }
-  return `${content.slice(0, Math.max(0, entryCharacterLimit - 1)).trimEnd()}...`;
+  if (entryCharacterLimit <= 3) {
+    return ".".repeat(Math.max(0, entryCharacterLimit));
+  }
+  return `${content.slice(0, Math.max(0, entryCharacterLimit - 3)).trimEnd()}...`;
 }

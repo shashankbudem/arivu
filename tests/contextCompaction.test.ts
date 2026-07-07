@@ -190,4 +190,50 @@ describe("context compaction", () => {
     expect(pinnedMessages.some((content) => content.includes("KEEP-ME"))).toBe(true);
     expect(pinnedMessages.some((content) => content.startsWith("Local tool result"))).toBe(false);
   });
+
+  it("preserves image parts on the latest user request during request compaction", () => {
+    const imageUrl = "data:image/png;base64,aGVsbG8=";
+    const messages: ChatMessage[] = [
+      { role: "system", content: "system prompt" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: `Please inspect this screenshot.\n${"details ".repeat(200)}` },
+          { type: "image_url", image_url: { url: imageUrl, detail: "low" }, name: "screen.png", mimeType: "image/png", size: 128 }
+        ]
+      }
+    ];
+    for (let index = 0; index < 6; index += 1) {
+      messages.push(
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: `call_image_${index}`, name: "browser_snapshot", arguments: { mode: "visible" } }]
+        },
+        {
+          role: "tool",
+          toolCallId: `call_image_${index}`,
+          name: "browser_snapshot",
+          content: `snapshot ${index}\n${"x".repeat(20_000)}`
+        }
+      );
+    }
+
+    const result = compactMessagesForModelRequest(messages, {
+      tokenLimit: 100,
+      recentMessageCount: 4,
+      recentEntryCharacterLimit: 200,
+      activeUserMessageCharacterLimit: 80,
+      now: new Date("2026-06-16T00:00:00.000Z")
+    });
+    const pinnedUser = result.messages.find((message) => Array.isArray(message.content));
+    const pinnedContent = pinnedUser?.content;
+    const pinnedParts = Array.isArray(pinnedContent) ? pinnedContent : [];
+
+    expect(result.compacted).toBe(true);
+    expect(Array.isArray(pinnedContent)).toBe(true);
+    expect(pinnedParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl, detail: "low" }, name: "screen.png", mimeType: "image/png", size: 128 });
+    expect(pinnedParts.find((part) => part.type === "text")?.text).toContain("Please inspect this screenshot.");
+    expect(pinnedParts.find((part) => part.type === "text")?.text.length).toBeLessThanOrEqual(80);
+  });
 });
