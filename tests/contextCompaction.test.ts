@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compactSessionMessages } from "../src/agent/contextCompaction.js";
+import { compactMessagesForModelRequest, compactSessionMessages } from "../src/agent/contextCompaction.js";
 import type { ChatMessage } from "../src/agent/types.js";
 
 describe("context compaction", () => {
@@ -76,5 +76,38 @@ describe("context compaction", () => {
       content: "Local tool result from read_file (call_1):\nREADME contents"
     });
     expect(result.messages[3]).toEqual({ role: "assistant", content: "Recent answer" });
+  });
+
+  it("compacts oversized model requests even when the recent message window is small", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "inspect the browser" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_browser", name: "browser_snapshot", arguments: { mode: "visible", maxLength: 200000 } }]
+      },
+      {
+        role: "tool",
+        toolCallId: "call_browser",
+        name: "browser_snapshot",
+        content: "x".repeat(30_000)
+      }
+    ];
+
+    const result = compactMessagesForModelRequest(messages, {
+      tokenLimit: 100,
+      recentMessageCount: 8,
+      recentEntryCharacterLimit: 200,
+      now: new Date("2026-06-16T00:00:00.000Z")
+    });
+
+    expect(result.compacted).toBe(true);
+    expect(result.compactedMessageCount).toBe(0);
+    expect(result.estimatedTokensBefore).toBeGreaterThan(result.estimatedTokensAfter ?? 0);
+    expect(result.messages[1]?.role).toBe("system");
+    expect(String(result.messages[1]?.content)).toContain("Context compacted locally");
+    expect(String(result.messages.at(-1)?.content)).toContain("Local tool result from browser_snapshot");
+    expect(String(result.messages.at(-1)?.content).length).toBeLessThan(260);
   });
 });

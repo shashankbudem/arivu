@@ -300,6 +300,12 @@ Decision: serialize assistant tool-call history with no natural-language text as
 
 Reason: some OpenAI-compatible endpoints reject empty assistant message content even when the message carries tool calls, and stricter models such as `diffusiongemma-26b-a4b-it` can also reject plain blank assistant history on follow-up prompts. Using `null` matches the common tool-call payload shape, omitting blank no-tool assistant messages removes context-free history, and the fallback path keeps existing tool sessions recoverable by converting tool history into plain-text transcript entries.
 
+## 2026-07-07: Request-time auto compaction
+
+Decision: compact oversized outbound model requests transiently before provider calls, and retry context-length provider failures once with a more aggressive request-only compaction profile.
+
+Reason: a failed run can roll back the visible saved transcript while the in-flight tool/browser transcript sent to the model is still much larger than the saved chat appears. Request-only compaction protects those active runs from context-window failures without rewriting user-visible history or requiring the manual `Compact context` action.
+
 ## 2026-06-16: Failed prompt persistence and local context compaction
 
 Decision: keep failed desktop user prompts visible in renderer state with Retry/Edit/Copy controls, and add a desktop compact-context action that summarizes older saved messages locally instead of asking the model to summarize.

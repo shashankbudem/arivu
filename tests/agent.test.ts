@@ -578,6 +578,64 @@ describe("agent", () => {
     expect(session.messages).toEqual(originalMessages);
   });
 
+  it("auto-compacts oversized model requests without rewriting saved chat history", async () => {
+    const session = createTestSession();
+    const oversizedSnapshot = "x".repeat(260_000);
+    session.messages.push(
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_browser", name: "browser_snapshot", arguments: { mode: "visible", maxLength: 200000 } }]
+      },
+      {
+        role: "tool",
+        toolCallId: "call_browser",
+        name: "browser_snapshot",
+        content: oversizedSnapshot
+      }
+    );
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "The browser context was handled."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    await agent.run("continue with the browser state");
+
+    const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(requestText).toContain("Context compacted locally");
+    expect(requestText).toContain("Local tool result from browser_snapshot");
+    expect(requestText).not.toContain("x".repeat(10_000));
+    expect(JSON.stringify(client.requests[0]?.messages).length).toBeLessThan(80_000);
+    expect(session.messages.some((message) => message.role === "tool" && message.content === oversizedSnapshot)).toBe(true);
+  });
+
+  it("retries context-length failures with aggressive request compaction", async () => {
+    const client = new ContextLengthRetryClient();
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session: createTestSession()
+    });
+
+    const result = await agent.run("summarize");
+
+    expect(result.output).toBe("Recovered after compaction.");
+    expect(client.requests).toHaveLength(2);
+    expect(client.requests[0]?.messages.map((message) => String(message.content)).join("\n")).not.toContain("Context compacted locally");
+    expect(client.requests[1]?.messages.map((message) => String(message.content)).join("\n")).toContain("Context compacted locally");
+  });
+
   it("saves a visible assistant message when max tool depth is reached", async () => {
     const client = new ScriptedClient(
       Array.from({ length: 20 }, (_entry, index) => ({
@@ -616,6 +674,25 @@ class ScriptedClient implements ChatClient {
       throw new Error("No scripted response.");
     }
     return response;
+  }
+}
+
+class ContextLengthRetryClient implements ChatClient {
+  readonly requests: ChatRequest[] = [];
+
+  async complete(request: ChatRequest): Promise<ChatResponse> {
+    this.requests.push(request);
+    if (this.requests.length === 1) {
+      throw new Error(
+        'Model request failed (400): {"error":{"message":"This model\'s maximum context length is 196608 tokens. However, your messages resulted in 238262 tokens. Please reduce the length of the messages.","type":"Bad Request","code":400}}'
+      );
+    }
+    return {
+      message: {
+        role: "assistant",
+        content: "Recovered after compaction."
+      }
+    };
   }
 }
 

@@ -2,6 +2,10 @@ import { chatContentToText } from "./content.js";
 import type { ChatMessage } from "./types.js";
 
 export const COMPACT_RECENT_MESSAGE_COUNT = 8;
+export const AUTO_COMPACT_REQUEST_TOKEN_LIMIT = 48_000;
+export const AUTO_COMPACT_REQUEST_RECENT_MESSAGE_COUNT = 8;
+export const AUTO_COMPACT_REQUEST_ENTRY_CHARACTER_LIMIT = 700;
+export const AUTO_COMPACT_REQUEST_RECENT_CHARACTER_LIMIT = 6_000;
 
 const COMPACTION_PREFIX = "Context compacted locally to reduce future model requests.";
 const DEFAULT_ENTRY_LIMIT = 700;
@@ -9,7 +13,13 @@ const DEFAULT_ENTRY_LIMIT = 700;
 type CompactOptions = {
   recentMessageCount?: number;
   entryCharacterLimit?: number;
+  recentEntryCharacterLimit?: number;
+  force?: boolean;
   now?: Date;
+};
+
+type ModelRequestCompactOptions = CompactOptions & {
+  tokenLimit?: number;
 };
 
 export type ContextCompactionResult = {
@@ -17,16 +27,19 @@ export type ContextCompactionResult = {
   compacted: boolean;
   compactedMessageCount: number;
   remainingMessageCount: number;
+  estimatedTokensBefore?: number;
+  estimatedTokensAfter?: number;
 };
 
 export function compactSessionMessages(messages: ChatMessage[], options: CompactOptions = {}): ContextCompactionResult {
   const recentMessageCount = options.recentMessageCount ?? COMPACT_RECENT_MESSAGE_COUNT;
   const entryCharacterLimit = options.entryCharacterLimit ?? DEFAULT_ENTRY_LIMIT;
+  const recentEntryCharacterLimit = options.recentEntryCharacterLimit;
   const systemMessages = messages.filter((message) => message.role === "system" && !isCompactionMessage(message));
   const previousCompactions = messages.filter(isCompactionMessage);
   const nonSystemMessages = messages.filter((message) => message.role !== "system");
 
-  if (nonSystemMessages.length <= recentMessageCount) {
+  if (!options.force && nonSystemMessages.length <= recentMessageCount) {
     return {
       messages,
       compacted: false,
@@ -36,7 +49,7 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
   }
 
   const olderMessages = nonSystemMessages.slice(0, -recentMessageCount);
-  const recentMessages = nonSystemMessages.slice(-recentMessageCount).map(toPlainTranscriptMessage);
+  const recentMessages = nonSystemMessages.slice(-recentMessageCount).map((message) => toPlainTranscriptMessage(message, recentEntryCharacterLimit));
   const compactedAt = (options.now ?? new Date()).toISOString();
   const compactedMessage: ChatMessage = {
     role: "system",
@@ -55,6 +68,39 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
     compactedMessageCount: olderMessages.length,
     remainingMessageCount: recentMessages.length
   };
+}
+
+export function compactMessagesForModelRequest(messages: ChatMessage[], options: ModelRequestCompactOptions = {}): ContextCompactionResult {
+  const tokenLimit = options.tokenLimit ?? AUTO_COMPACT_REQUEST_TOKEN_LIMIT;
+  const estimatedTokensBefore = estimateMessageTokens(messages);
+  if (!options.force && estimatedTokensBefore <= tokenLimit) {
+    return {
+      messages,
+      compacted: false,
+      compactedMessageCount: 0,
+      remainingMessageCount: messages.filter((message) => message.role !== "system").length,
+      estimatedTokensBefore,
+      estimatedTokensAfter: estimatedTokensBefore
+    };
+  }
+
+  const compacted = compactSessionMessages(messages, {
+    recentMessageCount: options.recentMessageCount ?? AUTO_COMPACT_REQUEST_RECENT_MESSAGE_COUNT,
+    entryCharacterLimit: options.entryCharacterLimit ?? AUTO_COMPACT_REQUEST_ENTRY_CHARACTER_LIMIT,
+    recentEntryCharacterLimit: options.recentEntryCharacterLimit ?? AUTO_COMPACT_REQUEST_RECENT_CHARACTER_LIMIT,
+    force: true,
+    now: options.now
+  });
+  return {
+    ...compacted,
+    estimatedTokensBefore,
+    estimatedTokensAfter: estimateMessageTokens(compacted.messages)
+  };
+}
+
+export function estimateMessageTokens(messages: ChatMessage[]) {
+  const transcript = messages.map((message) => `${message.role}: ${transcriptContent(message)}`).join("\n\n");
+  return Math.ceil(transcript.length / 4);
 }
 
 function isCompactionMessage(message: ChatMessage) {
@@ -93,26 +139,25 @@ function messageLabel(message: ChatMessage) {
   return "User";
 }
 
-function toPlainTranscriptMessage(message: ChatMessage): ChatMessage {
+function toPlainTranscriptMessage(message: ChatMessage, entryCharacterLimit?: number): ChatMessage {
+  const content = truncateTranscriptContent(transcriptContent(message), entryCharacterLimit);
   if (message.role === "tool") {
-    const label = message.name ? ` from ${message.name}` : "";
-    const id = message.toolCallId ? ` (${message.toolCallId})` : "";
     return {
       role: "user",
-      content: `Local tool result${label}${id}:\n${chatContentToText(message.content)}`
+      content
     };
   }
 
   if (message.toolCalls?.length) {
     return {
       role: message.role,
-      content: transcriptContent(message)
+      content
     };
   }
 
   return {
     role: message.role,
-    content: chatContentToText(message.content)
+    content
   };
 }
 
@@ -141,4 +186,11 @@ function formatToolArguments(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+function truncateTranscriptContent(content: string, entryCharacterLimit: number | undefined) {
+  if (!entryCharacterLimit || content.length <= entryCharacterLimit) {
+    return content;
+  }
+  return `${content.slice(0, Math.max(0, entryCharacterLimit - 1)).trimEnd()}...`;
 }

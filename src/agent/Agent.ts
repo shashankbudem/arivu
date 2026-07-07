@@ -4,6 +4,7 @@ import { createToolRegistry } from "../tools/registry.js";
 import type { BrowserToolController } from "../tools/browserControl.js";
 import { detectWorkspace } from "../workspace.js";
 import { chatContentToText, trimChatContent, type ChatContent } from "./content.js";
+import { compactMessagesForModelRequest } from "./contextCompaction.js";
 import { discoverSkills, readSkill, skillsSystemMessage } from "./skills.js";
 import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCall } from "./types.js";
 import type { AppConfig } from "../config.js";
@@ -211,6 +212,18 @@ export class Agent {
   }
 
   private async complete(request: ChatRequest, runOptions: AgentRunOptions): Promise<ChatResponse> {
+    const compactedRequest = compactChatRequestForModel(request);
+    try {
+      return await this.completeOnce(compactedRequest, runOptions);
+    } catch (error) {
+      if (!isContextLengthError(error)) {
+        throw error;
+      }
+      return this.completeOnce(compactChatRequestForModel(request, "aggressive"), runOptions);
+    }
+  }
+
+  private async completeOnce(request: ChatRequest, runOptions: AgentRunOptions): Promise<ChatResponse> {
     if (!this.options.client.stream) {
       return this.options.client.complete(request);
     }
@@ -538,6 +551,34 @@ function webSearchInstruction(webSearchCalls: number): ChatMessage | undefined {
       "Do not call web_search again for this request."
     ].join("\n")
   };
+}
+
+function compactChatRequestForModel(request: ChatRequest, mode: "default" | "aggressive" = "default"): ChatRequest {
+  const result = compactMessagesForModelRequest(
+    request.messages,
+    mode === "aggressive"
+      ? {
+          force: true,
+          recentMessageCount: 4,
+          entryCharacterLimit: 350,
+          recentEntryCharacterLimit: 3_000
+        }
+      : undefined
+  );
+  if (!result.compacted) {
+    return request;
+  }
+  return {
+    ...request,
+    messages: result.messages
+  };
+}
+
+function isContextLengthError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(maximum context length|context length|reduce the length of the messages|too many tokens|exceeded[^.]*token|messages resulted in \d+ tokens)/i.test(
+    message
+  );
 }
 
 function allowedToolCalls(toolCalls: ChatMessage["toolCalls"], availableTools: ChatRequest["tools"]) {
