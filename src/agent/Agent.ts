@@ -561,7 +561,8 @@ function compactChatRequestForModel(request: ChatRequest, mode: "default" | "agg
           force: true,
           recentMessageCount: 4,
           entryCharacterLimit: 350,
-          recentEntryCharacterLimit: 3_000
+          recentEntryCharacterLimit: 3_000,
+          activeUserMessageCharacterLimit: 16_000
         }
       : undefined
   );

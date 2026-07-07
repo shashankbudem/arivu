@@ -6,6 +6,7 @@ export const AUTO_COMPACT_REQUEST_TOKEN_LIMIT = 48_000;
 export const AUTO_COMPACT_REQUEST_RECENT_MESSAGE_COUNT = 8;
 export const AUTO_COMPACT_REQUEST_ENTRY_CHARACTER_LIMIT = 700;
 export const AUTO_COMPACT_REQUEST_RECENT_CHARACTER_LIMIT = 6_000;
+export const AUTO_COMPACT_REQUEST_ACTIVE_USER_CHARACTER_LIMIT = 32_000;
 
 const COMPACTION_PREFIX = "Context compacted locally to reduce future model requests.";
 const DEFAULT_ENTRY_LIMIT = 700;
@@ -14,6 +15,8 @@ type CompactOptions = {
   recentMessageCount?: number;
   entryCharacterLimit?: number;
   recentEntryCharacterLimit?: number;
+  activeUserMessageCharacterLimit?: number;
+  preserveLatestUserMessage?: boolean;
   force?: boolean;
   now?: Date;
 };
@@ -35,6 +38,8 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
   const recentMessageCount = options.recentMessageCount ?? COMPACT_RECENT_MESSAGE_COUNT;
   const entryCharacterLimit = options.entryCharacterLimit ?? DEFAULT_ENTRY_LIMIT;
   const recentEntryCharacterLimit = options.recentEntryCharacterLimit;
+  const preserveLatestUserMessage = options.preserveLatestUserMessage ?? false;
+  const activeUserMessageCharacterLimit = options.activeUserMessageCharacterLimit ?? recentEntryCharacterLimit;
   const systemMessages = messages.filter((message) => message.role === "system" && !isCompactionMessage(message));
   const previousCompactions = messages.filter(isCompactionMessage);
   const nonSystemMessages = messages.filter((message) => message.role !== "system");
@@ -48,8 +53,20 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
     };
   }
 
-  const olderMessages = nonSystemMessages.slice(0, -recentMessageCount);
-  const recentMessages = nonSystemMessages.slice(-recentMessageCount).map((message) => toPlainTranscriptMessage(message, recentEntryCharacterLimit));
+  const recentStart = Math.max(0, nonSystemMessages.length - recentMessageCount);
+  const latestUserMessageIndex = preserveLatestUserMessage ? latestUserIndex(nonSystemMessages) : -1;
+  const latestUserMessage = latestUserMessageIndex >= 0 ? nonSystemMessages[latestUserMessageIndex] : undefined;
+  const pinnedLatestUser =
+    latestUserMessage && latestUserMessageIndex < recentStart
+      ? [toPlainTranscriptMessage(latestUserMessage, activeUserMessageCharacterLimit)]
+      : [];
+  const olderMessages = nonSystemMessages.filter((_message, index) => index < recentStart && index !== latestUserMessageIndex);
+  const recentMessages = nonSystemMessages.slice(recentStart).map((message, index) =>
+    toPlainTranscriptMessage(
+      message,
+      recentStart + index === latestUserMessageIndex ? activeUserMessageCharacterLimit : recentEntryCharacterLimit
+    )
+  );
   const compactedAt = (options.now ?? new Date()).toISOString();
   const compactedMessage: ChatMessage = {
     role: "system",
@@ -63,10 +80,10 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
   };
 
   return {
-    messages: [...systemMessages, compactedMessage, ...recentMessages],
+    messages: [...systemMessages, compactedMessage, ...pinnedLatestUser, ...recentMessages],
     compacted: true,
     compactedMessageCount: olderMessages.length,
-    remainingMessageCount: recentMessages.length
+    remainingMessageCount: pinnedLatestUser.length + recentMessages.length
   };
 }
 
@@ -88,6 +105,8 @@ export function compactMessagesForModelRequest(messages: ChatMessage[], options:
     recentMessageCount: options.recentMessageCount ?? AUTO_COMPACT_REQUEST_RECENT_MESSAGE_COUNT,
     entryCharacterLimit: options.entryCharacterLimit ?? AUTO_COMPACT_REQUEST_ENTRY_CHARACTER_LIMIT,
     recentEntryCharacterLimit: options.recentEntryCharacterLimit ?? AUTO_COMPACT_REQUEST_RECENT_CHARACTER_LIMIT,
+    activeUserMessageCharacterLimit: options.activeUserMessageCharacterLimit ?? AUTO_COMPACT_REQUEST_ACTIVE_USER_CHARACTER_LIMIT,
+    preserveLatestUserMessage: options.preserveLatestUserMessage ?? true,
     force: true,
     now: options.now
   });
@@ -137,6 +156,15 @@ function messageLabel(message: ChatMessage) {
     return message.name ? `Tool ${message.name}` : "Tool";
   }
   return "User";
+}
+
+function latestUserIndex(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function toPlainTranscriptMessage(message: ChatMessage, entryCharacterLimit?: number): ChatMessage {

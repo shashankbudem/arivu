@@ -302,9 +302,9 @@ Reason: some OpenAI-compatible endpoints reject empty assistant message content 
 
 ## 2026-07-07: Request-time auto compaction
 
-Decision: compact oversized outbound model requests transiently before provider calls, and retry context-length provider failures once with a more aggressive request-only compaction profile.
+Decision: compact oversized outbound model requests transiently before provider calls, pin the latest user request separately from trimmed tool/browser output, and retry context-length provider failures once with a more aggressive request-only compaction profile.
 
-Reason: a failed run can roll back the visible saved transcript while the in-flight tool/browser transcript sent to the model is still much larger than the saved chat appears. Request-only compaction protects those active runs from context-window failures without rewriting user-visible history or requiring the manual `Compact context` action.
+Reason: a failed run can roll back the visible saved transcript while the in-flight tool/browser transcript sent to the model is still much larger than the saved chat appears. Request-only compaction protects those active runs from context-window failures without rewriting user-visible history or requiring the manual `Compact context` action, and latest-request pinning prevents a long todo prompt from being reduced to a short older-message summary after many tool calls.
 
 ## 2026-06-16: Failed prompt persistence and local context compaction
 

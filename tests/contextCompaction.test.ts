@@ -110,4 +110,46 @@ describe("context compaction", () => {
     expect(String(result.messages.at(-1)?.content)).toContain("Local tool result from browser_snapshot");
     expect(String(result.messages.at(-1)?.content).length).toBeLessThan(260);
   });
+
+  it("preserves the latest user request when later tool output pushes it out of the recent window", () => {
+    const longTodoPrompt = Array.from({ length: 120 }, (_entry, index) => `TODO-${index + 1}: implement requirement ${index + 1}`).join("\n");
+    const messages: ChatMessage[] = [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: longTodoPrompt }
+    ];
+    for (let index = 0; index < 8; index += 1) {
+      messages.push(
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: `call_${index}`, name: "browser_snapshot", arguments: { mode: "visible", maxLength: 200000 } }]
+        },
+        {
+          role: "tool",
+          toolCallId: `call_${index}`,
+          name: "browser_snapshot",
+          content: `snapshot ${index}\n${"x".repeat(20_000)}`
+        }
+      );
+    }
+
+    const result = compactMessagesForModelRequest(messages, {
+      tokenLimit: 100,
+      recentMessageCount: 4,
+      recentEntryCharacterLimit: 200,
+      activeUserMessageCharacterLimit: 10_000,
+      now: new Date("2026-06-16T00:00:00.000Z")
+    });
+    const requestText = result.messages.map((message) => String(message.content)).join("\n");
+    const pinnedUserIndex = result.messages.findIndex((message) => message.role === "user" && String(message.content).includes("TODO-120"));
+    const firstRecentToolIndex = result.messages.findIndex((message) => String(message.content).includes("snapshot 6"));
+
+    expect(result.compacted).toBe(true);
+    expect(requestText).toContain("TODO-1: implement requirement 1");
+    expect(requestText).toContain("TODO-120: implement requirement 120");
+    expect(String(result.messages[1]?.content)).not.toContain("TODO-120");
+    expect(pinnedUserIndex).toBeGreaterThan(1);
+    expect(firstRecentToolIndex).toBeGreaterThan(pinnedUserIndex);
+    expect(requestText).not.toContain("x".repeat(10_000));
+  });
 });
