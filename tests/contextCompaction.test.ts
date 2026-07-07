@@ -152,4 +152,42 @@ describe("context compaction", () => {
     expect(firstRecentToolIndex).toBeGreaterThan(pinnedUserIndex);
     expect(requestText).not.toContain("x".repeat(10_000));
   });
+
+  it("does not pin synthetic user messages created from retained tool results", () => {
+    const realPrompt = "Please finish the ServiceNow todo list.\nKEEP-ME";
+    const messages: ChatMessage[] = [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: realPrompt },
+      { role: "assistant", content: "I will inspect the portal." },
+      { role: "user", content: `Local tool result from browser_snapshot (call_old):\n${"tool-result ".repeat(400)}` }
+    ];
+    for (let index = 0; index < 6; index += 1) {
+      messages.push(
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: `call_more_${index}`, name: "browser_snapshot", arguments: { mode: "visible" } }]
+        },
+        {
+          role: "tool",
+          toolCallId: `call_more_${index}`,
+          name: "browser_snapshot",
+          content: `recent snapshot ${index}\n${"x".repeat(20_000)}`
+        }
+      );
+    }
+
+    const result = compactMessagesForModelRequest(messages, {
+      tokenLimit: 100,
+      recentMessageCount: 4,
+      recentEntryCharacterLimit: 200,
+      activeUserMessageCharacterLimit: 4_000,
+      now: new Date("2026-06-16T00:00:00.000Z")
+    });
+    const pinnedMessages = result.messages.slice(2, -4).map((message) => String(message.content));
+
+    expect(result.compacted).toBe(true);
+    expect(pinnedMessages.some((content) => content.includes("KEEP-ME"))).toBe(true);
+    expect(pinnedMessages.some((content) => content.startsWith("Local tool result"))).toBe(false);
+  });
 });

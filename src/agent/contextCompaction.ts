@@ -160,11 +160,17 @@ function messageLabel(message: ChatMessage) {
 
 function latestUserIndex(messages: ChatMessage[]) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "user") {
+    const message = messages[index];
+    if (message?.role === "user" && isPinnableUserMessage(message)) {
       return index;
     }
   }
   return -1;
+}
+
+function isPinnableUserMessage(message: ChatMessage) {
+  const content = chatContentToText(message.content).trimStart();
+  return !content.startsWith("Local tool result");
 }
 
 function toPlainTranscriptMessage(message: ChatMessage, entryCharacterLimit?: number): ChatMessage {
