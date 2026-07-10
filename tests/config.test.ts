@@ -189,26 +189,29 @@ describe("config", () => {
   });
 
   it("persists provider capability flags", async () => {
-    await writeFile(configPath(), `${JSON.stringify({
-      toolCalling: "disabled",
-      imageInput: "enabled",
-      providers: [
-        {
-          id: "plain",
-          name: "Plain Chat",
-          baseUrl: "https://api.example.test/v1",
-          model: "plain-model",
-          toolCalling: "disabled",
-          imageInput: "disabled"
-        },
-        {
-          id: "legacy-default",
-          name: "Legacy Default",
-          baseUrl: "https://legacy.example.test/v1",
-          model: "legacy-model"
-        }
-      ]
-    })}\n`);
+    await writeFile(
+      configPath(),
+      `${JSON.stringify({
+        toolCalling: "disabled",
+        imageInput: "enabled",
+        providers: [
+          {
+            id: "plain",
+            name: "Plain Chat",
+            baseUrl: "https://api.example.test/v1",
+            model: "plain-model",
+            toolCalling: "disabled",
+            imageInput: "disabled"
+          },
+          {
+            id: "legacy-default",
+            name: "Legacy Default",
+            baseUrl: "https://legacy.example.test/v1",
+            model: "legacy-model"
+          }
+        ]
+      })}\n`
+    );
 
     const loaded = await loadConfig({ includeEnv: false });
 
@@ -293,16 +296,21 @@ describe("config", () => {
   it("saves workspace capability policy overrides by absolute workspace root", async () => {
     const workspaceRoot = path.join(tempDir, "repo");
     await saveConfig({
-      workspacePolicies: updateWorkspacePolicy({}, workspaceRoot, {
-        read_repo: "prompt",
-        write_workspace: "prompt",
-        browser_control: "deny"
-      }, {
-        blockedPathPrefixes: [".env", "secrets", ".env"],
-        allowedNetworkDomains: ["https://api.tavily.com/search", "BING.com"],
-        allowedMcpServers: ["github", "github", "chrome-devtools"],
-        allowedBrowserTargetClasses: ["public", "background", "public"]
-      })
+      workspacePolicies: updateWorkspacePolicy(
+        {},
+        workspaceRoot,
+        {
+          read_repo: "prompt",
+          write_workspace: "prompt",
+          browser_control: "deny"
+        },
+        {
+          blockedPathPrefixes: [".env", "secrets", ".env"],
+          allowedNetworkDomains: ["https://api.tavily.com/search", "BING.com"],
+          allowedMcpServers: ["github", "github", "chrome-devtools"],
+          allowedBrowserTargetClasses: ["public", "background", "public"]
+        }
+      )
     });
 
     const loaded = await loadConfig({ includeEnv: false });

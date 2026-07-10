@@ -4,15 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { CapabilityPolicyOverrideEffect } from "./permissions/capabilityPolicy.js";
-import {
-  normalizeWorkspaceScopePolicyRules,
-  scopePolicyHasRules,
-  type WorkspaceScopePolicyRules
-} from "./permissions/scopePolicy.js";
-import {
-  normalizeWorkspacePolicyProfileName,
-  normalizeWorkspacePolicyProfiles
-} from "./permissions/workspacePolicyProfiles.js";
+import { normalizeWorkspaceScopePolicyRules, scopePolicyHasRules, type WorkspaceScopePolicyRules } from "./permissions/scopePolicy.js";
+import { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
 
 export { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
 
@@ -47,6 +40,8 @@ const McpServerSchema = z.object({
 const ProviderToolCallingSchema = z.enum(["auto", "enabled", "disabled"]);
 const ProviderImageInputSchema = z.enum(["auto", "enabled", "disabled"]);
 
+const ContextWindowTokensSchema = z.number().int().min(1_000).max(10_000_000);
+
 const LlmProviderSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -54,7 +49,17 @@ const LlmProviderSchema = z.object({
   model: z.string().min(1),
   toolCalling: ProviderToolCallingSchema.default("auto"),
   imageInput: ProviderImageInputSchema.default("auto"),
+  contextWindowTokens: ContextWindowTokensSchema.optional(),
   apiKey: z.string().optional()
+});
+
+const BrowserTaskModelSchema = z.object({
+  providerId: z.string().min(1).optional(),
+  baseUrl: z.string().url().optional(),
+  model: z.string().min(1).optional(),
+  apiKey: z.string().optional(),
+  maxSteps: z.number().int().min(1).max(200).optional(),
+  stepDelayMs: z.number().int().min(0).max(30_000).optional()
 });
 
 const WorkspaceCapabilityPolicySchema = z.object({
@@ -69,8 +74,11 @@ const ConfigSchema = z.object({
   model: z.string().default("gpt-4.1"),
   toolCalling: ProviderToolCallingSchema.default("auto"),
   imageInput: ProviderImageInputSchema.default("auto"),
+  requestTimeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+  contextWindowTokens: ContextWindowTokensSchema.optional(),
   activeProviderId: z.string().optional(),
   providers: z.array(LlmProviderSchema).default([]),
+  browserTaskModel: BrowserTaskModelSchema.optional(),
   trustMode: TrustModeSchema.default("ask"),
   mcpServers: z.record(McpServerSchema).default({}),
   workspacePolicies: z.record(WorkspaceCapabilityPolicySchema).default({}),
@@ -79,6 +87,7 @@ const ConfigSchema = z.object({
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
 export type LlmProviderProfile = z.infer<typeof LlmProviderSchema>;
+export type BrowserTaskModelConfigProfile = z.infer<typeof BrowserTaskModelSchema>;
 export type ProviderToolCallingMode = z.infer<typeof ProviderToolCallingSchema>;
 export type ProviderImageInputMode = z.infer<typeof ProviderImageInputSchema>;
 export type ProviderCapabilityName = "toolCalling" | "imageInput";
@@ -161,7 +170,10 @@ export function appDataDir() {
       path.join(os.homedir(), "Library", "Application Support", LEGACY_APP_SLUG)
     );
   }
-  return migrateLegacyAppDir(path.join(os.homedir(), ".local", "share", APP_SLUG), path.join(os.homedir(), ".local", "share", LEGACY_APP_SLUG));
+  return migrateLegacyAppDir(
+    path.join(os.homedir(), ".local", "share", APP_SLUG),
+    path.join(os.homedir(), ".local", "share", LEGACY_APP_SLUG)
+  );
 }
 
 export function redactConfigForDisplay(config: Partial<AppConfig>): Partial<AppConfig> {
@@ -173,6 +185,9 @@ export function redactConfigForDisplay(config: Partial<AppConfig>): Partial<AppC
       ...provider,
       apiKey: redactSecret(provider.apiKey)
     })),
+    browserTaskModel: config.browserTaskModel
+      ? { ...config.browserTaskModel, apiKey: redactSecret(config.browserTaskModel.apiKey) }
+      : config.browserTaskModel,
     mcpServers: config.mcpServers ? redactMcpServers(config.mcpServers) : config.mcpServers
   };
 }
@@ -250,7 +265,10 @@ export function mergeRedactedMcpServers(next: AppConfig["mcpServers"], existing:
         {
           ...server,
           env: Object.fromEntries(
-            Object.entries(server.env ?? {}).map(([key, value]) => [key, value === REDACTED_SECRET_VALUE ? (existingEnv[key] ?? value) : value])
+            Object.entries(server.env ?? {}).map(([key, value]) => [
+              key,
+              value === REDACTED_SECRET_VALUE ? (existingEnv[key] ?? value) : value
+            ])
           )
         }
       ];
