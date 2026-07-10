@@ -87,6 +87,7 @@ import {
   loadConfig,
   mergeRedactedMcpServers,
   redactMcpServers,
+  resolveModelListEndpoint,
   saveConfig,
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot,
@@ -1274,8 +1275,11 @@ class DesktopController {
 
   async listModels(patch: ConfigPatch = {}) {
     const config = await this.effectiveConfig();
-    const apiKey = patch.apiKey?.trim() || config.apiKey;
-    const baseUrl = patch.baseUrl?.trim() || config.baseUrl;
+    const { apiKey, baseUrl } = resolveModelListEndpoint(config, {
+      providerId: patch.activeProviderId,
+      baseUrl: patch.baseUrl,
+      apiKey: patch.apiKey
+    });
     if (!baseUrl) {
       throw new Error("Enter a provider base URL before loading models.");
     }
@@ -3241,7 +3245,7 @@ async function captureSmokeScreenshot(window: BrowserWindow | undefined) {
 
 async function prepareDesktopSmokeView(window: BrowserWindow) {
   const smokeView = appEnv("DESKTOP_SMOKE_VIEW");
-  if (smokeView !== "settings") {
+  if (smokeView !== "settings" && smokeView !== "browser-task-model") {
     return;
   }
   await window.webContents.executeJavaScript(`document.querySelector('button[aria-label="Settings"]')?.click()`, true);
@@ -3255,6 +3259,12 @@ async function prepareDesktopSmokeView(window: BrowserWindow) {
         `document.querySelector(".policy-settings-section")?.scrollIntoView({ block: "start" })`,
         true
       );
+      if (smokeView === "browser-task-model") {
+        await window.webContents.executeJavaScript(
+          `document.querySelector('button[aria-label^="Choose browser task model"]')?.click()`,
+          true
+        );
+      }
       await new Promise((resolve) => setTimeout(resolve, 350));
       return;
     }

@@ -88,6 +88,27 @@ const ConfigSchema = z.object({
 export type AppConfig = z.infer<typeof ConfigSchema>;
 export type LlmProviderProfile = z.infer<typeof LlmProviderSchema>;
 export type BrowserTaskModelConfigProfile = z.infer<typeof BrowserTaskModelSchema>;
+
+export function resolveModelListEndpoint(
+  config: AppConfig,
+  selection: { providerId?: string; baseUrl?: string; apiKey?: string }
+): { baseUrl: string; apiKey?: string } {
+  const requestedProvider = selection.providerId ? config.providers.find((provider) => provider.id === selection.providerId) : undefined;
+  const requestedProviderUsesActiveSecret = Boolean(
+    requestedProvider &&
+    (requestedProvider.id === config.activeProviderId || (!config.activeProviderId && requestedProvider.baseUrl === config.baseUrl))
+  );
+  const unknownProviderUsesActiveEndpoint = Boolean(
+    selection.providerId && !requestedProvider && selection.baseUrl?.trim() === config.baseUrl
+  );
+  return {
+    baseUrl: selection.baseUrl?.trim() || requestedProvider?.baseUrl || config.baseUrl,
+    apiKey:
+      selection.apiKey?.trim() ||
+      requestedProvider?.apiKey ||
+      (!selection.providerId || requestedProviderUsesActiveSecret || unknownProviderUsesActiveEndpoint ? config.apiKey : undefined)
+  };
+}
 export type ProviderToolCallingMode = z.infer<typeof ProviderToolCallingSchema>;
 export type ProviderImageInputMode = z.infer<typeof ProviderImageInputSchema>;
 export type ProviderCapabilityName = "toolCalling" | "imageInput";

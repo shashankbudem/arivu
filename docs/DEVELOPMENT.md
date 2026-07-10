@@ -243,6 +243,7 @@ Desktop workflows to check manually after UI changes:
 - `Compact context` summarizes older saved messages locally, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.
 - Browser tools appear in the Tools drawer in desktop mode. Verify `browser_state`, `browser_select_tab`, `browser_open`, `browser_snapshot`, `browser_console`, `browser_screenshot`, `browser_click`, and `browser_type` are listed with hidden-browser status.
+- In Settings, choose a Browser task LLM provider and open the Browser task model picker. Confirm it loads models from that provider, excludes the chat-only `Auto` choice, supports search and manual model IDs, and the reset icon returns to the provider's default model.
 - The `Images` item in the prompt `+` menu opens a native image picker, attaches PNG/JPEG/WebP/GIF files, renders removable thumbnails, and sends those images with the next prompt.
 - The `Files` item in the prompt `+` menu opens a native picker rooted in the active workspace, attaches bounded text/code files, renders removable file chips, includes the file text in the composer token estimate, and sends the contents as quoted file context with the next prompt.
 - Pasting or dropping PNG/JPEG/WebP/GIF image data into the composer attaches thumbnails without inserting text.

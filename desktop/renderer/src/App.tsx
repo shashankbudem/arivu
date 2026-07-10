@@ -4201,12 +4201,18 @@ function ModelPickerDialog({
   currentModel,
   baseUrl,
   apiKey,
+  providerId,
+  includeAuto = true,
+  title = "Select model",
   onSelect,
   onClose
 }: {
   currentModel: string;
   baseUrl: string;
   apiKey?: string;
+  providerId?: string;
+  includeAuto?: boolean;
+  title?: string;
   onSelect: (model: string) => void;
   onClose: () => void;
 }) {
@@ -4222,7 +4228,13 @@ function ModelPickerDialog({
     void loadModels();
   }, []);
 
-  const options = useMemo(() => Array.from(new Set([AUTO_MODEL_VALUE, currentModel, ...models])).filter(Boolean), [currentModel, models]);
+  const options = useMemo(
+    () =>
+      Array.from(new Set([...(includeAuto ? [AUTO_MODEL_VALUE] : []), currentModel, ...models]))
+        .filter(Boolean)
+        .filter((model) => includeAuto || !isAutoModelId(model)),
+    [currentModel, includeAuto, models]
+  );
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return needle ? options.filter((model) => model.toLowerCase().includes(needle)) : options;
@@ -4243,6 +4255,7 @@ function ModelPickerDialog({
     setNotice(null);
     try {
       const result = await window.arivu.listModels({
+        activeProviderId: providerId,
         baseUrl,
         apiKey: apiKey?.trim() || undefined
       });
@@ -4260,13 +4273,13 @@ function ModelPickerDialog({
 
   return createPortal(
     <div className="modal-backdrop">
-      <section className="model-dialog" role="dialog" aria-modal="true" aria-label="Select model">
+      <section className="model-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <div className="model-dialog-header">
           <div className="approval-icon">
             <Cpu size={23} />
           </div>
           <div>
-            <h2>Select model</h2>
+            <h2>{title}</h2>
             <p>{baseUrl}</p>
           </div>
           <button className="icon-button compact-icon-button" type="button" onClick={onClose} aria-label="Close model picker">
@@ -6694,6 +6707,7 @@ function SettingsView({
   const [trustMode, setTrustMode] = useState<TrustMode>(state.config.trustMode);
   const [mcpServersText, setMcpServersText] = useState(() => JSON.stringify(state.config.mcpServers ?? {}, null, 2));
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [browserTaskModelDialogOpen, setBrowserTaskModelDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [doctorRunning, setDoctorRunning] = useState(false);
@@ -6732,6 +6746,12 @@ function SettingsView({
   const model = selectedProvider?.model ?? state.config.model;
   const apiKey = selectedProvider?.apiKey ?? "";
   const selectedProviderApiKeyPresent = Boolean(selectedProvider?.apiKeyPresent || apiKey.trim());
+  const browserTaskProvider =
+    (browserTaskProviderId ? providers.find((provider) => provider.id === browserTaskProviderId) : selectedProvider) ?? selectedProvider;
+  const browserTaskBaseUrl = browserTaskProvider?.baseUrl ?? baseUrl;
+  const browserTaskProviderModel = browserTaskProvider?.model ?? model;
+  const browserTaskEffectiveModel = browserTaskModelId.trim() || browserTaskProviderModel;
+  const browserTaskApiKey = browserTaskProvider?.apiKey ?? "";
 
   useEffect(() => {
     if (focusSection !== "skills") {
@@ -6773,6 +6793,10 @@ function SettingsView({
     const nextProviders = providers.filter((provider) => provider.id !== selectedProvider.id);
     setProviders(nextProviders);
     setActiveProviderId(nextProviders[0]?.id ?? "current");
+    if (browserTaskProviderId === selectedProvider.id) {
+      setBrowserTaskProviderId("");
+      setBrowserTaskModelId("");
+    }
   }
 
   async function save() {
@@ -7105,7 +7129,13 @@ function SettingsView({
         </label>
         <label>
           <span>Browser task LLM</span>
-          <select value={browserTaskProviderId} onChange={(event) => setBrowserTaskProviderId(event.target.value)}>
+          <select
+            value={browserTaskProviderId}
+            onChange={(event) => {
+              setBrowserTaskProviderId(event.target.value);
+              setBrowserTaskModelId("");
+            }}
+          >
             <option value="">Same as chat model</option>
             {providers.map((provider) => (
               <option key={provider.id} value={provider.id}>
@@ -7117,14 +7147,43 @@ function SettingsView({
             Provider the in-page browser_task agent uses for its own model calls. Defaults to the active chat model.
           </small>
         </label>
-        <label>
-          <span>Browser task model id</span>
+        <label className="browser-task-model-field">
+          <span>Browser task model</span>
+          <div className="browser-task-model-picker">
+            <button
+              className="model-dialog-trigger settings-model-trigger"
+              type="button"
+              onClick={() => setBrowserTaskModelDialogOpen(true)}
+              aria-label={`Choose browser task model. Current model: ${modelDisplayName(browserTaskEffectiveModel)}`}
+            >
+              <Cpu size={15} />
+              <span>
+                {browserTaskModelId.trim()
+                  ? modelDisplayName(browserTaskModelId)
+                  : `Provider default: ${modelDisplayName(browserTaskProviderModel)}`}
+              </span>
+              <Search size={13} />
+            </button>
+            {browserTaskModelId.trim() ? (
+              <button
+                className="icon-button compact-icon-button"
+                type="button"
+                onClick={() => setBrowserTaskModelId("")}
+                title="Use provider default model"
+                aria-label="Use provider default browser task model"
+              >
+                <RotateCcw size={14} />
+              </button>
+            ) : null}
+          </div>
           <input
             value={browserTaskModelId}
             onChange={(event) => setBrowserTaskModelId(event.target.value)}
-            placeholder="Provider default model"
+            placeholder="Or enter a model ID manually"
           />
-          <small className="field-note">Optional model override for browser_task. Pick a model with strong native tool calling.</small>
+          <small className="field-note">
+            Choose from the provider's models or enter an ID manually. Use a model with strong native tool calling.
+          </small>
         </label>
       </div>
 
@@ -7363,11 +7422,27 @@ function SettingsView({
           currentModel={model}
           baseUrl={baseUrl}
           apiKey={apiKey}
+          providerId={selectedProvider?.id}
           onSelect={(nextModel) => {
             updateSelectedProvider({ model: nextModel });
             setModelDialogOpen(false);
           }}
           onClose={() => setModelDialogOpen(false)}
+        />
+      ) : null}
+      {browserTaskModelDialogOpen ? (
+        <ModelPickerDialog
+          currentModel={browserTaskEffectiveModel}
+          baseUrl={browserTaskBaseUrl}
+          apiKey={browserTaskApiKey}
+          providerId={browserTaskProvider?.id}
+          includeAuto={false}
+          title="Select browser task model"
+          onSelect={(nextModel) => {
+            setBrowserTaskModelId(nextModel === browserTaskProviderModel ? "" : nextModel);
+            setBrowserTaskModelDialogOpen(false);
+          }}
+          onClose={() => setBrowserTaskModelDialogOpen(false)}
         />
       ) : null}
     </section>

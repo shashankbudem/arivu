@@ -13,11 +13,13 @@ import {
   normalizeWorkspacePolicyOverrides,
   normalizeWorkspacePolicyProfiles,
   redactConfigForDisplay,
+  resolveModelListEndpoint,
   saveConfig,
   updateWorkspacePolicy,
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot
 } from "../src/config.js";
+import type { AppConfig } from "../src/config.js";
 
 let tempDir: string;
 
@@ -87,6 +89,57 @@ describe("config", () => {
       baseUrl: "https://integrate.api.nvidia.com/v1",
       model: "saved-model",
       trustMode: "trusted"
+    });
+  });
+
+  it("uses the selected provider credentials when listing models", () => {
+    const config: AppConfig = {
+      baseUrl: "https://chat.example/v1",
+      model: "chat-model",
+      apiKey: "chat-secret",
+      toolCalling: "auto",
+      imageInput: "auto",
+      activeProviderId: "chat",
+      providers: [
+        {
+          id: "chat",
+          name: "Chat",
+          baseUrl: "https://chat.example/v1",
+          model: "chat-model",
+          toolCalling: "auto",
+          imageInput: "auto"
+        },
+        {
+          id: "browser",
+          name: "Browser",
+          baseUrl: "https://browser.example/v1",
+          model: "browser-model",
+          apiKey: "browser-secret",
+          toolCalling: "auto",
+          imageInput: "auto"
+        }
+      ],
+      trustMode: "ask",
+      mcpServers: {},
+      workspacePolicies: {},
+      workspacePolicyProfiles: {}
+    };
+
+    expect(resolveModelListEndpoint(config, { providerId: "browser" })).toEqual({
+      baseUrl: "https://browser.example/v1",
+      apiKey: "browser-secret"
+    });
+    expect(resolveModelListEndpoint(config, { providerId: "chat" })).toEqual({
+      baseUrl: "https://chat.example/v1",
+      apiKey: "chat-secret"
+    });
+    expect(resolveModelListEndpoint(config, { providerId: "new-provider", baseUrl: "https://new.example/v1" })).toEqual({
+      baseUrl: "https://new.example/v1",
+      apiKey: undefined
+    });
+    expect(resolveModelListEndpoint(config, { providerId: "current", baseUrl: "https://chat.example/v1" })).toEqual({
+      baseUrl: "https://chat.example/v1",
+      apiKey: "chat-secret"
     });
   });
 

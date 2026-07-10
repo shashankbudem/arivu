@@ -5007,6 +5007,24 @@ body.is-resizing .panel-resize-handle::after {
   gap: 10px;
 }
 
+.browser-task-model-picker {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.browser-task-model-picker .model-dialog-trigger {
+  flex: 1 1 auto;
+}
+
+.browser-task-model-picker .compact-icon-button {
+  flex: 0 0 42px;
+  height: 42px;
+  border-width: 1px;
+  border-radius: 7px;
+}
+
 .provider-picker {
   min-width: 0;
   display: grid;
