@@ -53,13 +53,25 @@ import {
   Server,
   Settings,
   Shield,
+  Square,
   Sun,
   TerminalSquare,
   Trash2,
   Wrench,
   X
 } from "lucide-react";
-import { parseApprovalMessage, type ApprovalView, type SideBySideDiff } from "./approvalParsing";
+import { approvalViewFromRequest, parseApprovalMessage, type ApprovalView, type SideBySideDiff } from "./approvalParsing";
+import {
+  basename,
+  capitalize,
+  clamp,
+  formatBytes,
+  formatDateTime,
+  formatDurationMs,
+  formatError,
+  formatNumber,
+  writeClipboardText
+} from "./format";
 import { estimateTokenCount, truncateTextToTokenBudget } from "./tokenBudget";
 import {
   buildReportRemediationPrompt,
@@ -89,10 +101,7 @@ import {
   workspacePolicyPresetMatches,
   type WorkspacePolicyPreset
 } from "../../../src/permissions/workspacePolicyPresets";
-import {
-  normalizeWorkspacePolicyProfileName,
-  normalizeWorkspacePolicyProfiles
-} from "../../../src/permissions/workspacePolicyProfiles";
+import { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "../../../src/permissions/workspacePolicyProfiles";
 import { WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH } from "../../../src/permissions/workspacePolicyBundles";
 import {
   parseWorkspacePolicyTransfer,
@@ -459,7 +468,7 @@ type TaskWorktreeActionOptions = {
   conflictPath?: string;
 };
 
-type SlashCommandId = "compact" | "session" | "tools" | "skills" | "files" | "browser" | "plan" | "loop" | "worktree";
+type SlashCommandId = "compact" | "summarize" | "session" | "tools" | "skills" | "files" | "browser" | "plan" | "loop" | "worktree";
 
 type SlashCommandDefinition = {
   id: SlashCommandId;
@@ -492,6 +501,13 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
     title: "Compact context",
     description: "Summarize older messages locally and keep the recent chat window.",
     keywords: ["context", "summarize", "trim"]
+  },
+  {
+    id: "summarize",
+    command: "summarize",
+    title: "Summarize context",
+    description: "Ask the model to summarize older messages, keeping recent turns verbatim.",
+    keywords: ["context", "compact", "model", "trim"]
   },
   {
     id: "session",
@@ -571,6 +587,7 @@ export function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [compactingContext, setCompactingContext] = useState(false);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(false);
   const [availableTools, setAvailableTools] = useState<ToolSummary[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [skillsRoot, setSkillsRoot] = useState("");
@@ -581,6 +598,7 @@ export function App() {
   const [worktreeContinuation, setWorktreeContinuation] = useState<WorktreeContinuation | null>(null);
   const [worktreePlanSource, setWorktreePlanSource] = useState<WorktreePlanSource | null>(null);
   const [worktreeActionBusy, setWorktreeActionBusy] = useState<string | null>(null);
+  const [undoBusyRunId, setUndoBusyRunId] = useState<string | null>(null);
   const [planReviewBusy, setPlanReviewBusy] = useState<string | null>(null);
   const [evidenceOpenBusy, setEvidenceOpenBusy] = useState<string | null>(null);
   const [watchedPullRequests, setWatchedPullRequests] = useState<Record<string, PullRequestWatch>>({});
@@ -809,7 +827,10 @@ export function App() {
     }
 
     const closePopover = (event: MouseEvent) => {
-      if (event.target instanceof Element && event.target.closest(".composer-tools-region, .composer-skills-region, .composer-menu-region")) {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(".composer-tools-region, .composer-skills-region, .composer-menu-region")
+      ) {
         return;
       }
       setToolsPopoverOpen(false);
@@ -902,10 +923,7 @@ export function App() {
     [slashCommandEntries, slashQuery]
   );
   const slashCommandMenuOpen = slashQuery !== null && !busy;
-  const visibleMessages = useMemo(
-    () => deriveVisibleMessages(messages),
-    [messages]
-  );
+  const visibleMessages = useMemo(() => deriveVisibleMessages(messages), [messages]);
   const chatSearchMatches = useMemo(() => {
     const query = chatSearchQuery.trim().toLowerCase();
     if (!query) {
@@ -1507,11 +1525,7 @@ export function App() {
       const result = await window.arivu.compactContext();
       applyDesktopState(result.state);
       await loadSessions();
-      setStatus(
-        result.compacted
-          ? `Compacted ${formatNumber(result.compactedMessageCount)} older messages`
-          : "Context already compact"
-      );
+      setStatus(result.compacted ? `Compacted ${formatNumber(result.compactedMessageCount)} older messages` : "Context already compact");
       return true;
     } catch (err) {
       setError(formatError(err));
@@ -1519,6 +1533,62 @@ export function App() {
       return false;
     } finally {
       setCompactingContext(false);
+    }
+  }
+
+  async function summarizeContext(): Promise<boolean> {
+    if (busy || compactingContext || !state?.sessionId) {
+      return false;
+    }
+
+    const confirmed = window.confirm(
+      `Summarize this chat's context with the model? Older messages become a generated summary and the most recent ${CONTEXT_COMPACT_RECENT_MESSAGE_COUNT} messages remain. This cannot be undone.`
+    );
+    if (!confirmed) {
+      return false;
+    }
+
+    setCompactingContext(true);
+    setError(null);
+    setStatus("Summarizing context");
+    try {
+      const result = await window.arivu.summarizeContext();
+      applyDesktopState(result.state);
+      await loadSessions();
+      setStatus(result.compacted ? `Summarized ${formatNumber(result.compactedMessageCount)} older messages` : "Context already compact");
+      return true;
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+      return false;
+    } finally {
+      setCompactingContext(false);
+    }
+  }
+
+  async function handleUndoRun(run: AgentTaskRun) {
+    if (!state?.sessionId || undoBusyRunId) {
+      return;
+    }
+    const count = run.checkpoint?.changedPaths.length ?? 0;
+    const confirmed = window.confirm(
+      `Undo this run's changes to ${count} file${count === 1 ? "" : "s"}? Files will be restored to their pre-run state. This cannot be undone.`
+    );
+    if (!confirmed) {
+      return;
+    }
+    setUndoBusyRunId(run.id);
+    setError(null);
+    try {
+      const result = await window.arivu.undoTaskRun({ sessionId: state.sessionId, taskRunId: run.id });
+      applyDesktopState(result.state);
+      await loadSessions();
+      setStatus(`Reverted ${formatNumber(result.revertedCount)} file${result.revertedCount === 1 ? "" : "s"}`);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    } finally {
+      setUndoBusyRunId(null);
     }
   }
 
@@ -1551,11 +1621,7 @@ export function App() {
     }
   }
 
-  async function refreshWatchedPullRequest(
-    key: string,
-    watch: PullRequestWatch,
-    options: { silent?: boolean } = {}
-  ) {
+  async function refreshWatchedPullRequest(key: string, watch: PullRequestWatch, options: { silent?: boolean } = {}) {
     if (pullRequestWatchInFlightRef.current.has(key)) {
       return;
     }
@@ -1726,7 +1792,9 @@ export function App() {
 
   function handleDraftRemediationPrompt(draftText: string, options: DraftPromptOptions = {}) {
     if (prompt.trim() || imageAttachments.length > 0 || fileAttachments.length > 0) {
-      const confirmed = window.confirm(options.confirmLabel ?? "Replace the current composer draft with a repair prompt from this report evidence?");
+      const confirmed = window.confirm(
+        options.confirmLabel ?? "Replace the current composer draft with a repair prompt from this report evidence?"
+      );
       if (!confirmed) {
         return;
       }
@@ -1945,6 +2013,15 @@ export function App() {
       return;
     }
 
+    if (command.id === "summarize") {
+      const summarized = await summarizeContext();
+      if (summarized) {
+        setPrompt("");
+      }
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+
     if (command.id === "loop") {
       setAgentPlanModeEnabled(false);
       setWorktreePlanSource(null);
@@ -2035,9 +2112,9 @@ export function App() {
   async function submitPrompt(content?: ChatContent, options: SubmitPromptOptions = {}) {
     const usingComposer = content === undefined;
     const nextContent = content ?? createPromptContent(prompt, imageAttachments, fileAttachments);
-    const nextSkillNames = usingComposer ? pendingSkillNames : options.skillNames ?? [];
+    const nextSkillNames = usingComposer ? pendingSkillNames : (options.skillNames ?? []);
     const nextPlanModeEnabled = options.planModeEnabled ?? (usingComposer ? agentPlanModeEnabled : false);
-    const nextLoopEnabled = nextPlanModeEnabled ? false : options.loopEnabled ?? (usingComposer ? agentLoopEnabled : false);
+    const nextLoopEnabled = nextPlanModeEnabled ? false : (options.loopEnabled ?? (usingComposer ? agentLoopEnabled : false));
     const nextWorktreeTaskRunId = options.worktreeTaskRunId ?? (usingComposer ? worktreeContinuation?.taskRunId : undefined);
     const nextWorktreeReplayOfTaskRunId =
       options.worktreeReplayOfTaskRunId ?? (usingComposer ? worktreeContinuation?.replayOfTaskRunId : undefined);
@@ -2046,8 +2123,8 @@ export function App() {
     const retryFromUserMessageIndex = options.retryFromUserMessageIndex;
     const nextWorktreeEnabled = nextPlanModeEnabled
       ? false
-      : options.worktreeEnabled ??
-        (usingComposer ? agentWorktreeEnabled || Boolean(nextWorktreeTaskRunId) || Boolean(nextWorktreePlannedFromTaskRunId) : false);
+      : (options.worktreeEnabled ??
+        (usingComposer ? agentWorktreeEnabled || Boolean(nextWorktreeTaskRunId) || Boolean(nextWorktreePlannedFromTaskRunId) : false));
     if (!chatContentHasRenderableContent(nextContent) || busy) {
       return;
     }
@@ -2235,6 +2312,20 @@ export function App() {
       const next = await window.arivu.stopAgentLoop(state.sessionId);
       applyDesktopState(next);
       setStatus("Stopping agent loop");
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
+  }
+
+  async function stopAgentRun() {
+    if (!state?.sessionId) {
+      return;
+    }
+    try {
+      const next = await window.arivu.stopAgentRun(state.sessionId);
+      applyDesktopState(next);
+      setStatus("Stopping run");
     } catch (err) {
       setError(formatError(err));
       setStatus("Error");
@@ -2434,31 +2525,29 @@ export function App() {
     );
   }
 
-  const workspaceName = state.projectRoot === null ? "No project selected" : state.workspace.packageName ?? basename(state.workspace.root);
+  const workspaceName =
+    state.projectRoot === null ? "No project selected" : (state.workspace.packageName ?? basename(state.workspace.root));
   const workspaceDetail = state.projectRoot === null ? "Standalone chats" : state.workspace.root;
   const gitValue = state.projectRoot === null ? "none" : `${state.workspace.gitBranch ?? "none"}${state.workspace.dirty ? " *" : ""}`;
   const recentProjects = projects.slice(0, 5);
-  const standaloneSessions = sessions.filter((session) => session.projectRoot === null).sort(compareSessionsForDisplay).slice(0, 5);
+  const standaloneSessions = sessions
+    .filter((session) => session.projectRoot === null)
+    .sort(compareSessionsForDisplay)
+    .slice(0, 5);
   const chatStarted = Boolean(state.sessionId) || messages.some((message) => message.role !== "system");
   const canSelectChatProject = !chatStarted && !busy;
   const canCompactContext =
-    Boolean(state.sessionId) &&
-    nonSystemMessageCount > CONTEXT_COMPACT_RECENT_MESSAGE_COUNT &&
-    !busy &&
-    !compactingContext;
+    Boolean(state.sessionId) && nonSystemMessageCount > CONTEXT_COMPACT_RECENT_MESSAGE_COUNT && !busy && !compactingContext;
   const effectiveSidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth;
   const toolActivityCount = activity.filter((item) => item.kind !== "system").length;
-  const effectiveActivityWidth = activityCollapsed ? ACTIVITY_COLLAPSED_WIDTH : clamp(activityWidth, ACTIVITY_MIN_WIDTH, ACTIVITY_MAX_WIDTH);
+  const effectiveActivityWidth = activityCollapsed
+    ? ACTIVITY_COLLAPSED_WIDTH
+    : clamp(activityWidth, ACTIVITY_MIN_WIDTH, ACTIVITY_MAX_WIDTH);
   const browserOpen = Boolean(browserState?.paneOpen);
   const activeAgentLoop = state.agentLoop;
   const agentLoopRunning = Boolean(activeAgentLoop && ["running", "stopping"].includes(activeAgentLoop.status));
   const agentLoopLabel = activeAgentLoop ? agentLoopStatusLabel(activeAgentLoop) : "Loop off";
-  const workspaceGridClassName = [
-    "workspace-grid",
-    activityCollapsed ? "activity-collapsed" : ""
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const workspaceGridClassName = ["workspace-grid", activityCollapsed ? "activity-collapsed" : ""].filter(Boolean).join(" ");
 
   return (
     <main
@@ -2468,9 +2557,11 @@ export function App() {
       <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="brand-row">
           <img className="brand-mark" src={arivuLogoUrl} alt="" />
-          {!sidebarCollapsed ? <div className="brand-copy">
-            <div className="brand-title">Arivu</div>
-          </div> : null}
+          {!sidebarCollapsed ? (
+            <div className="brand-copy">
+              <div className="brand-title">Arivu</div>
+            </div>
+          ) : null}
           <button
             className="icon-button sidebar-collapse-button"
             type="button"
@@ -2487,178 +2578,187 @@ export function App() {
           <span>New chat</span>
         </button>
 
-        {!sidebarCollapsed ? <div className="workspace-actions">
-          <button className="secondary-command" type="button" onClick={chooseWorkspace}>
-            <FolderOpen size={16} />
-            Open
-          </button>
-          <button className="secondary-command" type="button" onClick={() => void createWorkspace()}>
-            <FolderPlus size={16} />
-            New workspace
-          </button>
-        </div> : null}
-
-        {!sidebarCollapsed ? <section className={collapsedSections.projects ? "sidebar-section projects-section collapsed-section" : "sidebar-section projects-section"}>
-          <div className="section-row">
-            <button
-              className="section-toggle"
-              type="button"
-              aria-expanded={!collapsedSections.projects}
-              onClick={() => toggleSidebarSection("projects")}
-              title={collapsedSections.projects ? "Expand workspaces" : "Collapse workspaces"}
-            >
-              {collapsedSections.projects ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              <span className="section-label">Workspaces</span>
+        {!sidebarCollapsed ? (
+          <div className="workspace-actions">
+            <button className="secondary-command" type="button" onClick={chooseWorkspace}>
+              <FolderOpen size={16} />
+              Open
+            </button>
+            <button className="secondary-command" type="button" onClick={() => void createWorkspace()}>
+              <FolderPlus size={16} />
+              New workspace
             </button>
           </div>
-          {!collapsedSections.projects ? <div className="recent-project-list">
-            {recentProjects.length === 0 ? <div className="empty-sidebar-list">No recent workspaces yet.</div> : null}
-            {recentProjects.map((project) => {
-              const expanded = expandedProjectRoots[project.projectRoot] ?? project.projectRoot === state.projectRoot;
-              const projectOpenBusy = openingWorkspaceRoot === project.projectRoot;
-              const projectForgetBusy = forgettingProjectRoot === project.projectRoot;
-              const projectMissing = !project.projectRootExists;
-              const projectRowClassName = [
-                "project-row",
-                projectMissing ? "missing with-action" : ""
-              ]
-                .filter(Boolean)
-                .join(" ");
-              const projectGroupClassName = [
-                "project-group",
-                project.projectRoot === state.projectRoot ? "active" : "",
-                projectMissing ? "missing" : ""
-              ]
-                .filter(Boolean)
-                .join(" ");
-              const projectStatus = projectMissing
-                ? `Missing folder - ${formatNumber(project.chatCount)} chat${project.chatCount === 1 ? "" : "s"}`
-                : projectOpenBusy
-                  ? "Opening..."
-                  : project.chatCount === 0
-                    ? "Current workspace"
-                    : `${project.chatCount} chats`;
-              return (
-                <div
-                  key={project.projectRoot}
-                  className={projectGroupClassName}
-                >
-                  <div
-                    className={projectRowClassName}
-                    title={project.projectRoot}
-                  >
-                    <button
-                      className="project-expand-button"
-                      type="button"
-                      onClick={() => toggleProject(project.projectRoot)}
-                      title={expanded ? "Hide workspace chats" : "Show workspace chats"}
-                      aria-label={expanded ? `Hide chats for ${project.name}` : `Show chats for ${project.name}`}
-                      aria-expanded={expanded}
-                    >
-                      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    </button>
-                    <button
-                      className="project-open-button"
-                      type="button"
-                      disabled={Boolean(openingWorkspaceRoot) || projectMissing}
-                      onClick={() => void openWorkspace(project.projectRoot)}
-                      title={projectMissing ? `Workspace folder missing: ${project.projectRoot}` : `Open workspace ${project.projectRoot}`}
-                      aria-current={project.projectRoot === state.projectRoot ? "page" : undefined}
-                    >
-                      {projectMissing ? (
-                        <AlertTriangle className="project-folder-icon" size={14} />
-                      ) : projectOpenBusy ? (
-                        <RefreshCw className="project-folder-icon spinning" size={14} />
-                      ) : (
-                        <FolderOpen className="project-folder-icon" size={14} />
-                      )}
-                      <span className="recent-project-main">
-                        <strong>{project.name}</strong>
-                        <span>{projectStatus}</span>
-                      </span>
-                    </button>
-                    {projectMissing ? (
-                      <button
-                        className="project-forget-button"
-                        type="button"
-                        onClick={() => void forgetMissingProject(project)}
-                        disabled={projectForgetBusy}
-                        title="Forget missing workspace and keep chats"
-                        aria-label={`Forget missing workspace ${project.name}`}
-                      >
-                        {projectForgetBusy ? <RefreshCw className="spinning" size={13} /> : <X size={13} />}
-                      </button>
-                    ) : null}
-                  </div>
-                  {expanded ? (
-                    <div className="project-chat-list">
-                      {project.sessions.length === 0 ? <div className="empty-sidebar-list">No chats in this project yet.</div> : null}
-                      {project.sessions.map((session) => (
-                        <SidebarChatItem
-                          key={session.id}
-                          session={session}
-                          active={session.id === state.sessionId}
-                          menuOpen={openChatMenuId === session.id}
-                          className="project-chat-item"
-                          onOpen={() => void openSession(session.id)}
-                          onToggleMenu={() => setOpenChatMenuId((current) => current === session.id ? null : session.id)}
-                          onRename={() => void renameSession(session)}
-                          onTogglePin={() => void toggleSessionPin(session)}
-                          onDelete={() => void deleteSession(session)}
-                        />
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div> : null}
-        </section> : null}
+        ) : null}
 
-        {!sidebarCollapsed ? <section className={collapsedSections.chats ? "sidebar-section chats-section collapsed-section" : "sidebar-section chats-section"}>
-          <div className="section-row">
-            <button
-              className="section-toggle"
-              type="button"
-              aria-expanded={!collapsedSections.chats}
-              onClick={() => toggleSidebarSection("chats")}
-              title={collapsedSections.chats ? "Expand chats" : "Collapse chats"}
-            >
-              {collapsedSections.chats ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              <span className="section-label">Chats</span>
-            </button>
-            {!collapsedSections.chats ? (
-              <button className="text-command" type="button" onClick={() => setView("history")}>
-                View all
+        {!sidebarCollapsed ? (
+          <section
+            className={
+              collapsedSections.projects ? "sidebar-section projects-section collapsed-section" : "sidebar-section projects-section"
+            }
+          >
+            <div className="section-row">
+              <button
+                className="section-toggle"
+                type="button"
+                aria-expanded={!collapsedSections.projects}
+                onClick={() => toggleSidebarSection("projects")}
+                title={collapsedSections.projects ? "Expand workspaces" : "Collapse workspaces"}
+              >
+                {collapsedSections.projects ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                <span className="section-label">Workspaces</span>
               </button>
+            </div>
+            {!collapsedSections.projects ? (
+              <div className="recent-project-list">
+                {recentProjects.length === 0 ? <div className="empty-sidebar-list">No recent workspaces yet.</div> : null}
+                {recentProjects.map((project) => {
+                  const expanded = expandedProjectRoots[project.projectRoot] ?? project.projectRoot === state.projectRoot;
+                  const projectOpenBusy = openingWorkspaceRoot === project.projectRoot;
+                  const projectForgetBusy = forgettingProjectRoot === project.projectRoot;
+                  const projectMissing = !project.projectRootExists;
+                  const projectRowClassName = ["project-row", projectMissing ? "missing with-action" : ""].filter(Boolean).join(" ");
+                  const projectGroupClassName = [
+                    "project-group",
+                    project.projectRoot === state.projectRoot ? "active" : "",
+                    projectMissing ? "missing" : ""
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
+                  const projectStatus = projectMissing
+                    ? `Missing folder - ${formatNumber(project.chatCount)} chat${project.chatCount === 1 ? "" : "s"}`
+                    : projectOpenBusy
+                      ? "Opening..."
+                      : project.chatCount === 0
+                        ? "Current workspace"
+                        : `${project.chatCount} chats`;
+                  return (
+                    <div key={project.projectRoot} className={projectGroupClassName}>
+                      <div className={projectRowClassName} title={project.projectRoot}>
+                        <button
+                          className="project-expand-button"
+                          type="button"
+                          onClick={() => toggleProject(project.projectRoot)}
+                          title={expanded ? "Hide workspace chats" : "Show workspace chats"}
+                          aria-label={expanded ? `Hide chats for ${project.name}` : `Show chats for ${project.name}`}
+                          aria-expanded={expanded}
+                        >
+                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </button>
+                        <button
+                          className="project-open-button"
+                          type="button"
+                          disabled={Boolean(openingWorkspaceRoot) || projectMissing}
+                          onClick={() => void openWorkspace(project.projectRoot)}
+                          title={
+                            projectMissing ? `Workspace folder missing: ${project.projectRoot}` : `Open workspace ${project.projectRoot}`
+                          }
+                          aria-current={project.projectRoot === state.projectRoot ? "page" : undefined}
+                        >
+                          {projectMissing ? (
+                            <AlertTriangle className="project-folder-icon" size={14} />
+                          ) : projectOpenBusy ? (
+                            <RefreshCw className="project-folder-icon spinning" size={14} />
+                          ) : (
+                            <FolderOpen className="project-folder-icon" size={14} />
+                          )}
+                          <span className="recent-project-main">
+                            <strong>{project.name}</strong>
+                            <span>{projectStatus}</span>
+                          </span>
+                        </button>
+                        {projectMissing ? (
+                          <button
+                            className="project-forget-button"
+                            type="button"
+                            onClick={() => void forgetMissingProject(project)}
+                            disabled={projectForgetBusy}
+                            title="Forget missing workspace and keep chats"
+                            aria-label={`Forget missing workspace ${project.name}`}
+                          >
+                            {projectForgetBusy ? <RefreshCw className="spinning" size={13} /> : <X size={13} />}
+                          </button>
+                        ) : null}
+                      </div>
+                      {expanded ? (
+                        <div className="project-chat-list">
+                          {project.sessions.length === 0 ? <div className="empty-sidebar-list">No chats in this project yet.</div> : null}
+                          {project.sessions.map((session) => (
+                            <SidebarChatItem
+                              key={session.id}
+                              session={session}
+                              active={session.id === state.sessionId}
+                              menuOpen={openChatMenuId === session.id}
+                              className="project-chat-item"
+                              onOpen={() => void openSession(session.id)}
+                              onToggleMenu={() => setOpenChatMenuId((current) => (current === session.id ? null : session.id))}
+                              onRename={() => void renameSession(session)}
+                              onTogglePin={() => void toggleSessionPin(session)}
+                              onDelete={() => void deleteSession(session)}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
             ) : null}
-          </div>
-          {!collapsedSections.chats ? <div className="recent-chat-list">
-            {loadingSessions ? <div className="empty-sidebar-list">Loading chats...</div> : null}
-            {!loadingSessions && standaloneSessions.length === 0 ? (
-              <div className="empty-sidebar-list">No standalone chats yet.</div>
-            ) : null}
-            {!loadingSessions
-              ? standaloneSessions.map((session) => (
-                  <SidebarChatItem
-                    key={session.id}
-                    session={session}
-                    active={session.id === state.sessionId}
-                    menuOpen={openChatMenuId === session.id}
-                    onOpen={() => void openSession(session.id)}
-                    onToggleMenu={() => setOpenChatMenuId((current) => current === session.id ? null : session.id)}
-                    onRename={() => void renameSession(session)}
-                    onTogglePin={() => void toggleSessionPin(session)}
-                    onDelete={() => void deleteSession(session)}
-                  />
-                ))
-              : null}
-          </div> : null}
-        </section> : null}
+          </section>
+        ) : null}
 
-        {!sidebarCollapsed ? <div className="sidebar-footer">
-          <span>{status}</span>
-        </div> : null}
+        {!sidebarCollapsed ? (
+          <section
+            className={collapsedSections.chats ? "sidebar-section chats-section collapsed-section" : "sidebar-section chats-section"}
+          >
+            <div className="section-row">
+              <button
+                className="section-toggle"
+                type="button"
+                aria-expanded={!collapsedSections.chats}
+                onClick={() => toggleSidebarSection("chats")}
+                title={collapsedSections.chats ? "Expand chats" : "Collapse chats"}
+              >
+                {collapsedSections.chats ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                <span className="section-label">Chats</span>
+              </button>
+              {!collapsedSections.chats ? (
+                <button className="text-command" type="button" onClick={() => setView("history")}>
+                  View all
+                </button>
+              ) : null}
+            </div>
+            {!collapsedSections.chats ? (
+              <div className="recent-chat-list">
+                {loadingSessions ? <div className="empty-sidebar-list">Loading chats...</div> : null}
+                {!loadingSessions && standaloneSessions.length === 0 ? (
+                  <div className="empty-sidebar-list">No standalone chats yet.</div>
+                ) : null}
+                {!loadingSessions
+                  ? standaloneSessions.map((session) => (
+                      <SidebarChatItem
+                        key={session.id}
+                        session={session}
+                        active={session.id === state.sessionId}
+                        menuOpen={openChatMenuId === session.id}
+                        onOpen={() => void openSession(session.id)}
+                        onToggleMenu={() => setOpenChatMenuId((current) => (current === session.id ? null : session.id))}
+                        onRename={() => void renameSession(session)}
+                        onTogglePin={() => void toggleSessionPin(session)}
+                        onDelete={() => void deleteSession(session)}
+                      />
+                    ))
+                  : null}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {!sidebarCollapsed ? (
+          <div className="sidebar-footer">
+            <span>{status}</span>
+          </div>
+        ) : null}
       </aside>
       {!sidebarCollapsed ? (
         <div
@@ -2678,7 +2778,9 @@ export function App() {
           <div className="topbar-context">
             <div className="workspace-heading">
               <h1 title={workspaceDetail}>{workspaceName}</h1>
-              <span className="workspace-header-path" title={workspaceDetail}>{workspaceDetail}</span>
+              <span className="workspace-header-path" title={workspaceDetail}>
+                {workspaceDetail}
+              </span>
               <RuntimeDetails state={state} gitValue={gitValue} />
             </div>
           </div>
@@ -2686,8 +2788,10 @@ export function App() {
             <ThemeToggle theme={theme} onChange={setTheme} />
             <button
               type="button"
-              className={view === "ui" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"}
-              onClick={() => setView((current) => current === "ui" ? "chat" : "ui")}
+              className={
+                view === "ui" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"
+              }
+              onClick={() => setView((current) => (current === "ui" ? "chat" : "ui"))}
               aria-label="UI samples"
               data-tooltip="UI samples"
             >
@@ -2695,7 +2799,11 @@ export function App() {
             </button>
             <button
               type="button"
-              className={browserState?.paneOpen ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"}
+              className={
+                browserState?.paneOpen
+                  ? "ghost-button topbar-icon-action has-tooltip active"
+                  : "ghost-button topbar-icon-action has-tooltip"
+              }
               onClick={() => {
                 setView("chat");
                 void setBrowserPaneOpen(!browserState?.paneOpen);
@@ -2707,7 +2815,9 @@ export function App() {
             </button>
             <button
               type="button"
-              className={chatSearchOpen ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"}
+              className={
+                chatSearchOpen ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"
+              }
               onClick={() => {
                 setView("chat");
                 setChatSearchOpen((current) => !current);
@@ -2719,10 +2829,12 @@ export function App() {
             </button>
             <button
               type="button"
-              className={view === "settings" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"}
+              className={
+                view === "settings" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"
+              }
               onClick={() => {
                 setSettingsFocus(null);
-                setView((current) => current === "settings" ? "chat" : "settings");
+                setView((current) => (current === "settings" ? "chat" : "settings"));
               }}
               aria-label="Settings"
               data-tooltip="Settings"
@@ -2850,7 +2962,9 @@ export function App() {
                 {busy ? (
                   <div className={agentLoopRunning ? "agent-thinking loop-active" : "agent-thinking"} role="status" aria-live="polite">
                     <span className="pulse-dot" />
-                    <span className="agent-thinking-label">{agentLoopRunning && activeAgentLoop ? agentLoopLabel : "Agent is working"}</span>
+                    <span className="agent-thinking-label">
+                      {agentLoopRunning && activeAgentLoop ? agentLoopLabel : "Agent is working"}
+                    </span>
                     {agentLoopRunning ? (
                       <button
                         type="button"
@@ -2871,15 +2985,11 @@ export function App() {
                 <div className="error-strip">
                   <span>{error}</span>
                   {retryPrompt ? (
-                    <button
-                      type="button"
-                      onClick={retryLastPrompt}
-                      disabled={busy}
-                      title="Retry query"
-                      aria-label="Retry query"
-                    >
+                    <button type="button" onClick={retryLastPrompt} disabled={busy} title="Retry query" aria-label="Retry query">
                       <RotateCcw size={14} />
-                      <span className="message-action-tooltip" aria-hidden="true">Retry query</span>
+                      <span className="message-action-tooltip" aria-hidden="true">
+                        Retry query
+                      </span>
                     </button>
                   ) : null}
                 </div>
@@ -2929,12 +3039,8 @@ export function App() {
                   {loadedSkills.length > 0 || pendingSkills.length > 0 ? (
                     <SkillContextStrip loadedSkills={loadedSkills} pendingSkills={pendingSkills} onRemovePending={removePendingSkill} />
                   ) : null}
-                  {imageAttachments.length > 0 ? (
-                    <ImageAttachmentStrip images={imageAttachments} onRemove={removeImageAttachment} />
-                  ) : null}
-                  {fileAttachments.length > 0 ? (
-                    <FileAttachmentStrip files={fileAttachments} onRemove={removeFileAttachment} />
-                  ) : null}
+                  {imageAttachments.length > 0 ? <ImageAttachmentStrip images={imageAttachments} onRemove={removeImageAttachment} /> : null}
+                  {fileAttachments.length > 0 ? <FileAttachmentStrip files={fileAttachments} onRemove={removeFileAttachment} /> : null}
                   {toolsPopoverOpen ? <ToolPanel tools={availableTools} /> : null}
                   {skillsPopoverOpen ? (
                     <SkillPanel
@@ -3042,7 +3148,11 @@ export function App() {
                         <span>{agentPlanModeEnabled ? "Plan on" : "Plan"}</span>
                       </button>
                       <button
-                        className={agentWorktreeEnabled || worktreeContinuation || worktreePlanSource ? "composer-worktree-button active" : "composer-worktree-button"}
+                        className={
+                          agentWorktreeEnabled || worktreeContinuation || worktreePlanSource
+                            ? "composer-worktree-button active"
+                            : "composer-worktree-button"
+                        }
                         type="button"
                         onClick={() => {
                           setAgentPlanModeEnabled(false);
@@ -3069,11 +3179,15 @@ export function App() {
                                 : `Continue ${worktreeContinuation.branch ?? "existing task worktree"} for the next prompt`
                               : worktreePlanSource
                                 ? `Run approved plan ${shortRunId(worktreePlanSource.taskRunId)} in a new task worktree`
-                              : agentWorktreeEnabled
-                              ? "Turn off task worktree"
-                              : "Run the next prompt in an isolated git worktree"
+                                : agentWorktreeEnabled
+                                  ? "Turn off task worktree"
+                                  : "Run the next prompt in an isolated git worktree"
                         }
-                        aria-label={agentWorktreeEnabled || worktreeContinuation || worktreePlanSource ? "Turn off task worktree" : "Turn on task worktree for the next prompt"}
+                        aria-label={
+                          agentWorktreeEnabled || worktreeContinuation || worktreePlanSource
+                            ? "Turn off task worktree"
+                            : "Turn on task worktree for the next prompt"
+                        }
                         aria-pressed={Boolean(agentWorktreeEnabled || worktreeContinuation || worktreePlanSource)}
                       >
                         <GitBranch size={14} />
@@ -3095,7 +3209,9 @@ export function App() {
                         onClick={() => {
                           setAgentPlanModeEnabled(false);
                           setAgentLoopEnabled((current) => !current);
-                          setStatus(!agentLoopEnabled ? `Agent loop armed for ${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iterations` : "Agent loop off");
+                          setStatus(
+                            !agentLoopEnabled ? `Agent loop armed for ${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iterations` : "Agent loop off"
+                          );
                         }}
                         disabled={busy}
                         title={agentLoopEnabled ? "Turn off agent loop" : "Turn on agent loop for the next prompt"}
@@ -3109,15 +3225,30 @@ export function App() {
                         {formatNumber(promptTokens)} / {formatNumber(COMPOSER_TOKEN_BUDGET)} tok
                       </span>
                     </div>
-                    <button
-                      className="composer-send-button icon-send-button"
-                      type="submit"
-                      disabled={busy || slashQuery !== null || !chatContentHasRenderableContent(createPromptContent(prompt, imageAttachments, fileAttachments))}
-                      title="Send prompt"
-                      aria-label="Send prompt"
-                    >
-                      <SendArrowIcon size={22} />
-                    </button>
+                    {busy ? (
+                      <button
+                        className="composer-send-button icon-send-button composer-stop-button"
+                        type="button"
+                        onClick={() => void stopAgentRun()}
+                        title="Stop run"
+                        aria-label="Stop run"
+                      >
+                        <Square size={18} />
+                      </button>
+                    ) : (
+                      <button
+                        className="composer-send-button icon-send-button"
+                        type="submit"
+                        disabled={
+                          slashQuery !== null ||
+                          !chatContentHasRenderableContent(createPromptContent(prompt, imageAttachments, fileAttachments))
+                        }
+                        title="Send prompt"
+                        aria-label="Send prompt"
+                      >
+                        <SendArrowIcon size={22} />
+                      </button>
+                    )}
                   </div>
                 </div>
               </form>
@@ -3151,14 +3282,14 @@ export function App() {
                   aria-label={activityCollapsed ? "Expand activity" : "Collapse activity"}
                 >
                   {activityCollapsed ? <Activity size={16} /> : <ChevronRight size={16} />}
-                  {activityCollapsed && toolActivityCount > 0 ? <span className="activity-count-badge rail">{toolActivityCount}</span> : null}
+                  {activityCollapsed && toolActivityCount > 0 ? (
+                    <span className="activity-count-badge rail">{toolActivityCount}</span>
+                  ) : null}
                 </button>
               </div>
               {!activityCollapsed ? (
                 <div className="activity-content">
-                  {latestScreenshotActivity?.imagePreview ? (
-                    <LatestActivityScreenshot item={latestScreenshotActivity} />
-                  ) : null}
+                  {latestScreenshotActivity?.imagePreview ? <LatestActivityScreenshot item={latestScreenshotActivity} /> : null}
                   <div className="activity-list" ref={activityListRef}>
                     {activity.length === 0 ? (
                       <div className="empty-activity">Tool calls and approvals will appear here.</div>
@@ -3185,6 +3316,8 @@ export function App() {
                             onFocusTaskRun={handleFocusTaskRunAttempt}
                             onOpenEvidence={handleOpenEvidence}
                             onDraftRemediation={handleDraftRemediationPrompt}
+                            onUndoRun={handleUndoRun}
+                            undoBusyRunId={undoBusyRunId}
                           />
                         ))}
                       </>
@@ -3205,7 +3338,7 @@ export function App() {
             onRename={renameSession}
             onTogglePin={toggleSessionPin}
             onDelete={deleteSession}
-            onToggleMenu={(id) => setOpenHistoryMenuId((current) => current === id ? null : id)}
+            onToggleMenu={(id) => setOpenHistoryMenuId((current) => (current === id ? null : id))}
             onError={(message) => {
               setError(message);
               setStatus("Error");
@@ -3238,6 +3371,18 @@ export function App() {
       </section>
 
       {approval ? <ApprovalDialog approval={approval} onRespond={(approved) => void respondApproval(approved)} /> : null}
+      {state &&
+      !onboardingDismissed &&
+      !state.config.apiKeyPresent &&
+      !(state.config.providers ?? []).some((provider) => provider.apiKeyPresent) ? (
+        <FirstRunOnboarding
+          initialBaseUrl={state.config.baseUrl}
+          initialModel={isAutoModelId(state.config.model) ? "" : state.config.model}
+          initialTrustMode={state.config.trustMode}
+          onStateUpdated={applyDesktopState}
+          onDismiss={() => setOnboardingDismissed(true)}
+        />
+      ) : null}
       {workspaceScaffoldOpen ? (
         <WorkspaceScaffoldDialog
           onCancel={() => setWorkspaceScaffoldOpen(false)}
@@ -3275,12 +3420,7 @@ function RuntimeDetails({ state, gitValue }: { state: DesktopState; gitValue: st
 
   return (
     <div className="runtime-details">
-      <button
-        type="button"
-        className="runtime-details-button"
-        aria-label="Runtime details"
-        aria-describedby="runtime-details-popover"
-      >
+      <button type="button" className="runtime-details-button" aria-label="Runtime details" aria-describedby="runtime-details-popover">
         <Info size={13} />
       </button>
       <div className="runtime-details-popover" id="runtime-details-popover" role="tooltip">
@@ -3328,7 +3468,13 @@ function ChatSearchBar({
         aria-label="Search chat"
       />
       <span className={matchCount === 0 && query.trim() ? "chat-search-count empty" : "chat-search-count"}>{countLabel}</span>
-      <button className="icon-button compact-icon-button" type="button" onClick={onPrevious} disabled={matchCount === 0} title="Previous match">
+      <button
+        className="icon-button compact-icon-button"
+        type="button"
+        onClick={onPrevious}
+        disabled={matchCount === 0}
+        title="Previous match"
+      >
         <ChevronLeft size={14} />
       </button>
       <button className="icon-button compact-icon-button" type="button" onClick={onNext} disabled={matchCount === 0} title="Next match">
@@ -3458,7 +3604,9 @@ function ComposerOptionsMenu({
         <FileAttachButton
           count={selectedFileCount}
           disabled={busy || state.projectRoot === null}
-          disabledReason={busy ? "Wait for the current response before attaching file context" : "Open a workspace before attaching file context"}
+          disabledReason={
+            busy ? "Wait for the current response before attaching file context" : "Open a workspace before attaching file context"
+          }
           onClick={onChooseContextFiles}
         />
       </div>
@@ -3512,15 +3660,7 @@ function ComposerOptionsMenu({
   );
 }
 
-function ImageAttachButton({
-  count,
-  disabled,
-  onClick
-}: {
-  count: number;
-  disabled: boolean;
-  onClick: () => void;
-}) {
+function ImageAttachButton({ count, disabled, onClick }: { count: number; disabled: boolean; onClick: () => void }) {
   const label = count > 0 ? `Attach images (${count})` : "Attach images";
   return (
     <button
@@ -3564,13 +3704,7 @@ function FileAttachButton({
   );
 }
 
-function ImageAttachmentStrip({
-  images,
-  onRemove
-}: {
-  images: ImageAttachment[];
-  onRemove: (id: string) => void;
-}) {
+function ImageAttachmentStrip({ images, onRemove }: { images: ImageAttachment[]; onRemove: (id: string) => void }) {
   return (
     <div className="image-attachment-strip" aria-label="Attached images">
       {images.map((image) => (
@@ -3585,13 +3719,7 @@ function ImageAttachmentStrip({
   );
 }
 
-function FileAttachmentStrip({
-  files,
-  onRemove
-}: {
-  files: ContextFileAttachment[];
-  onRemove: (id: string) => void;
-}) {
+function FileAttachmentStrip({ files, onRemove }: { files: ContextFileAttachment[]; onRemove: (id: string) => void }) {
   return (
     <div className="file-attachment-strip" aria-label="Attached file context">
       <span className="skill-context-label">
@@ -3599,7 +3727,11 @@ function FileAttachmentStrip({
         Files
       </span>
       {files.map((file) => (
-        <span className="file-context-chip" key={file.id} title={`${file.path} - ${formatBytes(file.size)} - ${formatNumber(file.lineCount)} lines`}>
+        <span
+          className="file-context-chip"
+          key={file.id}
+          title={`${file.path} - ${formatBytes(file.size)} - ${formatNumber(file.lineCount)} lines`}
+        >
           <FileText size={13} />
           <span>{file.path}</span>
           <small>{file.truncated ? "truncated" : `${formatNumber(file.lineCount)} lines`}</small>
@@ -3629,8 +3761,7 @@ function SkillContextStrip({
       </span>
       {loadedSkills.map((skill) => (
         <span className="skill-context-chip loaded" key={`loaded-${skill.name}`} title={`Loaded in chat: $${skill.name}`}>
-          <Check size={12} />
-          ${skill.name}
+          <Check size={12} />${skill.name}
         </span>
       ))}
       {pendingSkills.map((skill) => (
@@ -3741,6 +3872,9 @@ function SlashCommandIcon({ id }: { id: SlashCommandId }) {
   if (id === "compact") {
     return <Scissors size={15} />;
   }
+  if (id === "summarize") {
+    return <MessageSquare size={15} />;
+  }
   if (id === "tools") {
     return <Wrench size={15} />;
   }
@@ -3817,13 +3951,7 @@ function ToolPanel({ tools }: { tools: ToolSummary[] }) {
   );
 }
 
-function UiLabView({
-  activeConcept,
-  onSelect
-}: {
-  activeConcept: UiConceptId;
-  onSelect: (concept: UiConceptId) => void;
-}) {
+function UiLabView({ activeConcept, onSelect }: { activeConcept: UiConceptId; onSelect: (concept: UiConceptId) => void }) {
   return (
     <section className="ui-lab-panel">
       <div className="ui-lab-grid">
@@ -3876,7 +4004,11 @@ function UiLabView({
                     <span key={metric}>{metric}</span>
                   ))}
                 </div>
-                <button className={selected ? "ui-sample-action selected" : "ui-sample-action"} type="button" onClick={() => onSelect(concept.id)}>
+                <button
+                  className={selected ? "ui-sample-action selected" : "ui-sample-action"}
+                  type="button"
+                  onClick={() => onSelect(concept.id)}
+                >
                   {selected ? <Check size={16} /> : <Palette size={16} />}
                   {selected ? "Selected" : "Apply"}
                 </button>
@@ -3974,7 +4106,9 @@ function SkillPanel({
                 </div>
                 <strong>{skill.title}</strong>
                 {skill.description ? <p>{skill.description}</p> : null}
-                <span className="skill-path" title={skill.path}>{skill.path}</span>
+                <span className="skill-path" title={skill.path}>
+                  {skill.path}
+                </span>
               </article>
             );
           })
@@ -4148,7 +4282,13 @@ function ModelPickerDialog({
             placeholder={showCustomModelAction ? "Search or enter model ID" : "Search models"}
             aria-label="Search models"
           />
-          <button className="icon-button compact-icon-button" type="button" onClick={() => void loadModels()} disabled={loading} title="Refresh models">
+          <button
+            className="icon-button compact-icon-button"
+            type="button"
+            onClick={() => void loadModels()}
+            disabled={loading}
+            title="Refresh models"
+          >
             <RefreshCw size={14} />
           </button>
         </div>
@@ -4251,10 +4391,7 @@ function HistoryView({
 
       <div className="history-list">
         {sessions.map((session) => (
-          <div
-            key={session.id}
-            className={session.id === activeSessionId ? "history-item active" : "history-item"}
-          >
+          <div key={session.id} className={session.id === activeSessionId ? "history-item active" : "history-item"}>
             <button
               className="history-row"
               type="button"
@@ -4271,7 +4408,9 @@ function HistoryView({
                 {session.pinnedAt ? <span title={`Pinned ${formatDateTime(session.pinnedAt)}`}>Pinned</span> : null}
                 <span title={session.cwd}>{basename(session.cwd)}</span>
                 <span title={sessionModelTitle(session)}>{sessionModelLabel(session)}</span>
-                {session.agentLoop ? <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span> : null}
+                {session.agentLoop ? (
+                  <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span>
+                ) : null}
                 <span>{session.messageCount} messages</span>
               </div>
             </button>
@@ -4398,33 +4537,36 @@ function ChatOptionsMenu({
     };
   }, [open]);
 
-  const menu = open && menuPosition ? createPortal(
-    <div
-      className="chat-options-menu"
-      role="menu"
-      style={{
-        left: menuPosition.left,
-        position: "fixed",
-        right: "auto",
-        top: menuPosition.top
-      }}
-      onClick={(event) => event.stopPropagation()}
-    >
-      <button className="chat-menu-item" type="button" onClick={onRename} role="menuitem">
-        <Pencil size={14} />
-        Rename
-      </button>
-      <button className="chat-menu-item" type="button" onClick={onTogglePin} role="menuitem">
-        {pinned ? <PinOff size={14} /> : <Pin size={14} />}
-        {pinned ? "Unpin" : "Pin"}
-      </button>
-      <button className="chat-menu-item danger" type="button" onClick={onDelete} role="menuitem">
-        <Trash2 size={14} />
-        Delete
-      </button>
-    </div>,
-    document.body
-  ) : null;
+  const menu =
+    open && menuPosition
+      ? createPortal(
+          <div
+            className="chat-options-menu"
+            role="menu"
+            style={{
+              left: menuPosition.left,
+              position: "fixed",
+              right: "auto",
+              top: menuPosition.top
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button className="chat-menu-item" type="button" onClick={onRename} role="menuitem">
+              <Pencil size={14} />
+              Rename
+            </button>
+            <button className="chat-menu-item" type="button" onClick={onTogglePin} role="menuitem">
+              {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+              {pinned ? "Unpin" : "Pin"}
+            </button>
+            <button className="chat-menu-item danger" type="button" onClick={onDelete} role="menuitem">
+              <Trash2 size={14} />
+              Delete
+            </button>
+          </div>,
+          document.body
+        )
+      : null;
 
   return (
     <div className={open ? "chat-options open" : "chat-options"} onClick={(event) => event.stopPropagation()}>
@@ -4512,7 +4654,9 @@ function MessageBubble({
             aria-label="Edit query"
           >
             <Pencil size={13} />
-            <span className="message-action-tooltip" aria-hidden="true">Edit query</span>
+            <span className="message-action-tooltip" aria-hidden="true">
+              Edit query
+            </span>
           </button>
         ) : null}
         {canRetry ? (
@@ -4525,18 +4669,16 @@ function MessageBubble({
             aria-label="Retry query"
           >
             <RotateCcw size={13} />
-            <span className="message-action-tooltip" aria-hidden="true">Retry query</span>
+            <span className="message-action-tooltip" aria-hidden="true">
+              Retry query
+            </span>
           </button>
         ) : null}
-        <button
-          className="message-action-button"
-          type="button"
-          onClick={onCopy}
-          title={copyLabel}
-          aria-label={copyLabel}
-        >
+        <button className="message-action-button" type="button" onClick={onCopy} title={copyLabel} aria-label={copyLabel}>
           {copied ? <Check size={13} /> : <Copy size={13} />}
-          <span className="message-action-tooltip" aria-hidden="true">{copyLabel}</span>
+          <span className="message-action-tooltip" aria-hidden="true">
+            {copyLabel}
+          </span>
         </button>
       </div>
     </article>
@@ -4707,6 +4849,32 @@ function ToolRunEntryRow({ entry, step }: { entry: ToolRunEntry; step: number })
   );
 }
 
+function RunCheckpointCard({ run, busy, onUndo }: { run: AgentTaskRun; busy: boolean; onUndo: () => void }) {
+  const checkpoint = run.checkpoint;
+  if (!checkpoint) {
+    return null;
+  }
+  const count = checkpoint.changedPaths.length;
+  const fileLabel = `${count} file${count === 1 ? "" : "s"}`;
+  return (
+    <div className="run-checkpoint-card">
+      <div className="run-checkpoint-summary">
+        <RotateCcw size={13} />
+        {checkpoint.revertedAt ? (
+          <span>Reverted this run's changes to {fileLabel}.</span>
+        ) : (
+          <span>This run changed {fileLabel} directly in the workspace.</span>
+        )}
+      </div>
+      {checkpoint.revertedAt ? null : (
+        <button type="button" className="run-checkpoint-undo" onClick={onUndo} disabled={busy}>
+          {busy ? "Undoing…" : "Undo run changes"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ActivityGroupCard({
   group,
   currentSessionId,
@@ -4722,7 +4890,9 @@ function ActivityGroupCard({
   onTogglePullRequestWatch,
   onFocusTaskRun,
   onOpenEvidence,
-  onDraftRemediation
+  onDraftRemediation,
+  onUndoRun,
+  undoBusyRunId
 }: {
   group: ActivityGroup;
   currentSessionId?: string;
@@ -4739,6 +4909,8 @@ function ActivityGroupCard({
   onFocusTaskRun: (run: AgentTaskRun) => void;
   onOpenEvidence: (link: ActivityEvidenceLink) => void;
   onDraftRemediation: (draftText: string, options?: DraftPromptOptions) => void;
+  onUndoRun: (run: AgentTaskRun) => void;
+  undoBusyRunId: string | null;
 }) {
   const [collapsed, setCollapsed] = useState(group.status !== "running");
   const [copiedAudit, setCopiedAudit] = useState(false);
@@ -4782,10 +4954,7 @@ function ActivityGroupCard({
   }
 
   return (
-    <section
-      className={`activity-group ${group.status}${focused ? " focus-active" : ""}`}
-      data-activity-run-id={group.run?.id}
-    >
+    <section className={`activity-group ${group.status}${focused ? " focus-active" : ""}`} data-activity-run-id={group.run?.id}>
       <button
         className="activity-group-header"
         type="button"
@@ -4858,6 +5027,9 @@ function ActivityGroupCard({
               onDraftRemediation={onDraftRemediation}
             />
           ) : null}
+          {group.run && group.run.checkpoint && !group.run.worktree?.enabled ? (
+            <RunCheckpointCard run={group.run} busy={undoBusyRunId === group.run.id} onUndo={() => group.run && onUndoRun(group.run)} />
+          ) : null}
           {group.items.map((item) => (
             <ActivityRow
               key={item.id}
@@ -4925,13 +5097,7 @@ function TaskWorktreeActions({
       {worktree.error ? <p className="task-worktree-error">{worktree.error}</p> : null}
       {planSourceReview ? <TaskWorktreePlanSourceReview review={planSourceReview} /> : null}
       {verificationGate ? <p className={`task-worktree-gate ${verificationGate.status}`}>{verificationGate.message}</p> : null}
-      {worktree.conflict ? (
-        <TaskWorktreeConflictCard
-          run={run}
-          busyKey={busyKey}
-          onAction={onAction}
-        />
-      ) : null}
+      {worktree.conflict ? <TaskWorktreeConflictCard run={run} busyKey={busyKey} onAction={onAction} /> : null}
       <TaskWorktreeAttemptTimeline
         runs={attemptRuns ?? []}
         currentRunId={run.id}
@@ -5146,7 +5312,9 @@ function TaskWorktreeConflictCard({
           {hiddenCount > 0 ? (
             <li>
               <MoreHorizontal size={11} />
-              <span>{formatNumber(hiddenCount)} more file{hiddenCount === 1 ? "" : "s"}</span>
+              <span>
+                {formatNumber(hiddenCount)} more file{hiddenCount === 1 ? "" : "s"}
+              </span>
             </li>
           ) : null}
         </ul>
@@ -5156,11 +5324,21 @@ function TaskWorktreeConflictCard({
           <FolderOpen size={12} />
           Open
         </button>
-        <button type="button" onClick={() => onAction(run, "continue_conflict")} disabled={busy} title="Continue after conflicts are resolved and staged">
+        <button
+          type="button"
+          onClick={() => onAction(run, "continue_conflict")}
+          disabled={busy}
+          title="Continue after conflicts are resolved and staged"
+        >
           <Check size={12} />
           Continue
         </button>
-        <button type="button" onClick={() => onAction(run, "abort_conflict")} disabled={busy} title="Abort this sync and return to the previous task branch state">
+        <button
+          type="button"
+          onClick={() => onAction(run, "abort_conflict")}
+          disabled={busy}
+          title="Abort this sync and return to the previous task branch state"
+        >
           <RotateCcw size={12} />
           Abort
         </button>
@@ -5192,10 +5370,7 @@ function TaskWorktreeAttemptTimeline({
   }
   const currentRun = runs.find((run) => run.id === currentRunId) ?? runs.at(-1);
   const comparisonRun = compareRunId ? runs.find((run) => run.id === compareRunId) : undefined;
-  const comparison =
-    currentRun && comparisonRun
-      ? attemptComparisonForRuns(runs, comparisonRun, currentRun)
-      : undefined;
+  const comparison = currentRun && comparisonRun ? attemptComparisonForRuns(runs, comparisonRun, currentRun) : undefined;
   const replayOutcomeGroups = buildTaskRunReplayOutcomeGroups(runs);
   const runsById = new Map(runs.map((attempt) => [attempt.id, attempt]));
 
@@ -5209,14 +5384,17 @@ function TaskWorktreeAttemptTimeline({
       <ol>
         {runs.map((attempt, index) => {
           const verificationStatus = attempt.verification?.status ?? "unknown";
-          const stage = attempt.worktree?.replayOfTaskRunId ? "Replay" : attempt.worktree?.continuedFromTaskRunId ? "Continuation" : "Original";
+          const stage = attempt.worktree?.replayOfTaskRunId
+            ? "Replay"
+            : attempt.worktree?.continuedFromTaskRunId
+              ? "Continuation"
+              : "Original";
           const isCurrent = attempt.id === currentRunId;
           const focused = attempt.id === focusedRunId;
           const openAction = taskWorktreeActionsForRun(attempt).find((action) => action.id === "open");
           const openBusy = busyKey === `${attempt.id}:open`;
           const compareAvailable = Boolean(
-            currentRun &&
-              (attempt.id !== currentRun.id || runs.findIndex((run) => run.id === attempt.id) > 0)
+            currentRun && (attempt.id !== currentRun.id || runs.findIndex((run) => run.id === attempt.id) > 0)
           );
           const replayPrompt = currentRun ? buildTaskRunVerificationReplayPrompt(attempt, currentRun) : undefined;
           const meta = [
@@ -5249,7 +5427,11 @@ function TaskWorktreeAttemptTimeline({
                     type="button"
                     onClick={() =>
                       onDraftRemediation(replayPrompt, {
-                        worktreeContinuation: { taskRunId: currentRun.id, branch: currentRun.worktree?.branch, replayOfTaskRunId: attempt.id },
+                        worktreeContinuation: {
+                          taskRunId: currentRun.id,
+                          branch: currentRun.worktree?.branch,
+                          replayOfTaskRunId: attempt.id
+                        },
                         status: "Drafted replay checks prompt for task worktree",
                         confirmLabel: "Replace the current composer draft with a replay-checks prompt for this task worktree?"
                       })
@@ -5286,25 +5468,13 @@ function TaskWorktreeAttemptTimeline({
         />
       ) : null}
       {comparison ? (
-        <TaskWorktreeAttemptComparison
-          from={comparison.from}
-          to={comparison.to}
-          onClose={() => setCompareRunId(null)}
-        />
+        <TaskWorktreeAttemptComparison from={comparison.from} to={comparison.to} onClose={() => setCompareRunId(null)} />
       ) : null}
     </div>
   );
 }
 
-function TaskWorktreeAttemptComparison({
-  from,
-  to,
-  onClose
-}: {
-  from: AgentTaskRun;
-  to: AgentTaskRun;
-  onClose: () => void;
-}) {
+function TaskWorktreeAttemptComparison({ from, to, onClose }: { from: AgentTaskRun; to: AgentTaskRun; onClose: () => void }) {
   const diffComparison = buildTaskRunDiffComparison(from, to);
   const rows = [
     ["Prompt", attemptPromptLabel(from), attemptPromptLabel(to)],
@@ -5361,7 +5531,10 @@ function TaskWorktreeReplayOutcomes({
       <div className="task-worktree-replay-outcomes-heading">
         <RefreshCw size={12} />
         <span>Replay outcomes</span>
-        <strong>{groups.reduce((total, group) => total + group.outcomes.length, 0)} replay{groups.reduce((total, group) => total + group.outcomes.length, 0) === 1 ? "" : "s"}</strong>
+        <strong>
+          {groups.reduce((total, group) => total + group.outcomes.length, 0)} replay
+          {groups.reduce((total, group) => total + group.outcomes.length, 0) === 1 ? "" : "s"}
+        </strong>
       </div>
       {groups.map((group) => {
         const evidenceRun = runsById.get(group.evidenceRunId);
@@ -5373,12 +5546,12 @@ function TaskWorktreeReplayOutcomes({
           <div key={group.evidenceRunId} className="task-worktree-replay-group">
             <div className="task-worktree-replay-group-heading">
               <div>
-                <strong title={group.evidencePromptPreview}>
-                  Evidence {shortRunId(group.evidenceRunId)}
-                </strong>
+                <strong title={group.evidencePromptPreview}>Evidence {shortRunId(group.evidenceRunId)}</strong>
                 <small>
                   {[
-                    group.evidenceVerificationStatus ? `Evidence ${verificationStatusLabel(group.evidenceVerificationStatus)}` : "Evidence status unknown",
+                    group.evidenceVerificationStatus
+                      ? `Evidence ${verificationStatusLabel(group.evidenceVerificationStatus)}`
+                      : "Evidence status unknown",
                     outcomeSummary,
                     group.latestOutcome ? formatDateTime(group.latestOutcome.updatedAt) : undefined
                   ]
@@ -5463,7 +5636,9 @@ function TaskWorktreeAttemptDiffDetails({ comparison }: { comparison: AgentTaskR
           {hiddenCount > 0 ? (
             <li className="state-hidden">
               <span>More</span>
-              <strong>{formatNumber(hiddenCount)} more path{hiddenCount === 1 ? "" : "s"}</strong>
+              <strong>
+                {formatNumber(hiddenCount)} more path{hiddenCount === 1 ? "" : "s"}
+              </strong>
               <small>Open patch preview for full diff evidence.</small>
             </li>
           ) : null}
@@ -5515,12 +5690,12 @@ function attemptCommandEvidenceLabel(run: AgentTaskRun) {
   }
   const failed = commands.filter((artifact) => artifact.exitCode !== undefined && artifact.exitCode !== 0).length;
   const latest = commands.at(-1);
-  const command = latest?.command ? truncateMiddle(latest.command, 42) : latest?.title ?? "command";
+  const command = latest?.command ? truncateMiddle(latest.command, 42) : (latest?.title ?? "command");
   return `${formatNumber(commands.length)} command${commands.length === 1 ? "" : "s"}${failed ? `, ${formatNumber(failed)} failed` : ""} - ${command}`;
 }
 
 function attemptReportEvidenceLabel(run: AgentTaskRun) {
-  const reports = run.artifacts.flatMap((artifact) => artifact.kind === "command_output" ? artifact.testReports ?? [] : []);
+  const reports = run.artifacts.flatMap((artifact) => (artifact.kind === "command_output" ? (artifact.testReports ?? []) : []));
   if (!reports.length) {
     return "No parsed reports";
   }
@@ -5723,7 +5898,9 @@ function TaskWorktreePullRequestCard({
           ) : null}
         </div>
       ) : null}
-      {watchStatus ? <small className={watch.lastError ? "task-worktree-pr-watch-status error" : "task-worktree-pr-watch-status"}>{watchStatus}</small> : null}
+      {watchStatus ? (
+        <small className={watch.lastError ? "task-worktree-pr-watch-status error" : "task-worktree-pr-watch-status"}>{watchStatus}</small>
+      ) : null}
       {!pullRequest.createCommand ? <small>Add an origin remote and base branch before creating this PR with GitHub CLI.</small> : null}
     </div>
   );
@@ -5816,7 +5993,11 @@ function TaskWorktreePullRequestChecks({ items }: { items: AgentTaskRunWorktreeP
           <li key={`${item.name}-${item.detailsUrl ?? item.completedAt ?? index}`}>
             <span>{pullRequestCheckLabel(item)}</span>
             {item.detailsUrl ? <p>{item.detailsUrl}</p> : null}
-            {item.logCommand ? <p>{item.logSource === "details_url" ? "Check details capture" : "Log command"}: {item.logCommand}</p> : null}
+            {item.logCommand ? (
+              <p>
+                {item.logSource === "details_url" ? "Check details capture" : "Log command"}: {item.logCommand}
+              </p>
+            ) : null}
             {item.logArtifactId ? <p>Saved evidence artifact: {item.logArtifactId}</p> : null}
             {item.logError ? <p>Evidence fetch issue: {item.logError}</p> : null}
           </li>
@@ -5872,12 +6053,12 @@ function TaskRunMeta({ run, compact = false }: { run: AgentTaskRun; compact?: bo
           {run.worktree.replayOfTaskRunId
             ? `Replay ${run.worktree.branch ?? "worktree"} from ${shortRunId(run.worktree.replayOfTaskRunId)}`
             : run.worktree.continuedFromTaskRunId
-            ? `Continued ${run.worktree.branch ?? "worktree"}`
-            : run.worktree.plannedFromTaskRunId
-              ? `Plan worktree ${shortRunId(run.worktree.plannedFromTaskRunId)}`
-            : run.worktree.status === "ready"
-              ? `Worktree ${run.worktree.branch ?? "ready"}`
-              : `Worktree ${worktreeStatusLabel(run.worktree.status)}`}
+              ? `Continued ${run.worktree.branch ?? "worktree"}`
+              : run.worktree.plannedFromTaskRunId
+                ? `Plan worktree ${shortRunId(run.worktree.plannedFromTaskRunId)}`
+                : run.worktree.status === "ready"
+                  ? `Worktree ${run.worktree.branch ?? "ready"}`
+                  : `Worktree ${worktreeStatusLabel(run.worktree.status)}`}
         </span>
       ) : null}
       {capabilityLabels.length > 0 ? (
@@ -5885,9 +6066,17 @@ function TaskRunMeta({ run, compact = false }: { run: AgentTaskRun; compact?: bo
       ) : (
         <span>No tools yet</span>
       )}
-      {run.plan?.items.length ? <span>{run.plan.items.length} plan step{run.plan.items.length === 1 ? "" : "s"}</span> : null}
+      {run.plan?.items.length ? (
+        <span>
+          {run.plan.items.length} plan step{run.plan.items.length === 1 ? "" : "s"}
+        </span>
+      ) : null}
       {run.verification ? <span>{verificationMetaLabel(run.verification)}</span> : null}
-      {run.artifacts.length > 0 ? <span>{run.artifacts.length} artifact{run.artifacts.length === 1 ? "" : "s"}</span> : null}
+      {run.artifacts.length > 0 ? (
+        <span>
+          {run.artifacts.length} artifact{run.artifacts.length === 1 ? "" : "s"}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -5916,10 +6105,14 @@ function TaskRunLoop({ loop }: { loop: NonNullable<AgentTaskRun["loop"]> }) {
               <span>{agentLoopIterationStatusLabel(iteration.status)}</span>
               {iteration.decision ? <span>decision {iteration.decision}</span> : null}
               {iteration.toolCallCount !== undefined ? (
-                <span>{iteration.toolCallCount} tool{iteration.toolCallCount === 1 ? "" : "s"}</span>
+                <span>
+                  {iteration.toolCallCount} tool{iteration.toolCallCount === 1 ? "" : "s"}
+                </span>
               ) : null}
               {iteration.artifactCount !== undefined ? (
-                <span>{iteration.artifactCount} artifact{iteration.artifactCount === 1 ? "" : "s"}</span>
+                <span>
+                  {iteration.artifactCount} artifact{iteration.artifactCount === 1 ? "" : "s"}
+                </span>
               ) : null}
             </div>
             {iteration.error || iteration.outputPreview ? <p>{iteration.error ?? iteration.outputPreview}</p> : null}
@@ -5934,14 +6127,16 @@ function TaskRunLoop({ loop }: { loop: NonNullable<AgentTaskRun["loop"]> }) {
 function TaskRunVerification({ verification }: { verification: AgentTaskRunVerification }) {
   const counters = [
     `${verification.commandCount} command${verification.commandCount === 1 ? "" : "s"}`,
-    verification.failedCommandCount > 0 ? `${verification.failedCommandCount} failed exit${verification.failedCommandCount === 1 ? "" : "s"}` : null,
-    verification.timedOutCommandCount && verification.timedOutCommandCount > 0
-      ? `${verification.timedOutCommandCount} timed out`
+    verification.failedCommandCount > 0
+      ? `${verification.failedCommandCount} failed exit${verification.failedCommandCount === 1 ? "" : "s"}`
       : null,
+    verification.timedOutCommandCount && verification.timedOutCommandCount > 0 ? `${verification.timedOutCommandCount} timed out` : null,
     verification.parsedReportCount > 0
       ? `${verification.parsedReportCount} report${verification.parsedReportCount === 1 ? "" : "s"}`
       : null,
-    verification.failedReportCount > 0 ? `${verification.failedReportCount} failed report${verification.failedReportCount === 1 ? "" : "s"}` : null
+    verification.failedReportCount > 0
+      ? `${verification.failedReportCount} failed report${verification.failedReportCount === 1 ? "" : "s"}`
+      : null
   ].filter((counter): counter is string => Boolean(counter));
 
   return (
@@ -6016,12 +6211,7 @@ function TaskRunPlan({
           <button type="button" className="secondary-command" disabled={isPlanActionBusy} onClick={() => onPlanAction("approve")}>
             Approve
           </button>
-          <button
-            type="button"
-            className="secondary-command"
-            disabled={isPlanActionBusy}
-            onClick={() => onPlanAction("request_revision")}
-          >
+          <button type="button" className="secondary-command" disabled={isPlanActionBusy} onClick={() => onPlanAction("request_revision")}>
             Revise
           </button>
           <button type="button" className="secondary-command" disabled={isPlanActionBusy} onClick={() => onPlanAction("cancel")}>
@@ -6039,7 +6229,11 @@ function TaskRunPlan({
               type="button"
               className="secondary-command"
               disabled={!canCreateWorktree}
-              title={canCreateWorktree ? "Draft this approved plan and arm a new task worktree" : "Select a git project before using task worktrees"}
+              title={
+                canCreateWorktree
+                  ? "Draft this approved plan and arm a new task worktree"
+                  : "Select a git project before using task worktrees"
+              }
               onClick={() => onDraftWorktreeApproval(worktreePrompt)}
             >
               Start worktree
@@ -6090,8 +6284,7 @@ function ActivityRow({
   const diff = item.diffPreview ?? buildActivityDiffPreview(item);
   const evidenceLinks = item.evidenceLinks ?? [];
   const showEvidenceActions =
-    (evidenceLinks.length > 0 && onOpenEvidence) ||
-    ((item.remediationPrompt || item.rollbackPrompt) && onDraftRemediation);
+    (evidenceLinks.length > 0 && onOpenEvidence) || ((item.remediationPrompt || item.rollbackPrompt) && onDraftRemediation);
 
   return (
     <article className={activityRowClassName(item, collapsed)}>
@@ -6269,7 +6462,13 @@ function LatestActivityScreenshot({ item }: { item: ActivityItem }) {
   );
 }
 
-function ActivityScreenshotPreview({ preview, compact = false }: { preview: NonNullable<ActivityItem["imagePreview"]>; compact?: boolean }) {
+function ActivityScreenshotPreview({
+  preview,
+  compact = false
+}: {
+  preview: NonNullable<ActivityItem["imagePreview"]>;
+  compact?: boolean;
+}) {
   const [imageState, setImageState] = useState<{ src: string | null; failed: boolean }>({ src: null, failed: false });
 
   useEffect(() => {
@@ -6350,7 +6549,10 @@ function localImageSrc(filePath: string) {
     return `file:///${normalized.split("/").map(encodeURIComponent).join("/")}`;
   }
   if (normalized.startsWith("/")) {
-    return `file://${normalized.split("/").map((part) => encodeURIComponent(part)).join("/")}`;
+    return `file://${normalized
+      .split("/")
+      .map((part) => encodeURIComponent(part))
+      .join("/")}`;
   }
   return normalized;
 }
@@ -6484,9 +6686,11 @@ function SettingsView({
   const [activeProviderId, setActiveProviderId] = useState(
     state.config.activeProviderId && initialProviders.some((provider) => provider.id === state.config.activeProviderId)
       ? state.config.activeProviderId
-      : initialProviders[0]?.id ?? "current"
+      : (initialProviders[0]?.id ?? "current")
   );
   const [tavilyApiKey, setTavilyApiKey] = useState("");
+  const [browserTaskProviderId, setBrowserTaskProviderId] = useState(state.config.browserTaskModel?.providerId ?? "");
+  const [browserTaskModelId, setBrowserTaskModelId] = useState(state.config.browserTaskModel?.model ?? "");
   const [trustMode, setTrustMode] = useState<TrustMode>(state.config.trustMode);
   const [mcpServersText, setMcpServersText] = useState(() => JSON.stringify(state.config.mcpServers ?? {}, null, 2));
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -6544,9 +6748,7 @@ function SettingsView({
   }, [state.workspace.root]);
 
   function updateSelectedProvider(patch: Partial<ProviderFormState>) {
-    setProviders((current) =>
-      current.map((provider) => (provider.id === activeProviderId ? { ...provider, ...patch } : provider))
-    );
+    setProviders((current) => current.map((provider) => (provider.id === activeProviderId ? { ...provider, ...patch } : provider)));
   }
 
   function addProvider() {
@@ -6594,7 +6796,11 @@ function SettingsView({
           workspacePolicyOverrides,
           workspaceScopeRules
         ),
-        workspacePolicyProfiles
+        workspacePolicyProfiles,
+        browserTaskModel:
+          browserTaskProviderId.trim() || browserTaskModelId.trim()
+            ? { providerId: browserTaskProviderId.trim() || undefined, model: browserTaskModelId.trim() || undefined }
+            : null
       };
       if (providerPatch.activeProvider.apiKey?.trim()) {
         patch.apiKey = providerPatch.activeProvider.apiKey.trim();
@@ -6799,7 +7005,14 @@ function SettingsView({
               <Plus size={15} />
               Add provider
             </button>
-            <button className="icon-button compact-icon-button" type="button" onClick={removeSelectedProvider} disabled={providers.length <= 1} title="Remove provider" aria-label="Remove provider">
+            <button
+              className="icon-button compact-icon-button"
+              type="button"
+              onClick={removeSelectedProvider}
+              disabled={providers.length <= 1}
+              title="Remove provider"
+              aria-label="Remove provider"
+            >
               <Trash2 size={14} />
             </button>
           </div>
@@ -6858,6 +7071,21 @@ function SettingsView({
           </select>
           <small className="field-note">Disable for text-only endpoints; enable for models that accept OpenAI image parts.</small>
         </label>
+        <label>
+          <span>Context window (tokens)</span>
+          <input
+            value={selectedProvider?.contextWindowTokens ?? ""}
+            onChange={(event) => {
+              const parsed = Number.parseInt(event.target.value, 10);
+              updateSelectedProvider({ contextWindowTokens: Number.isFinite(parsed) && parsed > 0 ? parsed : undefined });
+            }}
+            type="number"
+            min={1000}
+            step={1000}
+            placeholder="Auto (uses conservative default)"
+          />
+          <small className="field-note">This model's context window. Sets when Arivu compacts requests; leave blank for the default.</small>
+        </label>
         <label className="tavily-key-field">
           <span>Tavily API key</span>
           <input
@@ -6874,6 +7102,29 @@ function SettingsView({
             <option value="readonly">readonly</option>
             <option value="trusted">trusted</option>
           </select>
+        </label>
+        <label>
+          <span>Browser task LLM</span>
+          <select value={browserTaskProviderId} onChange={(event) => setBrowserTaskProviderId(event.target.value)}>
+            <option value="">Same as chat model</option>
+            {providers.map((provider) => (
+              <option key={provider.id} value={provider.id}>
+                {provider.name.trim() || "Unnamed provider"}
+              </option>
+            ))}
+          </select>
+          <small className="field-note">
+            Provider the in-page browser_task agent uses for its own model calls. Defaults to the active chat model.
+          </small>
+        </label>
+        <label>
+          <span>Browser task model id</span>
+          <input
+            value={browserTaskModelId}
+            onChange={(event) => setBrowserTaskModelId(event.target.value)}
+            placeholder="Provider default model"
+          />
+          <small className="field-note">Optional model override for browser_task. Pick a model with strong native tool calling.</small>
         </label>
       </div>
 
@@ -6910,22 +7161,17 @@ function SettingsView({
 
       <label className="mcp-config-field">
         <span>MCP servers</span>
-        <textarea
-          value={mcpServersText}
-          onChange={(event) => setMcpServersText(event.target.value)}
-          spellCheck={false}
-          rows={8}
-        />
-        <small className="field-note">
-          JSON object keyed by server name. Each server supports command, args, env, and disabled.
-        </small>
+        <textarea value={mcpServersText} onChange={(event) => setMcpServersText(event.target.value)} spellCheck={false} rows={8} />
+        <small className="field-note">JSON object keyed by server name. Each server supports command, args, env, and disabled.</small>
       </label>
 
       <section className="skills-settings-section" ref={skillsSectionRef} aria-label="Skills">
         <div className="settings-section-heading">
           <div>
             <strong>Skills</strong>
-            <span title={skillsRoot}>{skills.length} installed · {skillsRoot || "Global skills directory"}</span>
+            <span title={skillsRoot}>
+              {skills.length} installed · {skillsRoot || "Global skills directory"}
+            </span>
           </div>
           <button className="secondary-command" type="button" onClick={() => void refreshSkills()}>
             <RefreshCw size={15} />
@@ -6957,7 +7203,11 @@ function SettingsView({
           </label>
           <label>
             <span>Description</span>
-            <input value={skillDescription} onChange={(event) => setSkillDescription(event.target.value)} placeholder="When this skill should be used" />
+            <input
+              value={skillDescription}
+              onChange={(event) => setSkillDescription(event.target.value)}
+              placeholder="When this skill should be used"
+            />
           </label>
           <label className="skill-instructions-field">
             <span>Instructions</span>
@@ -6988,7 +7238,12 @@ function SettingsView({
             <strong>Task worktrees</strong>
             <span>{taskWorktreeInventorySummary(worktreeInventory)}</span>
           </div>
-          <button className="secondary-command" type="button" onClick={() => void refreshTaskWorktrees(true)} disabled={worktreeInventoryLoading}>
+          <button
+            className="secondary-command"
+            type="button"
+            onClick={() => void refreshTaskWorktrees(true)}
+            disabled={worktreeInventoryLoading}
+          >
             <RefreshCw size={15} />
             {worktreeInventoryLoading ? "Refreshing" : "Refresh"}
           </button>
@@ -7013,7 +7268,9 @@ function SettingsView({
                   <div className="settings-worktree-meta">
                     <span>{item.changedFiles === undefined ? "diff unknown" : `${item.changedFiles} changed`}</span>
                     {item.verificationStatus ? (
-                      <span title={item.verificationSummary}>{`verification ${verificationStatusLabel(item.verificationStatus).toLowerCase()}`}</span>
+                      <span
+                        title={item.verificationSummary}
+                      >{`verification ${verificationStatusLabel(item.verificationStatus).toLowerCase()}`}</span>
                     ) : null}
                     <span>{formatDateTime(item.updatedAt)}</span>
                   </div>
@@ -7291,9 +7548,7 @@ function CapabilityPolicyPanel({
             <strong>Workspace overrides</strong>
             <span title={workspaceRoot}>{workspaceRoot}</span>
           </div>
-          <p>
-            Tighten this workspace without changing the built-in {trustModeLabel(activeTrustMode)} posture.
-          </p>
+          <p>Tighten this workspace without changing the built-in {trustModeLabel(activeTrustMode)} posture.</p>
         </div>
         <div className="workspace-preset-grid" aria-label="Workspace policy presets">
           {WORKSPACE_POLICY_PRESETS.map((preset) => {
@@ -7333,7 +7588,12 @@ function CapabilityPolicyPanel({
             {teamBundle?.description ? <p>{teamBundle.description}</p> : null}
           </div>
           <div className="workspace-policy-team-actions">
-            <button className="secondary-command" type="button" onClick={reloadWorkspacePolicyBundle} disabled={workspacePolicyBundleLoading}>
+            <button
+              className="secondary-command"
+              type="button"
+              onClick={reloadWorkspacePolicyBundle}
+              disabled={workspacePolicyBundleLoading}
+            >
               <RefreshCw size={14} />
               {workspacePolicyBundleLoading ? "Checking" : "Reload"}
             </button>
@@ -7387,7 +7647,12 @@ function CapabilityPolicyPanel({
               <FileText size={14} />
               Apply
             </button>
-            <button className="secondary-command danger-command" type="button" onClick={deleteWorkspacePolicyProfile} disabled={!selectedProfile}>
+            <button
+              className="secondary-command danger-command"
+              type="button"
+              onClick={deleteWorkspacePolicyProfile}
+              disabled={!selectedProfile}
+            >
               <Trash2 size={14} />
               Delete
             </button>
@@ -7403,12 +7668,7 @@ function CapabilityPolicyPanel({
                 <Copy size={14} />
                 Copy JSON
               </button>
-              <button
-                className="secondary-command"
-                type="button"
-                onClick={applyWorkspacePolicyJson}
-                disabled={!transferText.trim()}
-              >
+              <button className="secondary-command" type="button" onClick={applyWorkspacePolicyJson} disabled={!transferText.trim()}>
                 <FileText size={14} />
                 Apply JSON
               </button>
@@ -7601,7 +7861,10 @@ function PolicyEffectBadge({ effect }: { effect: CapabilityPolicyEffect }) {
   return <span className={`policy-effect-badge ${effect}`}>{policyEffectLabel(effect)}</span>;
 }
 
-function workspacePolicyOverridesFromConfig(policies: WorkspaceCapabilityPolicies, workspaceRoot: string): WorkspaceCapabilityPolicyOverrides {
+function workspacePolicyOverridesFromConfig(
+  policies: WorkspaceCapabilityPolicies,
+  workspaceRoot: string
+): WorkspaceCapabilityPolicyOverrides {
   return policies[workspaceRoot]?.overrides ?? {};
 }
 
@@ -7631,8 +7894,9 @@ function updateWorkspacePoliciesForRoot(
 ): WorkspaceCapabilityPolicies {
   const next = { ...policies };
   const normalized = Object.fromEntries(
-    Object.entries(overrides).filter((entry): entry is [WorkspacePolicyCapability, CapabilityPolicyOverrideEffect] =>
-      WORKSPACE_POLICY_CAPABILITIES.includes(entry[0] as WorkspacePolicyCapability) && (entry[1] === "prompt" || entry[1] === "deny")
+    Object.entries(overrides).filter(
+      (entry): entry is [WorkspacePolicyCapability, CapabilityPolicyOverrideEffect] =>
+        WORKSPACE_POLICY_CAPABILITIES.includes(entry[0] as WorkspacePolicyCapability) && (entry[1] === "prompt" || entry[1] === "deny")
     )
   );
   const normalizedScopeRules = normalizeWorkspaceScopeRules(scopeRules);
@@ -7656,9 +7920,9 @@ function normalizeWorkspaceScopeRules(rules: WorkspaceScopePolicyRules | undefin
 function workspaceScopeRulesHaveEntries(rules: WorkspaceScopePolicyRules) {
   return Boolean(
     rules.blockedPathPrefixes?.length ||
-      rules.allowedNetworkDomains?.length ||
-      rules.allowedMcpServers?.length ||
-      rules.allowedBrowserTargetClasses?.length
+    rules.allowedNetworkDomains?.length ||
+    rules.allowedMcpServers?.length ||
+    rules.allowedBrowserTargetClasses?.length
   );
 }
 
@@ -7786,8 +8050,108 @@ function doctorCapabilityLabel(capability: DoctorCapabilityObservation["capabili
   return capability === "toolCalling" ? "Tool calling" : "Image input";
 }
 
+function FirstRunOnboarding({
+  initialBaseUrl,
+  initialModel,
+  initialTrustMode,
+  onStateUpdated,
+  onDismiss
+}: {
+  initialBaseUrl: string;
+  initialModel: string;
+  initialTrustMode: TrustMode;
+  onStateUpdated: (state: DesktopState) => void;
+  onDismiss: () => void;
+}) {
+  const [baseUrl, setBaseUrl] = useState(initialBaseUrl);
+  const [model, setModel] = useState(initialModel);
+  const [apiKey, setApiKey] = useState("");
+  const [trustMode, setTrustMode] = useState<TrustMode>(initialTrustMode);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<DoctorReport | null>(null);
+
+  const canSubmit = baseUrl.trim().length > 0 && model.trim().length > 0 && apiKey.trim().length > 0 && !busy;
+  const verified = report ? (report.summary.fail ?? 0) === 0 : false;
+
+  async function saveAndVerify() {
+    if (!canSubmit) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const patch = { baseUrl: baseUrl.trim(), model: model.trim(), apiKey: apiKey.trim(), trustMode };
+      const nextState = await window.arivu.saveConfig(patch);
+      onStateUpdated(nextState);
+      const doctorReport = await window.arivu.runDoctor(patch);
+      setReport(doctorReport);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <section className="onboarding-dialog" role="dialog" aria-modal="true" aria-label="Set up Arivu">
+        <header className="onboarding-header">
+          <h2>Welcome to Arivu</h2>
+          <p>Connect an OpenAI-compatible model to get started. You can change this later in Settings.</p>
+        </header>
+        <label>
+          <span>Base URL</span>
+          <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" />
+        </label>
+        <label>
+          <span>Model</span>
+          <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-4.1" />
+        </label>
+        <label>
+          <span>API key</span>
+          <input value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" placeholder="sk-..." />
+        </label>
+        <label>
+          <span>Trust mode</span>
+          <select value={trustMode} onChange={(event) => setTrustMode(event.target.value as TrustMode)}>
+            <option value="ask">ask — approve each action</option>
+            <option value="readonly">readonly — reads only, no writes/commands</option>
+            <option value="trusted">trusted — auto-approve safe actions</option>
+          </select>
+        </label>
+        {error ? <p className="onboarding-error">{error}</p> : null}
+        {report ? (
+          <ul className="onboarding-checks">
+            {report.checks.map((check) => (
+              <li key={check.id} className={`onboarding-check onboarding-check-${check.status}`}>
+                <strong>{check.label}</strong>: {check.message}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="onboarding-actions">
+          <button type="button" className="onboarding-skip" onClick={onDismiss}>
+            Skip for now
+          </button>
+          {verified ? (
+            <button type="button" className="onboarding-primary" onClick={onDismiss}>
+              Start using Arivu
+            </button>
+          ) : (
+            <button type="button" className="onboarding-primary" onClick={() => void saveAndVerify()} disabled={!canSubmit}>
+              {busy ? "Verifying…" : "Save & verify"}
+            </button>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function ApprovalDialog({ approval, onRespond }: { approval: ApprovalRequest; onRespond: (approved: boolean) => void }) {
-  const view = parseApprovalMessage(approval.message);
+  // Prefer the structured request from the main process; fall back to parsing the text message.
+  const view = (approval.request ? approvalViewFromRequest(approval.request) : undefined) ?? parseApprovalMessage(approval.message);
 
   return (
     <div className="modal-backdrop">
@@ -7837,12 +8201,12 @@ function ApprovalContent({ view, fallback }: { view: ApprovalView; fallback: str
                 <AlertTriangle size={13} />
                 {warning}
               </span>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 
   if (view.type === "write" && view.diff) {
     return (
@@ -7988,13 +8352,7 @@ function PasteReviewDialog({
   );
 }
 
-function WorkspaceScaffoldDialog({
-  onCancel,
-  onCreate
-}: {
-  onCancel: () => void;
-  onCreate: (options: WorkspaceScaffoldOptions) => void;
-}) {
+function WorkspaceScaffoldDialog({ onCancel, onCreate }: { onCancel: () => void; onCreate: (options: WorkspaceScaffoldOptions) => void }) {
   const [options, setOptions] = useState<Required<WorkspaceScaffoldOptions>>({
     initGit: false,
     npmPackage: false,
@@ -8067,6 +8425,7 @@ function providerFormsFromConfig(config: DesktopState["config"]): ProviderFormSt
       model: provider.model,
       toolCalling: provider.toolCalling ?? "auto",
       imageInput: provider.imageInput ?? "auto",
+      contextWindowTokens: provider.contextWindowTokens,
       apiKey: "",
       apiKeyPresent: provider.apiKeyPresent
     }));
@@ -8203,7 +8562,12 @@ function sessionLoopLabel(loop: AgentLoopState) {
 }
 
 function uniqueProviderId(baseId: string, providers: ProviderFormState[]) {
-  const normalizedBase = baseId.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "provider";
+  const normalizedBase =
+    baseId
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "provider";
   const used = new Set(providers.map((provider) => provider.id));
   if (!used.has(normalizedBase)) {
     return normalizedBase;
@@ -8264,6 +8628,7 @@ function validateProviderForms(
       model,
       toolCalling: provider.toolCalling ?? "auto",
       imageInput: provider.imageInput ?? "auto",
+      ...(provider.contextWindowTokens && provider.contextWindowTokens > 0 ? { contextWindowTokens: provider.contextWindowTokens } : {}),
       ...(provider.apiKey?.trim() ? { apiKey: provider.apiKey.trim() } : {})
     });
   }
@@ -8405,7 +8770,9 @@ function buildSlashCommandEntries({
       }
       return {
         ...command,
-        detail: disabledReason ? undefined : `${formatNumber(fileAttachmentCount)} / ${formatNumber(MAX_CONTEXT_FILE_ATTACHMENTS)} attached`,
+        detail: disabledReason
+          ? undefined
+          : `${formatNumber(fileAttachmentCount)} / ${formatNumber(MAX_CONTEXT_FILE_ATTACHMENTS)} attached`,
         disabledReason
       };
     }
@@ -8473,7 +8840,10 @@ function buildSessionCommandOutput({
     subtitle: "Local context estimate; provider context windows are not reported.",
     rows: [
       { label: "Chat ID", value: state.sessionId ?? "Draft chat (not saved yet)" },
-      { label: "Project", value: state.projectRoot === null ? "No project selected" : state.workspace.packageName ?? basename(state.projectRoot) },
+      {
+        label: "Project",
+        value: state.projectRoot === null ? "No project selected" : (state.workspace.packageName ?? basename(state.projectRoot))
+      },
       { label: "Workspace", value: state.workspace.root },
       { label: "Provider", value: provider ? `${provider.name} (${provider.baseUrl})` : state.config.baseUrl },
       { label: "Model", value: modelDisplayName(state.config.model) },
@@ -8491,6 +8861,16 @@ function buildSessionCommandOutput({
                 `${formatNumber(latestRun.approvals?.length ?? 0)} approvals`,
                 `${formatNumber(latestRun.artifacts.length)} artifacts`
               ].join(" - ")
+            }
+          ]
+        : []),
+      ...(latestRun?.usage
+        ? [
+            {
+              label: "Tokens used",
+              value: `${formatNumber(latestRun.usage.totalTokens)} total (${formatNumber(latestRun.usage.promptTokens)} prompt / ${formatNumber(
+                latestRun.usage.completionTokens
+              )} completion) over ${formatNumber(latestRun.usage.requestCount)} request${latestRun.usage.requestCount === 1 ? "" : "s"}`
             }
           ]
         : []),
@@ -8554,9 +8934,7 @@ function skillSummaryFromName(name: string): SkillSummary {
 }
 
 function estimateContextTokens(messages: ChatMessage[]) {
-  const transcript = messages
-    .map((message) => `${message.role}: ${chatContentToText(message.content)}`)
-    .join("\n\n");
+  const transcript = messages.map((message) => `${message.role}: ${chatContentToText(message.content)}`).join("\n\n");
   return estimateTokenCount(transcript);
 }
 
@@ -8616,10 +8994,7 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
   };
   activeProject.name = state.workspace.packageName ?? basename(state.workspace.root);
 
-  return [
-    activeProject,
-    ...projects.filter((project) => project.projectRoot !== activeProject.projectRoot)
-  ];
+  return [activeProject, ...projects.filter((project) => project.projectRoot !== activeProject.projectRoot)];
 }
 
 function compareProjectsForDisplay(left: ProjectSummary, right: ProjectSummary) {
@@ -9039,7 +9414,9 @@ function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null
   }
 
   for (const group of groups) {
-    group.status = group.run ? mergeActivityGroupStatus(group.run, deriveActivityGroupStatus(group.items)) : deriveActivityGroupStatus(group.items);
+    group.status = group.run
+      ? mergeActivityGroupStatus(group.run, deriveActivityGroupStatus(group.items))
+      : deriveActivityGroupStatus(group.items);
   }
 
   if (currentSessionRunning) {
@@ -9100,12 +9477,15 @@ function activityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
         ? patchArtifactDetail(patchArtifact)
         : fileChangeArtifact
           ? fileChangeArtifactDetail(fileChangeArtifact)
-      : tool.resultPreview ?? artifact?.summary ?? "";
+          : (tool.resultPreview ?? artifact?.summary ?? "");
     const resultSummary =
-      commandArtifactSummary(commandArtifact) ?? patchArtifactSummary(patchArtifact) ?? fileChangeArtifactSummary(fileChangeArtifact) ?? artifact?.summary;
+      commandArtifactSummary(commandArtifact) ??
+      patchArtifactSummary(patchArtifact) ??
+      fileChangeArtifactSummary(fileChangeArtifact) ??
+      artifact?.summary;
     const resultStatus =
       tool.status === "failed" ||
-      commandArtifact?.exitCode !== undefined && commandArtifact.exitCode !== 0 ||
+      (commandArtifact?.exitCode !== undefined && commandArtifact.exitCode !== 0) ||
       commandArtifact?.testReports?.some((report) => report.status === "failed")
         ? "failed"
         : "done";
@@ -9209,16 +9589,14 @@ function matchingApprovalForTool(run: AgentTaskRun, tool: AgentTaskRunToolCall) 
   if (approvals.length === 0) {
     return undefined;
   }
-  return approvals
-    .slice()
-    .sort((left, right) => {
-      const leftRank = approvalMatchRank(left.status);
-      const rightRank = approvalMatchRank(right.status);
-      if (leftRank !== rightRank) {
-        return rightRank - leftRank;
-      }
-      return approvalTimestamp(right).localeCompare(approvalTimestamp(left));
-    })[0];
+  return approvals.slice().sort((left, right) => {
+    const leftRank = approvalMatchRank(left.status);
+    const rightRank = approvalMatchRank(right.status);
+    if (leftRank !== rightRank) {
+      return rightRank - leftRank;
+    }
+    return approvalTimestamp(right).localeCompare(approvalTimestamp(left));
+  })[0];
 }
 
 function approvalMatchRank(status: AgentTaskRunApprovalStatus) {
@@ -9296,7 +9674,9 @@ function approvalChangePreviewDetail(preview: AgentTaskRunApprovalChangePreview)
     preview.path ? `path: ${preview.path}` : undefined,
     preview.writeMode ? `mode: ${preview.writeMode}` : undefined,
     preview.changedPaths?.length ? `changedPaths:\n${preview.changedPaths.map((changedPath) => `- ${changedPath}`).join("\n")}` : undefined,
-    preview.additions !== undefined || preview.deletions !== undefined ? `stats: +${preview.additions ?? 0} -${preview.deletions ?? 0}` : undefined,
+    preview.additions !== undefined || preview.deletions !== undefined
+      ? `stats: +${preview.additions ?? 0} -${preview.deletions ?? 0}`
+      : undefined,
     preview.lineCount !== undefined ? `lines: ${preview.lineCount}` : undefined,
     preview.bytes !== undefined ? `bytes: ${preview.bytes}` : undefined,
     preview.diffTruncated ? "diff: truncated" : undefined,
@@ -9395,7 +9775,9 @@ function commandArtifactSummary(artifact?: AgentTaskRunArtifact) {
     artifact.signal === undefined ? undefined : `Signal ${artifact.signal}`,
     artifact.durationMs === undefined ? undefined : formatDurationMs(artifact.durationMs),
     testReportSummary(artifact.testReports) ??
-      (artifact.reportPaths?.length ? `${artifact.reportPaths.length} report path${artifact.reportPaths.length === 1 ? "" : "s"}` : undefined),
+      (artifact.reportPaths?.length
+        ? `${artifact.reportPaths.length} report path${artifact.reportPaths.length === 1 ? "" : "s"}`
+        : undefined),
     diagnosticSummary(artifact.diagnostics)
   ].filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join(" - ") : artifact.summary;
@@ -9436,7 +9818,7 @@ function commandArtifactDetail(artifact: AgentTaskRunArtifact) {
     sections.push(`stderr${artifact.stderrTruncated ? " (truncated)" : ""}:\n${artifact.stderr || "(empty)"}`);
   }
 
-  return sections.length > 0 ? sections.join("\n\n") : artifact.summary ?? "";
+  return sections.length > 0 ? sections.join("\n\n") : (artifact.summary ?? "");
 }
 
 function patchArtifactSummary(artifact?: AgentTaskRunArtifact) {
@@ -9460,7 +9842,7 @@ function patchArtifactDetail(artifact: AgentTaskRunArtifact) {
       : undefined,
     artifact.diffTruncated ? "diff: truncated" : undefined
   ].filter((part): part is string => Boolean(part));
-  return metadata.length > 0 ? metadata.join("\n\n") : artifact.summary ?? "";
+  return metadata.length > 0 ? metadata.join("\n\n") : (artifact.summary ?? "");
 }
 
 function patchArtifactDiffPreview(artifact: AgentTaskRunArtifact): DiffPreview | undefined {
@@ -9473,11 +9855,7 @@ function patchArtifactDiffPreview(artifact: AgentTaskRunArtifact): DiffPreview |
   };
 }
 
-function buildEditRollbackPrompt(
-  run: AgentTaskRun,
-  patchArtifact?: AgentTaskRunArtifact,
-  fileChangeArtifact?: AgentTaskRunArtifact
-) {
+function buildEditRollbackPrompt(run: AgentTaskRun, patchArtifact?: AgentTaskRunArtifact, fileChangeArtifact?: AgentTaskRunArtifact) {
   const artifact = patchArtifact ?? fileChangeArtifact;
   if (!artifact || (artifact.kind !== "patch" && artifact.kind !== "file_change")) {
     return undefined;
@@ -9546,7 +9924,7 @@ function fileChangeArtifactDetail(artifact: AgentTaskRunArtifact) {
     artifact.lineCount !== undefined ? `lines: ${artifact.lineCount}` : undefined,
     artifact.contentTruncated ? "content: truncated" : undefined
   ].filter((part): part is string => Boolean(part));
-  return metadata.length > 0 ? metadata.join("\n") : artifact.summary ?? "";
+  return metadata.length > 0 ? metadata.join("\n") : (artifact.summary ?? "");
 }
 
 function fileChangeArtifactDiffPreview(artifact: AgentTaskRunArtifact): DiffPreview | undefined {
@@ -9660,7 +10038,9 @@ function formatFailedTestLine(failure: NonNullable<AgentTaskRunTestReport["faile
 function formatFindingLine(finding: NonNullable<AgentTaskRunTestReport["findingDetails"]>[number]) {
   const rule = finding.ruleId ? `${finding.ruleId}` : "finding";
   const level = finding.level ? ` ${finding.level}` : "";
-  const location = finding.path ? ` ${finding.path}${finding.line ? `:${finding.line}${finding.column ? `:${finding.column}` : ""}` : ""}` : "";
+  const location = finding.path
+    ? ` ${finding.path}${finding.line ? `:${finding.line}${finding.column ? `:${finding.column}` : ""}` : ""}`
+    : "";
   const message = finding.message ? ` - ${finding.message}` : "";
   return `${rule}${level}${location}${message}`;
 }
@@ -9941,7 +10321,9 @@ function taskWorktreeActionsForRun(run: AgentTaskRun) {
       actions.push({
         id: "preview",
         label: "Preview",
-        title: worktree.conflict ? "Resolve or abort conflicts before generating a patch preview" : "Generate a patch preview before merging",
+        title: worktree.conflict
+          ? "Resolve or abort conflicts before generating a patch preview"
+          : "Generate a patch preview before merging",
         icon: <FileText size={12} />,
         disabled: Boolean(worktree.conflict),
         disabledReason: conflictBlockedReason
@@ -9949,7 +10331,9 @@ function taskWorktreeActionsForRun(run: AgentTaskRun) {
       actions.push({
         id: "sync",
         label: "Sync",
-        title: worktree.conflict ? "Conflict resolution is already in progress" : "Sync this task branch with the current original checkout",
+        title: worktree.conflict
+          ? "Conflict resolution is already in progress"
+          : "Sync this task branch with the current original checkout",
         icon: <GitBranch size={12} />,
         disabled: Boolean(worktree.conflict),
         disabledReason: conflictBlockedReason
@@ -9975,14 +10359,12 @@ function taskWorktreeActionsForRun(run: AgentTaskRun) {
           disabledReason: promotionBlockedReason
         });
       }
-      actions.push(
-        {
-          id: "discard",
-          label: "Discard",
-          title: "Delete this task worktree and its task branch",
-          icon: <Trash2 size={12} />
-        }
-      );
+      actions.push({
+        id: "discard",
+        label: "Discard",
+        title: "Delete this task worktree and its task branch",
+        icon: <Trash2 size={12} />
+      });
       if (canMerge) {
         actions.splice(2, 0, {
           id: "merge",
@@ -10405,6 +10787,10 @@ function applyStreamEventToMessages(messages: ChatMessage[], event: AgentStreamE
     return next;
   }
 
+  if (event.type === "browser_task_progress") {
+    return messages;
+  }
+
   const existingIndex = messages.findIndex((message) => message.role === "tool" && message.toolCallId === event.toolCallId);
   if (existingIndex >= 0) {
     const next = [...messages];
@@ -10555,80 +10941,4 @@ function savePersistedUiState(state: PersistedUiState) {
   } catch {
     // Local storage can be unavailable in hardened browser contexts.
   }
-}
-
-function formatError(error: unknown) {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
-
-async function writeClipboardText(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.inset = "0 auto auto 0";
-  textarea.style.width = "1px";
-  textarea.style.height = "1px";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {
-    if (!document.execCommand("copy")) {
-      throw new Error("Copy failed.");
-    }
-  } finally {
-    document.body.removeChild(textarea);
-  }
-}
-
-function basename(value: string) {
-  return value.split(/[\\/]/).filter(Boolean).at(-1) ?? value;
-}
-
-function formatDateTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short"
-  }).format(date);
-}
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat().format(value);
-}
-
-function formatDurationMs(durationMs: number) {
-  if (durationMs < 1_000) {
-    return `${durationMs} ms`;
-  }
-  if (durationMs < 60_000) {
-    const seconds = durationMs / 1_000;
-    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
-  }
-  const minutes = Math.floor(durationMs / 60_000);
-  const seconds = Math.round((durationMs % 60_000) / 1_000);
-  return `${minutes}m ${seconds}s`;
-}
-
-function formatBytes(bytes: number) {
-  return `${Math.round(bytes / 1024 / 1024)} MB`;
-}
-
-function capitalize(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
 }

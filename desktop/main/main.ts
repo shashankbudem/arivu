@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -7,12 +7,9 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type { IpcMainInvokeEvent, NativeImage, WebContents } from "electron";
 import { execa } from "execa";
 import { Agent } from "../../src/agent/Agent.js";
+import { ChangeCheckpoint, type ChangeCheckpointEntry } from "../../src/tools/changeCheckpoint.js";
 import { compactSessionMessages } from "../../src/agent/contextCompaction.js";
-import {
-  chatContentHasRenderableContent,
-  chatContentToText,
-  trimChatContent
-} from "../../src/agent/content.js";
+import { chatContentHasRenderableContent, chatContentToText, trimChatContent } from "../../src/agent/content.js";
 import { buildTaskRunReportRemediationInstruction } from "../../src/agent/reportRemediation.js";
 import { createSkill, discoverSkills, globalSkillsDir, type CreateSkillInput, type SkillSummary } from "../../src/agent/skills.js";
 import { OpenAICompatibleChatClient, type ProviderCapabilityObservation } from "../../src/agent/OpenAICompatibleChatClient.js";
@@ -77,9 +74,12 @@ import type {
   AgentTaskRunArtifact,
   AgentTaskRunVerificationStatus,
   AgentTaskRunWorktreeStatus,
+  ApprovalPromptRequest,
   ChatMessage,
+  ChatUsage,
   ToolSchema
 } from "../../src/agent/types.js";
+import { AgentRunAbortedError } from "../../src/agent/types.js";
 import {
   appDataDir,
   appEnv,
@@ -91,8 +91,10 @@ import {
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot,
   type AppConfig,
+  type BrowserTaskModelConfigProfile,
   type LlmProviderProfile
 } from "../../src/config.js";
+import { resolveBrowserTaskModel } from "../../src/agent/browserTaskModel.js";
 import { runDoctor, type DoctorReport } from "../../src/diagnostics/doctor.js";
 import { ApprovalManager } from "../../src/permissions/ApprovalManager.js";
 import { describeCapabilityPolicies, evaluateCapabilityPolicy } from "../../src/permissions/capabilityPolicy.js";
@@ -107,7 +109,7 @@ import { SessionStore } from "../../src/sessions/SessionStore.js";
 import { detachSessionFromProject, sessionBelongsToProject, sessionProjectRoot } from "../../src/sessions/sessionList.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
-import type { BrowserBounds, BrowserMode, BrowserState } from "../../src/tools/browserControl.js";
+import type { BrowserBounds, BrowserMode, BrowserState, BrowserTaskModelConfig } from "../../src/tools/browserControl.js";
 import { detectWorkspace, type WorkspaceInfo } from "../../src/workspace.js";
 import { DesktopBrowserController } from "./browserController.js";
 import { isExternalHttpUrl, isTrustedAppNavigationUrl } from "./navigationSafety.js";
@@ -117,6 +119,10 @@ const MAX_CONTEXT_FILE_ATTACHMENTS = 6;
 const MAX_CONTEXT_FILE_BYTES = 256 * 1024;
 const MAX_CONTEXT_FILE_CHARS = 24_000;
 
+type PublicBrowserTaskModelProfile = Omit<BrowserTaskModelConfigProfile, "apiKey"> & {
+  apiKeyPresent: boolean;
+};
+
 type PublicConfig = {
   baseUrl: string;
   model: string;
@@ -124,6 +130,7 @@ type PublicConfig = {
   imageInput: AppConfig["imageInput"];
   activeProviderId?: string;
   providers: PublicLlmProviderProfile[];
+  browserTaskModel?: PublicBrowserTaskModelProfile;
   trustMode: AppConfig["trustMode"];
   apiKeyPresent: boolean;
   tavilyApiKeyPresent: boolean;
@@ -302,6 +309,8 @@ type ConfigPatch = {
   mcpServers?: AppConfig["mcpServers"];
   workspacePolicies?: AppConfig["workspacePolicies"];
   workspacePolicyProfiles?: AppConfig["workspacePolicyProfiles"];
+  /** Settings-managed browser_task model override; null clears it back to "follow the chat model". */
+  browserTaskModel?: { providerId?: string; model?: string } | null;
 };
 
 type PublicLlmProviderProfile = Omit<LlmProviderProfile, "apiKey"> & {
@@ -344,6 +353,7 @@ type CompactContextResult = {
 type ApprovalPayload = {
   id: string;
   message: string;
+  request?: ApprovalPromptRequest;
 };
 
 type ModelListResponse = {
@@ -370,6 +380,7 @@ class DesktopController {
   private readonly store = new SessionStore();
   private readonly runningSessionIds = new Set<string>();
   private readonly loopStopRequests = new Set<string>();
+  private readonly runAbortControllers = new Map<string, AbortController>();
   private readonly modelListCache = new Map<string, { models: string[]; fetchedAt: number }>();
   private activeViewRevision = 0;
   private cwd: string;
@@ -635,6 +646,7 @@ class DesktopController {
       throw new Error("Wait for this chat to finish before deleting it.");
     }
     await this.store.delete(id);
+    await rm(path.join(appDataDir(), "checkpoints", id), { recursive: true, force: true });
     if (this.session?.id === id) {
       this.session = undefined;
       this.markActiveViewChanged();
@@ -694,6 +706,54 @@ class DesktopController {
       compacted: result.compacted,
       compactedMessageCount: result.compactedMessageCount,
       remainingMessageCount: result.remainingMessageCount
+    };
+  }
+
+  async summarizeContext(): Promise<CompactContextResult> {
+    if (this.session?.id && this.runningSessionIds.has(this.session.id)) {
+      throw new Error("Agent is already running in this chat.");
+    }
+    if (!this.session) {
+      throw new Error("No active chat to summarize.");
+    }
+
+    const session = this.session;
+    const config = await loadConfig();
+    const policyWorkspace = await detectWorkspace(session.cwd);
+    const approvals = new ApprovalManager(
+      config.trustMode,
+      (message, request) => requestApproval(message, request),
+      workspacePolicyOverridesForRoot(config, policyWorkspace.root),
+      undefined,
+      workspaceScopeRulesForRoot(config, policyWorkspace.root)
+    );
+    const agent = new Agent({
+      client: new OpenAICompatibleChatClient(config),
+      approvals,
+      cwd: session.cwd,
+      projectRoot: session.projectRoot,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      tavilyApiKey: config.tavilyApiKey,
+      mcpServers: config.mcpServers,
+      contextWindowTokens: config.contextWindowTokens,
+      session
+    });
+
+    const result = await agent.summarizeContext();
+    if (result.compacted) {
+      session.updatedAt = new Date().toISOString();
+      await this.store.save(session);
+      if (this.session?.id === session.id) {
+        this.session = session;
+      }
+    }
+
+    return {
+      state: await this.state(),
+      compacted: result.compacted,
+      compactedMessageCount: result.compactedMessageCount,
+      remainingMessageCount: session.messages.filter((message) => message.role !== "system").length
     };
   }
 
@@ -1033,7 +1093,8 @@ class DesktopController {
         });
         item.logArtifactId = artifact.id;
         item.logFetchedAt = now;
-        item.logError = result.exitCode === 0 ? undefined : truncateInlineText(result.stderr || result.stdout || `Exit code ${result.exitCode}`, 240);
+        item.logError =
+          result.exitCode === 0 ? undefined : truncateInlineText(result.stderr || result.stdout || `Exit code ${result.exitCode}`, 240);
       } catch (error) {
         const message = formatError(error);
         const artifact = upsertTaskRunCommandArtifact(taskRun, {
@@ -1185,6 +1246,9 @@ class DesktopController {
     if (patch.workspacePolicyProfiles) {
       next.workspacePolicyProfiles = patch.workspacePolicyProfiles;
     }
+    if (patch.browserTaskModel !== undefined) {
+      next.browserTaskModel = mergeBrowserTaskModelPatch(saved.browserTaskModel, patch.browserTaskModel);
+    }
     if (activeProviderId && next.providers?.some((provider) => provider.id === activeProviderId)) {
       next.providers = updateProviderRuntime(next.providers, activeProviderId, patch);
       if (patch.activeProviderId !== undefined || patch.providers) {
@@ -1194,6 +1258,7 @@ class DesktopController {
           next.model = activeProvider.model;
           next.toolCalling = activeProvider.toolCalling;
           next.imageInput = activeProvider.imageInput;
+          next.contextWindowTokens = activeProvider.contextWindowTokens;
           next.apiKey = activeProvider.apiKey;
         }
       }
@@ -1333,6 +1398,7 @@ class DesktopController {
       session: originSession,
       providers: modelProviders
     });
+    const browserTaskModel = resolveBrowserTaskModel(baseConfig, modelSelection);
     const config = configForModelSelection(baseConfig, modelSelection);
     const now = new Date().toISOString();
     const session = applyModelSelectionToSession(
@@ -1362,7 +1428,8 @@ class DesktopController {
     }
     const before = session.messages.length;
     const lastMessage = session.messages.at(-1);
-    const loopState = !planModeEnabled && loopOptions.enabled ? createAgentLoopState(trimmedContent, loopOptions.maxIterations, now) : undefined;
+    const loopState =
+      !planModeEnabled && loopOptions.enabled ? createAgentLoopState(trimmedContent, loopOptions.maxIterations, now) : undefined;
     const canReuseLastUserMessage =
       (reuseLastUserMessage || retryFromUserMessageIndex !== undefined) &&
       lastMessage?.role === "user" &&
@@ -1411,7 +1478,9 @@ class DesktopController {
     if (!planModeEnabled && worktreeOptions.enabled) {
       const continuedRun = worktreeOptions.taskRunId ? this.findTaskRun(session, worktreeOptions.taskRunId) : undefined;
       const replayRun = worktreeOptions.replayOfTaskRunId ? this.findTaskRun(session, worktreeOptions.replayOfTaskRunId) : undefined;
-      const plannedFromRun = worktreeOptions.plannedFromTaskRunId ? this.findTaskRun(session, worktreeOptions.plannedFromTaskRunId) : undefined;
+      const plannedFromRun = worktreeOptions.plannedFromTaskRunId
+        ? this.findTaskRun(session, worktreeOptions.plannedFromTaskRunId)
+        : undefined;
       if (worktreeOptions.taskRunId && !continuedRun?.worktree?.enabled) {
         throw new Error("Task worktree to continue was not found.");
       }
@@ -1488,7 +1557,9 @@ class DesktopController {
                 "When possible, end each bullet with `[evidence: file=path; command=command; report=path; check=name]` using only labels that match actual work or verification evidence."
               ].join("\n")
             : undefined,
-          continuedRun ? `This prompt continues existing task run ${continuedRun.id}. Keep the repair in the same task worktree.` : undefined,
+          continuedRun
+            ? `This prompt continues existing task run ${continuedRun.id}. Keep the repair in the same task worktree.`
+            : undefined,
           replayOfTaskRunId
             ? `This prompt replays verification evidence from task run ${replayOfTaskRunId}. Rerun the selected commands against the current task worktree and report the results.`
             : undefined
@@ -1498,7 +1569,11 @@ class DesktopController {
       };
       const instructionIndex = canReuseLastUserMessage ? session.messages.indexOf(lastMessage) : userMessageIndex;
       if (canReuseLastUserMessage) {
-        session.messages.splice(instructionIndex >= 0 ? instructionIndex : Math.max(0, session.messages.length - 1), 0, worktreeInstruction);
+        session.messages.splice(
+          instructionIndex >= 0 ? instructionIndex : Math.max(0, session.messages.length - 1),
+          0,
+          worktreeInstruction
+        );
       } else {
         session.messages.splice(userMessageIndex, 0, worktreeInstruction);
       }
@@ -1522,6 +1597,7 @@ class DesktopController {
       content,
       skillNames,
       config,
+      browserTaskModel,
       providerId: modelSelection.providerId,
       loopEnabled: Boolean(loopState),
       planModeEnabled,
@@ -1547,6 +1623,7 @@ class DesktopController {
     content,
     skillNames,
     config,
+    browserTaskModel,
     providerId,
     loopEnabled,
     planModeEnabled,
@@ -1558,6 +1635,7 @@ class DesktopController {
     content: ChatMessage["content"];
     skillNames: string[];
     config: AppConfig;
+    browserTaskModel: BrowserTaskModelConfig;
     providerId?: string;
     loopEnabled: boolean;
     planModeEnabled: boolean;
@@ -1570,11 +1648,13 @@ class DesktopController {
     const scopeRules = workspaceScopeRulesForRoot(config, policyWorkspace.root);
     const approvals = new ApprovalManager(
       config.trustMode,
-      (message) => requestApproval(message),
+      (message, request) => requestApproval(message, request),
       policyOverrides,
       (event) => this.recordApprovalEvent(session, taskRunId, event),
       scopeRules
     );
+    // Only checkpoint direct workspace runs; worktree runs are isolated and reverted via git instead.
+    const checkpoint = executionCwd === undefined ? new ChangeCheckpoint() : undefined;
     const agent = new Agent({
       client: new OpenAICompatibleChatClient({
         ...config,
@@ -1594,10 +1674,17 @@ class DesktopController {
       mcpServers: config.mcpServers,
       scopePolicyRules: scopeRules,
       browser: browserController,
+      browserTaskModel,
       directEditReview: executionCwd === undefined,
+      contextWindowTokens: config.contextWindowTokens,
+      // Checkpoint direct workspace edits so they can be undone; worktree runs already isolate changes.
+      checkpoint,
       session
     });
 
+    const abortController = new AbortController();
+    this.runAbortControllers.set(session.id, abortController);
+    const onUsage = (usage: ChatUsage) => this.recordTaskRunUsage(session, taskRunId, usage);
     try {
       this.markTaskRun(session, taskRunId, "running");
       const result = loopEnabled
@@ -1608,15 +1695,20 @@ class DesktopController {
             skillNames,
             taskRunId,
             executionCwd: executionCwd ?? session.cwd,
-            eventTarget
+            eventTarget,
+            signal: abortController.signal,
+            onUsage
           })
         : await agent.run(content, {
             skillNames,
             promptAlreadyInSession: true,
             allowedToolNames: planModeEnabled ? PLAN_MODE_TOOL_NAMES : undefined,
-            onEvent: this.agentEventRecorder(session, taskRunId, eventTarget, executionCwd ?? session.cwd)
+            onEvent: this.agentEventRecorder(session, taskRunId, eventTarget, executionCwd ?? session.cwd),
+            signal: abortController.signal,
+            onUsage
           });
       await this.recordLatestAssistantTaskMetadata(result.session, taskRunId);
+      await this.persistRunCheckpoint(result.session, taskRunId, checkpoint);
       this.finishSessionTaskRun(result.session, taskRunId, taskRunStatusForLoop(result.session.agentLoop));
       await this.store.save(result.session);
       if (this.session?.id === result.session.id) {
@@ -1626,25 +1718,122 @@ class DesktopController {
       await this.sendSessionLifecycleEvent("completed", result.session, { output: result.output });
     } catch (error) {
       this.runningSessionIds.delete(session.id);
+      const stopped = error instanceof AgentRunAbortedError || abortController.signal.aborted;
       const errorText = formatError(error);
       session.updatedAt = new Date().toISOString();
       if (session.agentLoop && ["running", "stopping"].includes(session.agentLoop.status)) {
         session.agentLoop = finishAgentLoopIteration(session.agentLoop, {
-          status: "failed",
-          error: errorText,
+          status: stopped ? "stopped" : "failed",
+          error: stopped ? undefined : errorText,
           now: session.updatedAt
         });
-        session.agentLoop = finishAgentLoop(session.agentLoop, "failed");
+        session.agentLoop = finishAgentLoop(session.agentLoop, stopped ? "stopped" : "failed");
         this.syncTaskRunLoopState(session, taskRunId);
         this.loopStopRequests.delete(session.id);
       }
-      this.finishSessionTaskRun(session, taskRunId, "failed", errorText);
-      await this.store.save(session);
-      if (this.session?.id === session.id) {
-        this.session = session;
+      if (stopped) {
+        await this.persistRunCheckpoint(session, taskRunId, checkpoint);
+        this.finishSessionTaskRun(session, taskRunId, "stopped");
+        await this.store.save(session);
+        if (this.session?.id === session.id) {
+          this.session = session;
+        }
+        await this.sendSessionLifecycleEvent("completed", session, { output: "Run stopped." });
+      } else {
+        this.finishSessionTaskRun(session, taskRunId, "failed", errorText);
+        await this.store.save(session);
+        if (this.session?.id === session.id) {
+          this.session = session;
+        }
+        await this.sendSessionLifecycleEvent("failed", session, { error: errorText });
       }
-      await this.sendSessionLifecycleEvent("failed", session, { error: formatError(error) });
+    } finally {
+      if (this.runAbortControllers.get(session.id) === abortController) {
+        this.runAbortControllers.delete(session.id);
+      }
+      this.loopStopRequests.delete(session.id);
     }
+  }
+
+  private recordTaskRunUsage(session: AgentSession, taskRunId: string | undefined, usage: ChatUsage) {
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    const previous = taskRun.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, requestCount: 0 };
+    taskRun.usage = {
+      promptTokens: previous.promptTokens + (usage.promptTokens ?? 0),
+      completionTokens: previous.completionTokens + (usage.completionTokens ?? 0),
+      totalTokens: previous.totalTokens + (usage.totalTokens ?? (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
+      requestCount: previous.requestCount + 1
+    };
+    taskRun.updatedAt = new Date().toISOString();
+  }
+
+  async stopAgentRun(sessionId = this.session?.id) {
+    if (!sessionId) {
+      throw new Error("No active run to stop.");
+    }
+    // Also flag any active loop so it does not queue another iteration after the abort unwinds.
+    this.loopStopRequests.add(sessionId);
+    const controller = this.runAbortControllers.get(sessionId);
+    controller?.abort(new AgentRunAbortedError());
+    return this.state();
+  }
+
+  private checkpointFile(sessionId: string, taskRunId: string) {
+    return path.join(appDataDir(), "checkpoints", sessionId, `${taskRunId}.json`);
+  }
+
+  private async persistRunCheckpoint(session: AgentSession, taskRunId: string | undefined, checkpoint: ChangeCheckpoint | undefined) {
+    if (!checkpoint || checkpoint.size === 0 || !taskRunId) {
+      return;
+    }
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    const file = this.checkpointFile(session.id, taskRunId);
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    await writeFile(file, JSON.stringify(checkpoint.toJSON()), { encoding: "utf8", mode: 0o600 });
+    taskRun.checkpoint = { changedPaths: checkpoint.changedPaths(), capturedAt: new Date().toISOString() };
+    taskRun.updatedAt = taskRun.checkpoint.capturedAt;
+  }
+
+  async undoTaskRun(input: { sessionId?: string; taskRunId: string }): Promise<{ state: DesktopState; revertedCount: number }> {
+    const sessionId = input.sessionId ?? this.session?.id;
+    if (!sessionId) {
+      throw new Error("No session selected for undo.");
+    }
+    if (this.runningSessionIds.has(sessionId)) {
+      throw new Error("Stop the run before undoing its changes.");
+    }
+    const session = this.session?.id === sessionId ? this.session : await this.store.load(sessionId);
+    const taskRun = this.findTaskRun(session, input.taskRunId);
+    if (!taskRun?.checkpoint) {
+      throw new Error("No revertible changes were recorded for this run.");
+    }
+    if (taskRun.checkpoint.revertedAt) {
+      throw new Error("This run's changes were already reverted.");
+    }
+    const file = this.checkpointFile(sessionId, input.taskRunId);
+    const raw = await readFile(file, "utf8").catch(() => undefined);
+    if (!raw) {
+      throw new Error("Checkpoint data for this run is no longer available.");
+    }
+    const entries = JSON.parse(raw) as ChangeCheckpointEntry[];
+    const reverted = await new ChangeCheckpoint(entries).revert();
+    const now = new Date().toISOString();
+    taskRun.checkpoint = { ...taskRun.checkpoint, revertedAt: now };
+    taskRun.updatedAt = now;
+    session.updatedAt = now;
+    await this.store.save(session);
+    await rm(file, { force: true });
+    if (this.session?.id === session.id) {
+      this.session = session;
+    }
+    await this.sendSessionLifecycleEvent("updated", session);
+    return { state: await this.state(), revertedCount: reverted.length };
   }
 
   private markTaskRun(session: AgentSession, taskRunId: string | undefined, status: AgentTaskRun["status"]) {
@@ -1736,7 +1925,8 @@ class DesktopController {
         return;
       }
       const now = new Date().toISOString();
-      const changedPlan = taskRun.plan?.sourceMessageIndex === index ? false : recordTaskRunAssistantPlan(taskRun, message.content, now, index);
+      const changedPlan =
+        taskRun.plan?.sourceMessageIndex === index ? false : recordTaskRunAssistantPlan(taskRun, message.content, now, index);
       const changedCompletion =
         taskRun.completion?.sourceMessageIndex === index ? false : recordTaskRunAssistantCompletion(taskRun, message.content, now, index);
       const changed = changedPlan || changedCompletion;
@@ -1770,7 +1960,9 @@ class DesktopController {
     skillNames,
     taskRunId,
     executionCwd,
-    eventTarget
+    eventTarget,
+    signal,
+    onUsage
   }: {
     agent: Agent;
     session: AgentSession;
@@ -1779,6 +1971,8 @@ class DesktopController {
     taskRunId?: string;
     executionCwd?: string;
     eventTarget?: WebContents;
+    signal?: AbortSignal;
+    onUsage?: (usage: ChatUsage) => void | Promise<void>;
   }): Promise<{ output: string; session: AgentSession }> {
     let output = "";
     let currentSession = session;
@@ -1808,9 +2002,11 @@ class DesktopController {
           ? await agent.run(content, {
               skillNames,
               promptAlreadyInSession: true,
-              onEvent
+              onEvent,
+              signal,
+              onUsage
             })
-          : await agent.continue({ onEvent });
+          : await agent.continue({ onEvent, signal, onUsage });
 
       currentSession = result.session;
       const decision = stripAgentLoopDecision(currentSession) ?? "done";
@@ -1957,7 +2153,11 @@ class DesktopController {
     );
   }
 
-  private async sendSessionLifecycleEvent(type: SessionLifecycleEvent["type"], session: AgentSession, extra: Pick<SessionLifecycleEvent, "output" | "error"> = {}) {
+  private async sendSessionLifecycleEvent(
+    type: SessionLifecycleEvent["type"],
+    session: AgentSession,
+    extra: Pick<SessionLifecycleEvent, "output" | "error"> = {}
+  ) {
     if (!mainWindow || mainWindow.isDestroyed()) {
       return;
     }
@@ -1980,8 +2180,8 @@ class DesktopController {
     const shouldUseSessionModel = Boolean(sessionModel && !isAutoModel(sessionModel));
     return {
       ...config,
-      model: shouldUseSessionModel ? sessionModel ?? config.model : config.model,
-      baseUrl: shouldUseSessionModel ? session?.baseUrl ?? config.baseUrl : config.baseUrl,
+      model: shouldUseSessionModel ? (sessionModel ?? config.model) : config.model,
+      baseUrl: shouldUseSessionModel ? (session?.baseUrl ?? config.baseUrl) : config.baseUrl,
       trustMode: session?.trustMode ?? config.trustMode
     };
   }
@@ -2071,7 +2271,7 @@ class DesktopController {
       return;
     }
 
-    let saved = await loadConfig({ includeEnv: false });
+    const saved = await loadConfig({ includeEnv: false });
     let next = saved;
     for (const observation of report.capabilityObservations) {
       next = applyProviderCapabilityObservation(next, {
@@ -2381,6 +2581,7 @@ function toPublicConfig(config: AppConfig): PublicConfig {
     imageInput: config.imageInput,
     activeProviderId: config.activeProviderId,
     providers: config.providers.map(toPublicProvider),
+    browserTaskModel: config.browserTaskModel ? toPublicBrowserTaskModel(config.browserTaskModel) : undefined,
     trustMode: config.trustMode,
     apiKeyPresent: Boolean(config.apiKey),
     tavilyApiKeyPresent: Boolean(config.tavilyApiKey),
@@ -2398,8 +2599,36 @@ function toPublicProvider(provider: LlmProviderProfile): PublicLlmProviderProfil
     model: provider.model,
     toolCalling: provider.toolCalling,
     imageInput: provider.imageInput,
+    ...(provider.contextWindowTokens ? { contextWindowTokens: provider.contextWindowTokens } : {}),
     apiKeyPresent: Boolean(provider.apiKey)
   };
+}
+
+function toPublicBrowserTaskModel(profile: BrowserTaskModelConfigProfile): PublicBrowserTaskModelProfile {
+  const { apiKey, ...rest } = profile;
+  return { ...rest, apiKeyPresent: Boolean(apiKey) };
+}
+
+/**
+ * Merges a settings-managed browser_task model patch onto the saved profile. The settings UI
+ * only manages providerId/model; hand-configured fields (apiKey, baseUrl, maxSteps,
+ * stepDelayMs) in the config file are preserved. `null` clears the whole override so
+ * browser_task follows the chat model again; a profile with nothing left set collapses to
+ * undefined for the same reason.
+ */
+function mergeBrowserTaskModelPatch(
+  saved: BrowserTaskModelConfigProfile | undefined,
+  patch: { providerId?: string; model?: string } | null
+): BrowserTaskModelConfigProfile | undefined {
+  if (patch === null) {
+    return undefined;
+  }
+  const merged: BrowserTaskModelConfigProfile = {
+    ...saved,
+    providerId: patch.providerId?.trim() || undefined,
+    model: patch.model?.trim() || undefined
+  };
+  return Object.values(merged).some((value) => value !== undefined) ? merged : undefined;
 }
 
 async function readWorkspacePolicyBundleFromRoot(workspaceRoot: string): Promise<WorkspacePolicyBundleResult> {
@@ -2525,7 +2754,9 @@ function isAllowedBrowserScreenshotPath(filePath: string) {
     return false;
   }
 
-  return isInsideDirectory(path.join(appDataDir(), "browser-screenshots"), filePath) || path.dirname(filePath) === path.resolve(os.tmpdir());
+  return (
+    isInsideDirectory(path.join(appDataDir(), "browser-screenshots"), filePath) || path.dirname(filePath) === path.resolve(os.tmpdir())
+  );
 }
 
 function isInsideDirectory(parent: string, child: string) {
@@ -2580,11 +2811,13 @@ function shortHash(value: string) {
 }
 
 function safeArtifactSegment(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60) || "check";
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "check"
+  );
 }
 
 function truncateInlineText(value: string, maxLength: number) {
@@ -2699,6 +2932,7 @@ function normalizeProviders(providers: LlmProviderPatch[], existingProviders: Ll
       model,
       toolCalling: provider.toolCalling ?? "auto",
       imageInput: provider.imageInput ?? "auto",
+      ...(provider.contextWindowTokens && provider.contextWindowTokens > 0 ? { contextWindowTokens: provider.contextWindowTokens } : {}),
       ...(apiKey ? { apiKey } : {})
     });
   }
@@ -2744,13 +2978,13 @@ function preserveProviderKeys(providers: LlmProviderProfile[], saved: AppConfig)
   });
 }
 
-function requestApproval(message: string): Promise<boolean> {
+function requestApproval(message: string, request?: ApprovalPromptRequest): Promise<boolean> {
   if (!mainWindow) {
     return Promise.resolve(false);
   }
 
   const id = randomUUID();
-  const payload: ApprovalPayload = { id, message };
+  const payload: ApprovalPayload = { id, message, request };
   mainWindow.webContents.send("approval:request", payload);
 
   return new Promise((resolve) => {
@@ -2778,7 +3012,10 @@ async function scaffoldWorkspace(workspacePath: string, options: Required<Worksp
   }
 
   if (options.npmPackage) {
-    await writeFileIfMissing(path.join(workspacePath, "package.json"), `${JSON.stringify(packageJson(workspacePath, options.typescript), null, 2)}\n`);
+    await writeFileIfMissing(
+      path.join(workspacePath, "package.json"),
+      `${JSON.stringify(packageJson(workspacePath, options.typescript), null, 2)}\n`
+    );
   }
 
   if (options.typescript) {
@@ -2802,7 +3039,10 @@ async function scaffoldWorkspace(workspacePath: string, options: Required<Worksp
       )}\n`
     );
     await mkdir(path.join(workspacePath, "src"), { recursive: true });
-    await writeFileIfMissing(path.join(workspacePath, "src", "index.ts"), 'export function main() {\n  console.log("Hello from Arivu.");\n}\n\nmain();\n');
+    await writeFileIfMissing(
+      path.join(workspacePath, "src", "index.ts"),
+      'export function main() {\n  console.log("Hello from Arivu.");\n}\n\nmain();\n'
+    );
   }
 
   if (options.npmPackage || options.typescript) {
@@ -2836,11 +3076,13 @@ function packageJson(workspacePath: string, typescript: boolean) {
 }
 
 function packageNameFromPath(workspacePath: string) {
-  return path
-    .basename(workspacePath)
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "arivu-workspace";
+  return (
+    path
+      .basename(workspacePath)
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "arivu-workspace"
+  );
 }
 
 async function writeFileIfMissing(filePath: string, content: string) {
@@ -3002,10 +3244,7 @@ async function prepareDesktopSmokeView(window: BrowserWindow) {
   if (smokeView !== "settings") {
     return;
   }
-  await window.webContents.executeJavaScript(
-    `document.querySelector('button[aria-label="Settings"]')?.click()`,
-    true
-  );
+  await window.webContents.executeJavaScript(`document.querySelector('button[aria-label="Settings"]')?.click()`, true);
   const startedAt = Date.now();
   while (Date.now() - startedAt < 5_000) {
     const ready = await window.webContents
@@ -3086,10 +3325,7 @@ async function waitForDesktopSmokeContent(window: BrowserWindow) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 5_000) {
     const ready = await window.webContents
-      .executeJavaScript(
-        `Boolean(document.querySelector(".app-shell")) && document.body.innerText.trim().length > 0`,
-        true
-      )
+      .executeJavaScript(`Boolean(document.querySelector(".app-shell")) && document.body.innerText.trim().length > 0`, true)
       .catch(() => false);
     if (ready) {
       await waitForRendererPaint(window);
@@ -3100,12 +3336,7 @@ async function waitForDesktopSmokeContent(window: BrowserWindow) {
 }
 
 async function waitForRendererPaint(window: BrowserWindow) {
-  await window.webContents
-    .executeJavaScript(
-      `document.body?.getBoundingClientRect().width ?? 0`,
-      true
-    )
-    .catch(() => undefined);
+  await window.webContents.executeJavaScript(`document.body?.getBoundingClientRect().width ?? 0`, true).catch(() => undefined);
   await new Promise((resolve) => setTimeout(resolve, 750));
 }
 
@@ -3165,6 +3396,7 @@ handleFromMain("sessions:new", () => controller.newChat());
 handleFromMain("sessions:update", (_event, input: SessionUpdateInput) => controller.updateSession(input));
 handleFromMain("sessions:delete", (_event, id: string) => controller.deleteSession(id));
 handleFromMain("context:compact", () => controller.compactContext());
+handleFromMain("context:summarize", () => controller.summarizeContext());
 handleFromMain("config:save", (_event, patch: ConfigPatch) => controller.saveConfigPatch(patch));
 handleFromMain("models:list", (_event, patch: ConfigPatch) => controller.listModels(patch));
 handleFromMain("doctor:run", (_event, patch: ConfigPatch) => controller.doctor(patch));
@@ -3176,6 +3408,8 @@ handleFromMain("skills:create", (_event, input: CreateSkillInput) => controller.
 handleFromMain("agent:listTaskWorktrees", () => controller.listTaskWorktrees());
 handleFromMain("agent:sendPrompt", (event, prompt: PromptPayload) => controller.sendPrompt(prompt, event.sender));
 handleFromMain("agent:stopLoop", (_event, sessionId?: string) => controller.stopAgentLoop(sessionId));
+handleFromMain("agent:stopRun", (_event, sessionId?: string) => controller.stopAgentRun(sessionId));
+handleFromMain("agent:undoRun", (_event, input: { sessionId?: string; taskRunId: string }) => controller.undoTaskRun(input));
 handleFromMain("agent:taskWorktreeAction", (_event, input: TaskWorktreeActionInput) => controller.taskWorktreeAction(input));
 handleFromMain("agent:taskRunPlanAction", (_event, input: TaskRunPlanActionInput) => controller.taskRunPlanAction(input));
 handleFromMain("agent:openTaskRunEvidence", (_event, input: OpenTaskRunEvidenceInput) => controller.openTaskRunEvidence(input));
@@ -3183,8 +3417,12 @@ handleFromMain("browser:getState", () => browserController.getState());
 handleFromMain("browser:setPaneOpen", (_event, open: boolean) => browserController.setPaneOpen(Boolean(open)));
 handleFromMain("browser:setDefaultMode", (_event, mode: BrowserMode) => browserController.setDefaultMode(mode));
 handleFromMain("browser:setBounds", (_event, bounds: BrowserBounds) => browserController.setVisibleBounds(bounds));
-handleFromMain("browser:setVisibleSuppressed", (_event, suppressed: boolean) => browserController.setVisibleSuppressed(Boolean(suppressed)));
-handleFromMain("browser:open", (_event, args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }) => browserController.open(args));
+handleFromMain("browser:setVisibleSuppressed", (_event, suppressed: boolean) =>
+  browserController.setVisibleSuppressed(Boolean(suppressed))
+);
+handleFromMain("browser:open", (_event, args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }) =>
+  browserController.open(args)
+);
 handleFromMain("browser:newTab", (_event, args?: { url?: string }) => browserController.newVisibleTab(args ?? {}));
 handleFromMain("browser:selectTab", (_event, tabId: string) => browserController.selectVisibleTab(tabId));
 handleFromMain("browser:closeTab", (_event, tabId: string) => browserController.closeVisibleTab(tabId));

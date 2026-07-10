@@ -28,6 +28,7 @@ type LlmProviderProfile = {
   model: string;
   toolCalling: ProviderToolCallingMode;
   imageInput: ProviderImageInputMode;
+  contextWindowTokens?: number;
   apiKeyPresent: boolean;
 };
 
@@ -116,13 +117,7 @@ type AgentTaskRunCapability =
 
 type CapabilityPolicyOverrideEffect = "prompt" | "deny";
 type WorkspacePolicyCapability =
-  | "read_repo"
-  | "write_workspace"
-  | "run_command"
-  | "network_fetch"
-  | "browser_control"
-  | "mcp_call"
-  | "unknown";
+  "read_repo" | "write_workspace" | "run_command" | "network_fetch" | "browser_control" | "mcp_call" | "unknown";
 type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapability, CapabilityPolicyOverrideEffect>>;
 type WorkspaceScopePolicyRules = {
   blockedPathPrefixes?: string[];
@@ -259,7 +254,7 @@ type AgentTaskRunDiagnostic = {
 
 type AgentTaskRunArtifact = {
   id: string;
-  kind: "browser_screenshot" | "command_output" | "file_change" | "patch" | "tool_result";
+  kind: "browser_screenshot" | "browser_task_log" | "command_output" | "file_change" | "patch" | "tool_result";
   title: string;
   summary?: string;
   path?: string;
@@ -483,6 +478,13 @@ type AgentTaskRunVerification = {
 
 type AgentTaskRunVerificationStatus = AgentTaskRunVerification["status"];
 
+type AgentTaskRunUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  requestCount: number;
+};
+
 type AgentTaskRun = {
   id: string;
   userMessageIndex: number;
@@ -491,6 +493,12 @@ type AgentTaskRun = {
   model?: string;
   providerName?: string;
   modelSelectionReason?: string;
+  usage?: AgentTaskRunUsage;
+  checkpoint?: {
+    changedPaths: string[];
+    capturedAt: string;
+    revertedAt?: string;
+  };
   loop?: {
     enabled: boolean;
     maxIterations: number;
@@ -566,6 +574,7 @@ type DesktopState = {
     imageInput: ProviderImageInputMode;
     activeProviderId?: string;
     providers: LlmProviderProfile[];
+    browserTaskModel?: BrowserTaskModelSettings;
     trustMode: TrustMode;
     apiKeyPresent: boolean;
     tavilyApiKeyPresent: boolean;
@@ -675,6 +684,12 @@ type AgentStreamEvent =
       toolCallId: string;
       name: string;
       result: string;
+    }
+  | {
+      type: "browser_task_progress";
+      sessionId?: string;
+      stepIndex: number;
+      summary: string;
     };
 
 type SessionLifecycleEvent = {
@@ -690,9 +705,30 @@ type SessionLifecycleEvent = {
   error?: string;
 };
 
+type ApprovalPromptRequest = {
+  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
+  capability: AgentTaskRunCapability;
+  summary: string;
+  label: string;
+  reason: string;
+  risky: boolean;
+  scope?: AgentTaskRunApprovalScope;
+  changePreview?: AgentTaskRunApprovalChangePreview;
+};
+
 type ApprovalRequest = {
   id: string;
   message: string;
+  request?: ApprovalPromptRequest;
+};
+
+type BrowserTaskModelSettings = {
+  providerId?: string;
+  baseUrl?: string;
+  model?: string;
+  maxSteps?: number;
+  stepDelayMs?: number;
+  apiKeyPresent: boolean;
 };
 
 type ConfigPatch = {
@@ -708,6 +744,7 @@ type ConfigPatch = {
   mcpServers?: McpServersConfig;
   workspacePolicies?: WorkspaceCapabilityPolicies;
   workspacePolicyProfiles?: WorkspacePolicyProfiles;
+  browserTaskModel?: { providerId?: string; model?: string } | null;
 };
 
 type WorkspaceScaffoldOptions = {
@@ -865,19 +902,25 @@ type PromptPayload = {
   skills?: string[];
   reuseLastUserMessage?: boolean;
   retryFromUserMessageIndex?: number;
-  loop?: boolean | {
-    enabled?: boolean;
-    maxIterations?: number;
-  };
-  plan?: boolean | {
-    enabled?: boolean;
-  };
-  worktree?: boolean | {
-    enabled?: boolean;
-    taskRunId?: string;
-    replayOfTaskRunId?: string;
-    plannedFromTaskRunId?: string;
-  };
+  loop?:
+    | boolean
+    | {
+        enabled?: boolean;
+        maxIterations?: number;
+      };
+  plan?:
+    | boolean
+    | {
+        enabled?: boolean;
+      };
+  worktree?:
+    | boolean
+    | {
+        enabled?: boolean;
+        taskRunId?: string;
+        replayOfTaskRunId?: string;
+        plannedFromTaskRunId?: string;
+      };
 };
 
 type DesktopApi = {
@@ -897,6 +940,7 @@ type DesktopApi = {
   updateSession(input: { id: string; title?: string; pinned?: boolean }): Promise<DesktopState>;
   deleteSession(id: string): Promise<DesktopState>;
   compactContext(): Promise<CompactContextResult>;
+  summarizeContext(): Promise<CompactContextResult>;
   saveConfig(patch: ConfigPatch): Promise<DesktopState>;
   listModels(patch: ConfigPatch): Promise<ModelListResult>;
   runDoctor(patch: ConfigPatch): Promise<DoctorReport>;
@@ -908,6 +952,8 @@ type DesktopApi = {
   listTaskWorktrees(): Promise<TaskWorktreeInventoryResult>;
   sendPrompt(prompt: PromptPayload | string): Promise<AgentRunResult>;
   stopAgentLoop(sessionId?: string): Promise<DesktopState>;
+  stopAgentRun(sessionId?: string): Promise<DesktopState>;
+  undoTaskRun(input: { sessionId?: string; taskRunId: string }): Promise<{ state: DesktopState; revertedCount: number }>;
   taskWorktreeAction(input: {
     sessionId?: string;
     taskRunId: string;

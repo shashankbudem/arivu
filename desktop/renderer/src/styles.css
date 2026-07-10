@@ -1,7 +1,15 @@
 :root {
   color-scheme: dark;
   font-family:
-    "Avenir Next", "SF Pro Text", "Segoe UI Variable", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Avenir Next",
+    "SF Pro Text",
+    "Segoe UI Variable",
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
     sans-serif;
   background: #11100f;
   color: #efede8;
@@ -1093,9 +1101,7 @@ body.is-resizing .panel-resize-handle::after {
 .composer-plan-button.active,
 .composer-loop-button.active,
 .composer-worktree-button.active {
-  background:
-    linear-gradient(rgb(43 191 159 / 0.18), rgb(43 191 159 / 0.08)),
-    var(--control-gradient);
+  background: linear-gradient(rgb(43 191 159 / 0.18), rgb(43 191 159 / 0.08)), var(--control-gradient);
 }
 
 .composer-plan-button:disabled,
@@ -1549,7 +1555,9 @@ body.is-resizing .panel-resize-handle::after {
   white-space: nowrap;
   font-size: 12px;
   line-height: 1;
-  transition: opacity 0.12s ease, transform 0.12s ease;
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
 }
 
 .error-strip button:hover .message-action-tooltip,
@@ -2268,6 +2276,44 @@ body.is-resizing .panel-resize-handle::after {
   border: 1px solid rgb(43 191 159 / 0.22);
   border-radius: 7px;
   background: rgb(43 191 159 / 0.055);
+}
+
+.run-checkpoint-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid rgb(217 119 87 / 0.28);
+  border-radius: 7px;
+  background: rgb(217 119 87 / 0.06);
+}
+
+.run-checkpoint-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.run-checkpoint-undo {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgb(217 119 87 / 0.5);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.run-checkpoint-undo:hover:not(:disabled) {
+  background: rgb(217 119 87 / 0.14);
+}
+
+.run-checkpoint-undo:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .task-worktree-summary {
@@ -3596,10 +3642,14 @@ body.is-resizing .panel-resize-handle::after {
 @keyframes agentWorkingGlow {
   0%,
   100% {
-    box-shadow: 0 18px 54px rgb(0 0 0 / 0.2), 0 0 0 rgb(43 191 159 / 0);
+    box-shadow:
+      0 18px 54px rgb(0 0 0 / 0.2),
+      0 0 0 rgb(43 191 159 / 0);
   }
   50% {
-    box-shadow: 0 18px 54px rgb(0 0 0 / 0.26), 0 0 32px rgb(43 191 159 / 0.2);
+    box-shadow:
+      0 18px 54px rgb(0 0 0 / 0.26),
+      0 0 32px rgb(43 191 159 / 0.2);
   }
 }
 
@@ -3692,9 +3742,7 @@ body.is-resizing .panel-resize-handle::after {
 
 .composer-surface.drag-active {
   border-color: #2bbf9f;
-  background:
-    linear-gradient(135deg, rgb(43 191 159 / 0.12), rgb(229 185 92 / 0.08)),
-    var(--panel-strong-gradient);
+  background: linear-gradient(135deg, rgb(43 191 159 / 0.12), rgb(229 185 92 / 0.08)), var(--panel-strong-gradient);
   box-shadow:
     0 0 0 3px rgb(43 191 159 / 0.12),
     0 14px 36px rgb(0 0 0 / 0.18);
@@ -4144,6 +4192,15 @@ body.is-resizing .panel-resize-handle::after {
   border-radius: 8px;
 }
 
+.composer-stop-button {
+  background: #d9534f;
+  color: #fff;
+}
+
+.composer-stop-button:hover:not(:disabled) {
+  background: #c9302c;
+}
+
 .settings-grid input:focus,
 .settings-grid select:focus,
 .skill-add-form input:focus,
@@ -4286,7 +4343,9 @@ body.is-resizing .panel-resize-handle::after {
 
 .activity-group.focus-active {
   border-color: rgb(43 191 159 / 0.58);
-  box-shadow: 0 0 0 1px rgb(43 191 159 / 0.22), 0 0 22px rgb(43 191 159 / 0.12);
+  box-shadow:
+    0 0 0 1px rgb(43 191 159 / 0.22),
+    0 0 22px rgb(43 191 159 / 0.12);
 }
 
 .activity-group.running {
@@ -4302,7 +4361,9 @@ body.is-resizing .panel-resize-handle::after {
 .activity-group.running.focus-active,
 .activity-group.failed.focus-active {
   border-color: rgb(43 191 159 / 0.58);
-  box-shadow: 0 0 0 1px rgb(43 191 159 / 0.22), 0 0 22px rgb(43 191 159 / 0.12);
+  box-shadow:
+    0 0 0 1px rgb(43 191 159 / 0.22),
+    0 0 22px rgb(43 191 159 / 0.12);
 }
 
 .activity-group-header {
@@ -5941,6 +6002,106 @@ html .secondary-command.danger-command:focus-visible {
   box-shadow: 0 24px 80px rgb(0 0 0 / 0.45);
 }
 
+.onboarding-dialog {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid #2b5c50;
+  border-radius: 10px;
+  background: #12100e;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 0.5);
+}
+
+.onboarding-header h2 {
+  margin: 0 0 4px;
+}
+
+.onboarding-header p {
+  margin: 0;
+  opacity: 0.8;
+  font-size: 13px;
+}
+
+.onboarding-dialog label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.onboarding-dialog input,
+.onboarding-dialog select {
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid rgb(255 255 255 / 0.16);
+  background: rgb(255 255 255 / 0.03);
+  color: inherit;
+}
+
+.onboarding-error {
+  margin: 0;
+  color: #e0806f;
+  font-size: 13px;
+}
+
+.onboarding-checks {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.onboarding-check-pass {
+  color: #57c98a;
+}
+
+.onboarding-check-warn {
+  color: #d9b25a;
+}
+
+.onboarding-check-fail {
+  color: #e0806f;
+}
+
+.onboarding-check-skip {
+  opacity: 0.6;
+}
+
+.onboarding-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.onboarding-primary {
+  padding: 8px 16px;
+  border-radius: 7px;
+  border: none;
+  background: var(--primary-gradient);
+  color: #07110f;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.onboarding-primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.onboarding-skip {
+  padding: 8px 14px;
+  border-radius: 7px;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .model-dialog {
   width: min(720px, 100%);
   max-height: min(82vh, 760px);
@@ -6266,7 +6427,14 @@ html .secondary-command.danger-command:focus-visible {
   border-bottom: 1px solid #34302a;
   background: #181511;
   color: #b9b2a8;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
   font-size: 12px;
   text-transform: uppercase;
 }
@@ -7695,7 +7863,9 @@ html[data-theme="light"] .activity-group {
 
 html[data-theme="light"] .activity-group.focus-active {
   border-color: rgb(28 168 137 / 0.48);
-  box-shadow: 0 0 0 1px rgb(28 168 137 / 0.18), 0 0 18px rgb(28 168 137 / 0.1);
+  box-shadow:
+    0 0 0 1px rgb(28 168 137 / 0.18),
+    0 0 18px rgb(28 168 137 / 0.1);
 }
 
 html[data-theme="light"] .activity-group.running {
@@ -7711,7 +7881,9 @@ html[data-theme="light"] .activity-group.failed {
 html[data-theme="light"] .activity-group.running.focus-active,
 html[data-theme="light"] .activity-group.failed.focus-active {
   border-color: rgb(28 168 137 / 0.48);
-  box-shadow: 0 0 0 1px rgb(28 168 137 / 0.18), 0 0 18px rgb(28 168 137 / 0.1);
+  box-shadow:
+    0 0 0 1px rgb(28 168 137 / 0.18),
+    0 0 18px rgb(28 168 137 / 0.1);
 }
 
 html[data-theme="light"] .activity-group-header,
@@ -8015,28 +8187,22 @@ html[data-theme="light"] .deny-button {
 
 .ui-sample-preview.signal {
   background:
-    linear-gradient(135deg, rgb(25 214 179 / 0.22), transparent 42%),
-    linear-gradient(315deg, rgb(232 197 99 / 0.16), transparent 48%),
-    linear-gradient(180deg, #0b1719 0%, #091014 100%),
-    #091014;
+    linear-gradient(135deg, rgb(25 214 179 / 0.22), transparent 42%), linear-gradient(315deg, rgb(232 197 99 / 0.16), transparent 48%),
+    linear-gradient(180deg, #0b1719 0%, #091014 100%), #091014;
   color: #e7edf0;
 }
 
 .ui-sample-preview.lumen {
   background:
-    linear-gradient(135deg, rgb(32 140 255 / 0.18), transparent 42%),
-    linear-gradient(315deg, rgb(240 180 60 / 0.18), transparent 48%),
-    linear-gradient(180deg, #ffffff 0%, #eaf3fb 100%),
-    #f5f8fb;
+    linear-gradient(135deg, rgb(32 140 255 / 0.18), transparent 42%), linear-gradient(315deg, rgb(240 180 60 / 0.18), transparent 48%),
+    linear-gradient(180deg, #ffffff 0%, #eaf3fb 100%), #f5f8fb;
   color: #101820;
 }
 
 .ui-sample-preview.graphite {
   background:
-    linear-gradient(135deg, rgb(122 167 255 / 0.22), transparent 42%),
-    linear-gradient(315deg, rgb(183 227 106 / 0.16), transparent 48%),
-    linear-gradient(180deg, #1b222b 0%, #141920 100%),
-    #141920;
+    linear-gradient(135deg, rgb(122 167 255 / 0.22), transparent 42%), linear-gradient(315deg, rgb(183 227 106 / 0.16), transparent 48%),
+    linear-gradient(180deg, #1b222b 0%, #141920 100%), #141920;
   color: #dfe6ec;
 }
 

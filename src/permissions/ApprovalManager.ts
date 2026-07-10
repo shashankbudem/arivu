@@ -6,7 +6,7 @@ import { evaluateApprovalPolicy, type CapabilityPolicyOverrides } from "./capabi
 import { analyzeShellCommand, isDestructiveCommand, type ShellCommandAnalysis } from "./destructive.js";
 import { evaluateScopePolicy, type WorkspaceScopePolicyRules } from "./scopePolicy.js";
 import type { ApprovalAction, TrustMode } from "./types.js";
-import type { AgentTaskRunApprovalChangePreview, AgentTaskRunApprovalEvent } from "../agent/types.js";
+import type { AgentTaskRunApprovalChangePreview, AgentTaskRunApprovalEvent, ApprovalPromptRequest } from "../agent/types.js";
 import { unifiedDiffStats } from "../tools/patch.js";
 
 export type ApprovalAuditSink = (event: AgentTaskRunApprovalEvent) => void | Promise<void>;
@@ -16,17 +16,33 @@ const MAX_APPROVAL_BODY_SECTION = 12_000;
 const MAX_APPROVAL_CHANGE_PREVIEW_TEXT = 40_000;
 
 export class ApprovalManager {
+  // Serializes interactive prompts so concurrent tool calls never show overlapping approval dialogs.
+  private promptChain: Promise<unknown> = Promise.resolve();
+
   constructor(
     readonly mode: TrustMode,
-    private readonly prompt: (message: string) => Promise<boolean> = defaultPrompt,
+    private readonly prompt: (message: string, request?: ApprovalPromptRequest) => Promise<boolean> = defaultPrompt,
     private readonly policyOverrides: CapabilityPolicyOverrides = {},
     private readonly audit?: ApprovalAuditSink,
     private readonly scopePolicyRules: WorkspaceScopePolicyRules = {}
   ) {}
 
+  private serializePrompt(label: string, request: ApprovalPromptRequest): Promise<boolean> {
+    const result = this.promptChain.then(() => this.prompt(label, request));
+    // Keep the chain alive regardless of individual prompt outcomes.
+    this.promptChain = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
   async require(action: ApprovalAction): Promise<void> {
     const shellAnalysis = action.type === "shell" ? shellAnalysisForAction(action) : undefined;
-    const destructive = action.destructive ?? (shellAnalysis?.destructive ?? (action.type === "shell" ? isDestructiveCommand(action.command) : action.type === "network"));
+    const destructive =
+      action.destructive ??
+      shellAnalysis?.destructive ??
+      (action.type === "shell" ? isDestructiveCommand(action.command) : action.type === "network");
     const baseDecision = evaluateApprovalPolicy(this.mode, action, { risky: destructive, overrides: this.policyOverrides });
     const scopeDecision = baseDecision.effect === "deny" ? undefined : evaluateScopePolicy(action, this.scopePolicyRules);
     const decision = scopeDecision
@@ -56,14 +72,14 @@ export class ApprovalManager {
     if (decision.effect === "deny") {
       await this.emitAudit({
         ...baseAuditEvent,
-        status: "blocked",
+        status: "blocked"
       });
       throw new Error(`Refused ${action.type}: ${decision.reason}.`);
     }
     if (decision.effect === "allow") {
       await this.emitAudit({
         ...baseAuditEvent,
-        status: "allowed",
+        status: "allowed"
       });
       return;
     }
@@ -86,7 +102,17 @@ export class ApprovalManager {
       status: "requested",
       message: truncateApprovalAuditText(label)
     });
-    const approved = await this.prompt(label);
+    const promptRequest: ApprovalPromptRequest = {
+      actionType: baseAuditEvent.actionType,
+      capability: baseAuditEvent.capability,
+      summary: baseAuditEvent.summary,
+      label,
+      reason: baseAuditEvent.reason,
+      risky: destructive,
+      scope: baseAuditEvent.scope,
+      changePreview: baseAuditEvent.changePreview
+    };
+    const approved = await this.serializePrompt(label, promptRequest);
     if (!approved) {
       await this.emitAudit({
         ...baseAuditEvent,
@@ -175,11 +201,7 @@ function formatWriteApproval(action: Extract<ApprovalAction, { type: "write" }>,
 }
 
 function formatReadApproval(action: Extract<ApprovalAction, { type: "read" }>) {
-  return [
-    `Repo read: ${action.summary}`,
-    action.path ? `Path: ${action.path}` : "",
-    action.query ? `Query: ${action.query}` : ""
-  ]
+  return [`Repo read: ${action.summary}`, action.path ? `Path: ${action.path}` : "", action.query ? `Query: ${action.query}` : ""]
     .filter(Boolean)
     .join("\n");
 }
@@ -204,9 +226,13 @@ function formatNetworkApproval(action: Extract<ApprovalAction, { type: "network"
 }
 
 function formatBrowserApproval(action: Extract<ApprovalAction, { type: "browser" }>, destructive: boolean) {
+  const heading =
+    action.action === "task"
+      ? `Autonomous browser task: ${action.target}`
+      : `${destructive ? "Browser action" : "Browser read"}: ${action.action}`;
   return [
-    `${destructive ? "Browser action" : "Browser read"}: ${action.action}`,
-    `Target: ${action.target}`,
+    heading,
+    action.action === "task" ? "" : `Target: ${action.target}`,
     action.url && action.url !== action.target ? `URL: ${action.url}` : "",
     action.mode ? `Mode: ${action.mode}` : ""
   ]
@@ -282,7 +308,8 @@ function fileChangePreview(action: Extract<ApprovalAction, { type: "write" }>): 
   ].filter((part): part is string => Boolean(part));
   return {
     kind: "file_change",
-    title: action.mode === "replace" ? "File replacement preview" : action.mode === "create" ? "File creation preview" : "File write preview",
+    title:
+      action.mode === "replace" ? "File replacement preview" : action.mode === "create" ? "File creation preview" : "File write preview",
     summary: summaryParts.join(", "),
     path: action.path,
     writeMode: action.mode,

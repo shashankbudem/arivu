@@ -48,6 +48,66 @@ export type ApprovalView =
       message: string;
     };
 
+// Build the approval view directly from the structured request the main process now sends, so the UI
+// no longer depends on parsing the human-readable text (which stays as a fallback).
+export function approvalViewFromRequest(request: ApprovalPromptRequest): ApprovalView | undefined {
+  switch (request.actionType) {
+    case "write":
+      return {
+        type: "write",
+        destructive: request.risky,
+        summary: request.changePreview?.summary ?? request.changePreview?.title ?? request.summary,
+        diff: sideBySideFromChangePreview(request.changePreview)
+      };
+    case "shell": {
+      const command = request.scope?.value ?? request.summary;
+      const [executable, ...rest] = tokenizeCommand(command);
+      return {
+        type: "shell",
+        destructive: request.risky,
+        mode: request.scope?.detail === "argv" || request.scope?.detail === "shell" ? request.scope.detail : undefined,
+        command,
+        cwd: undefined,
+        executable: executable ?? command,
+        rest: rest.join(" "),
+        warnings: detectCommandWarnings(command)
+      };
+    }
+    case "network":
+      return {
+        type: "network",
+        destructive: request.risky,
+        summary: request.summary,
+        destination: request.scope?.value,
+        query: request.scope?.kind === "query" ? request.scope.value : request.scope?.detail
+      };
+    case "browser":
+      return {
+        type: "browser",
+        destructive: request.risky,
+        action: request.summary,
+        target: request.scope?.value ?? "",
+        mode: undefined
+      };
+    default:
+      // read / mcp: the text view is simple and robust; let the caller fall back to it.
+      return undefined;
+  }
+}
+
+function sideBySideFromChangePreview(preview: ApprovalPromptRequest["changePreview"]): SideBySideDiff | undefined {
+  if (!preview) {
+    return undefined;
+  }
+  if (preview.diff) {
+    return parseUnifiedSideBySide(preview.diff);
+  }
+  if (preview.content !== undefined || preview.original !== undefined) {
+    return buildTextSideBySide(preview.path ?? preview.title ?? "write_file", preview.original ?? "", preview.content ?? "");
+  }
+  return undefined;
+}
+
 export function parseApprovalMessage(message: string): ApprovalView {
   const shellMatch = /^(Destructive shell command|Shell command|Destructive structured command|Structured command):[ \t]*/m.exec(message);
   if (shellMatch) {
