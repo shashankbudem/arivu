@@ -3267,8 +3267,10 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
     return;
   }
   await waitForDesktopSmokeContent(window);
-  const firstUrl = await writeBrowserSmokePage("one", "Arivu browser smoke tab one");
+  console.log("browser smoke: preparing fixture pages");
   const secondUrl = await writeBrowserSmokePage("two", "Arivu browser smoke tab two");
+  const firstUrl = await writeBrowserSmokePage("one", "Arivu browser smoke tab one", secondUrl);
+  console.log("browser smoke: opening fixture tabs");
   const first = await browserController.open({ url: firstUrl, mode: "visible" });
   const second = await browserController.open({ url: secondUrl, mode: "visible", newTab: true });
   const firstTabId = typeof first.tabId === "string" ? first.tabId : undefined;
@@ -3277,7 +3279,24 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
     throw new Error("browser smoke: visible tab ids were not returned");
   }
   browserController.selectVisibleTab(firstTabId);
+  console.log("browser smoke: capturing first tab");
   const firstScreenshot = await browserController.screenshot({ mode: "visible", tabId: firstTabId });
+  console.log("browser smoke: opening page popup");
+  await browserController.clickAt({ x: 90, y: 142, mode: "visible", tabId: firstTabId });
+  console.log("browser smoke: verifying page popup");
+  const popupResult = await browserController.snapshot({ mode: "visible", tabId: firstTabId });
+  const popupAccepted = JSON.stringify(popupResult).includes("Popup accepted");
+  const popupTab = browserController
+    .getState()
+    .visible.tabs?.find((tab) => tab.id !== firstTabId && tab.id !== secondTabId && tab.url === secondUrl);
+  if (!popupAccepted || !popupTab) {
+    throw new Error("browser smoke: window.open did not return a usable Arivu popup tab");
+  }
+  const popupSnapshot = await browserController.snapshot({ mode: "visible", tabId: popupTab.id });
+  if (!JSON.stringify(popupSnapshot).includes("Arivu browser smoke tab two")) {
+    throw new Error("browser smoke: the popup tab could not be inspected by tab id");
+  }
+  console.log("browser smoke: capturing second tab");
   const selectedSecond = await browserController.selectTab({ tabId: secondTabId });
   const secondScreenshot = await browserController.screenshot({ mode: "visible", tabId: secondTabId });
   const browserState = browserController.getState();
@@ -3300,6 +3319,8 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
         })),
         activeTabId: browserState.visible.activeTabId,
         selectedTabId: selectedSecond.tabId,
+        popupAccepted,
+        popupTabId: popupTab.id,
         firstScreenshotPath: firstScreenshot.screenshotPath,
         secondScreenshotPath: secondScreenshot.screenshotPath,
         chromeScreenshotPath
@@ -3311,11 +3332,14 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
   browserController.detach(window);
 }
 
-async function writeBrowserSmokePage(name: string, heading: string) {
+async function writeBrowserSmokePage(name: string, heading: string, popupUrl?: string) {
   const filePath = path.join(os.tmpdir(), `arivu-browser-smoke-${name}.html`);
+  const popupMarkup = popupUrl
+    ? `<button id="open-popup" type="button">Open popup</button><p id="popup-status">Popup not tested</p><script>document.getElementById("open-popup").addEventListener("click",()=>{const popup=window.open(${JSON.stringify(popupUrl)},"_blank");document.getElementById("popup-status").textContent=popup?"Popup accepted":"Popup blocked";});</script>`
+    : "";
   await writeFile(
     filePath,
-    `<!doctype html><html><head><meta charset="utf-8"><title>${heading}</title><style>body{margin:32px;background:#ffffff;color:#111111;font-family:system-ui,sans-serif}main{display:grid;gap:12px}</style></head><body><main><h1>${heading}</h1><p>${new Date().toISOString()}</p></main></body></html>`,
+    `<!doctype html><html><head><meta charset="utf-8"><title>${heading}</title><style>body{margin:32px;background:#ffffff;color:#111111;font-family:system-ui,sans-serif}main{display:grid;gap:12px}#open-popup{position:fixed;left:40px;top:120px;width:160px;height:44px}</style></head><body><main><h1>${heading}</h1><p>${new Date().toISOString()}</p>${popupMarkup}</main></body></html>`,
     "utf8"
   );
   return pathToFileURL(filePath).toString();

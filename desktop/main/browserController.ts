@@ -34,7 +34,9 @@ type BrowserTargetRecord = Omit<BrowserTargetState, "activeTabId" | "tabs"> & {
 };
 
 type BrowserTabRecord = BrowserTargetRecord & {
-  view: BrowserView;
+  contents: WebContents;
+  view?: BrowserView;
+  popupWindow?: BrowserWindow;
 };
 
 type BrowserImageSize = {
@@ -513,7 +515,7 @@ export class DesktopBrowserController implements BrowserToolController {
       const target = this.ensureVisibleTab(tabId);
       return {
         target,
-        contents: target.view.webContents
+        contents: target.contents
       };
     }
     return {
@@ -806,13 +808,29 @@ export class DesktopBrowserController implements BrowserToolController {
         return { action: "deny" };
       }
       try {
-        const normalizedUrl = normalizeBrowserUrl(url);
-        this.createVisibleTab({ url: normalizedUrl, activate: true });
+        assertAllowedPopupUrl(url);
       } catch (error) {
         target.lastError = error instanceof Error ? error.message : String(error);
         this.emitState();
+        return { action: "deny" };
       }
-      return { action: "deny" };
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          show: false,
+          autoHideMenuBar: true,
+          backgroundColor: "#11100f",
+          webPreferences: browserWebPreferences("visible")
+        }
+      };
+    });
+    contents.on("did-create-window", (popupWindow, details) => {
+      if (mode === "visible") {
+        // Electron's BrowserView-backed createWindow path stalls window.open in current
+        // releases. Keep the native child window alive, but register its WebContents as a
+        // normal visible target so Arivu can select, inspect, and close it by tab id.
+        this.registerVisiblePopupWindow(popupWindow, details.disposition);
+      }
     });
     contents.on("will-navigate", (event, url) => {
       if (isVisibleStartPageUrl(url)) {
@@ -936,6 +954,7 @@ export class DesktopBrowserController implements BrowserToolController {
     const target: BrowserTabRecord = {
       ...initialTarget("visible", id),
       title: VISIBLE_START_PAGE_TITLE,
+      contents: view.webContents,
       view
     };
     this.visibleTabs.set(id, target);
@@ -960,6 +979,34 @@ export class DesktopBrowserController implements BrowserToolController {
     return target;
   }
 
+  private registerVisiblePopupWindow(
+    popupWindow: BrowserWindow,
+    disposition: "default" | "foreground-tab" | "background-tab" | "new-window" | "other"
+  ) {
+    const id = `tab-${this.nextVisibleTabNumber++}`;
+    const target: BrowserTabRecord = {
+      ...initialTarget("visible", id),
+      contents: popupWindow.webContents,
+      popupWindow
+    };
+    this.visibleTabs.set(id, target);
+    this.visibleTabOrder.push(id);
+    this.configureWebContents("visible", target, popupWindow.webContents);
+    popupWindow.on("closed", () => this.forgetVisiblePopupTab(id));
+    if (disposition !== "background-tab") {
+      this.activeVisibleTabId = id;
+    }
+    popupWindow.maximize();
+    if (disposition === "background-tab") {
+      popupWindow.hide();
+    } else {
+      popupWindow.show();
+      popupWindow.focus();
+    }
+    this.updateTargetFromContents("visible", popupWindow.webContents, target);
+    this.emitState();
+  }
+
   private selectVisibleTabById(tabId: string) {
     const target = this.visibleTabs.get(tabId);
     if (!target) {
@@ -967,7 +1014,7 @@ export class DesktopBrowserController implements BrowserToolController {
     }
     this.activeVisibleTabId = tabId;
     this.rememberMode("visible");
-    this.updateTargetFromContents("visible", target.view.webContents, target);
+    this.updateTargetFromContents("visible", target.contents, target);
     this.attachActiveVisibleView();
     return target;
   }
@@ -978,7 +1025,7 @@ export class DesktopBrowserController implements BrowserToolController {
       throw new Error(`Unknown visible browser tab: ${tabId}`);
     }
     const window = this.visibleWindow;
-    if (window && !window.isDestroyed()) {
+    if (target.view && window && !window.isDestroyed()) {
       try {
         window.removeBrowserView(target.view);
       } catch {
@@ -990,7 +1037,11 @@ export class DesktopBrowserController implements BrowserToolController {
     if (orderIndex >= 0) {
       this.visibleTabOrder.splice(orderIndex, 1);
     }
-    target.view.webContents.close({ waitForBeforeUnload: false });
+    if (target.popupWindow && !target.popupWindow.isDestroyed()) {
+      target.popupWindow.destroy();
+    } else if (!target.contents.isDestroyed()) {
+      target.contents.close({ waitForBeforeUnload: false });
+    }
     if (this.activeVisibleTabId === tabId) {
       const nextTabId = this.visibleTabOrder[Math.max(0, orderIndex - 1)] ?? this.visibleTabOrder[0];
       this.activeVisibleTabId = nextTabId;
@@ -1002,10 +1053,35 @@ export class DesktopBrowserController implements BrowserToolController {
     this.attachActiveVisibleView();
   }
 
+  private forgetVisiblePopupTab(tabId: string) {
+    const target = this.visibleTabs.get(tabId);
+    if (!target?.popupWindow) {
+      return;
+    }
+    this.visibleTabs.delete(tabId);
+    const orderIndex = this.visibleTabOrder.indexOf(tabId);
+    if (orderIndex >= 0) {
+      this.visibleTabOrder.splice(orderIndex, 1);
+    }
+    if (this.activeVisibleTabId === tabId) {
+      this.activeVisibleTabId = this.visibleTabOrder[Math.max(0, orderIndex - 1)] ?? this.visibleTabOrder[0];
+    }
+    if (this.visibleTabOrder.length === 0 && this.visibleWindow && !this.visibleWindow.isDestroyed()) {
+      this.createVisibleTab({ activate: true });
+      return;
+    }
+    this.attachActiveVisibleView();
+    this.emitState();
+  }
+
   private resetVisibleTabs() {
     for (const target of this.visibleTabs.values()) {
       try {
-        target.view.webContents.close({ waitForBeforeUnload: false });
+        if (target.popupWindow && !target.popupWindow.isDestroyed()) {
+          target.popupWindow.destroy();
+        } else if (!target.contents.isDestroyed()) {
+          target.contents.close({ waitForBeforeUnload: false });
+        }
       } catch {
         // The tab's webContents may already be destroyed; reset continues regardless.
       }
@@ -1021,11 +1097,25 @@ export class DesktopBrowserController implements BrowserToolController {
     if (!window || window.isDestroyed() || !active) {
       return;
     }
+    for (const target of this.visibleTabs.values()) {
+      if (target.popupWindow && !target.popupWindow.isDestroyed() && target !== active) {
+        target.popupWindow.hide();
+      }
+    }
     const attached = new Set(window.getBrowserViews());
     for (const view of attached) {
-      if (view !== active.view) {
+      if (!active.view || view !== active.view) {
         window.removeBrowserView(view);
       }
+    }
+    if (active.popupWindow && !active.popupWindow.isDestroyed()) {
+      active.popupWindow.maximize();
+      active.popupWindow.show();
+      active.popupWindow.focus();
+      return;
+    }
+    if (!active.view) {
+      return;
     }
     if (!attached.has(active.view)) {
       window.addBrowserView(active.view);
@@ -1038,7 +1128,7 @@ export class DesktopBrowserController implements BrowserToolController {
   private updateVisibleViewLayout() {
     const window = this.visibleWindow;
     const active = this.activeVisibleTab();
-    if (!window || window.isDestroyed() || !active) {
+    if (!window || window.isDestroyed() || !active?.view) {
       return;
     }
     const [width, height] = window.getContentSize();
@@ -1795,6 +1885,13 @@ function browserWebPreferences(mode: BrowserMode): WebPreferences {
     offscreen: mode === "background",
     partition: BROWSER_PARTITION
   };
+}
+
+function assertAllowedPopupUrl(url: string) {
+  if (url === "about:blank" || url.startsWith("about:blank#") || url.startsWith("about:blank?")) {
+    return;
+  }
+  normalizeBrowserUrl(url);
 }
 
 function browserShellWebPreferences(): WebPreferences {
