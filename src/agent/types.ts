@@ -31,6 +31,7 @@ export type ChatRequest = {
 
 export type ChatResponse = {
   message: ChatMessage;
+  usage?: ChatUsage;
 };
 
 export type ChatStreamEvent =
@@ -49,9 +50,19 @@ export type ChatStreamEvent =
 
 export type ChatStreamHandler = (event: ChatStreamEvent) => void | Promise<void>;
 
+export type ChatUsage = {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+};
+
+export type ChatCallOptions = {
+  signal?: AbortSignal;
+};
+
 export interface ChatClient {
-  complete(request: ChatRequest): Promise<ChatResponse>;
-  stream?(request: ChatRequest, onEvent?: ChatStreamHandler): Promise<ChatResponse>;
+  complete(request: ChatRequest, options?: ChatCallOptions): Promise<ChatResponse>;
+  stream?(request: ChatRequest, onEvent?: ChatStreamHandler, options?: ChatCallOptions): Promise<ChatResponse>;
 }
 
 export type AgentRunEvent =
@@ -76,6 +87,11 @@ export type AgentRunEvent =
       toolCallId: string;
       name: string;
       result: string;
+    }
+  | {
+      type: "browser_task_progress";
+      stepIndex: number;
+      summary: string;
     };
 
 export type AgentRunOptions = {
@@ -83,7 +99,18 @@ export type AgentRunOptions = {
   skillNames?: string[];
   promptAlreadyInSession?: boolean;
   allowedToolNames?: string[];
+  /** Aborts the run between steps, cancels the in-flight model request, and terminates running commands. */
+  signal?: AbortSignal;
+  /** Receives per-run token usage as reported by the provider. */
+  onUsage?: (usage: ChatUsage) => void | Promise<void>;
 };
+
+export class AgentRunAbortedError extends Error {
+  constructor(message = "Run stopped.") {
+    super(message);
+    this.name = "AgentRunAbortedError";
+  }
+}
 
 export type AgentLoopStatus = "running" | "stopping" | "completed" | "stopped" | "blocked" | "failed" | "max_iterations";
 export type AgentLoopDecision = "continue" | "done" | "blocked";
@@ -199,6 +226,18 @@ export type AgentTaskRunApprovalEvent = Omit<AgentTaskRunApproval, "createdAt" |
   createdAt?: string;
 };
 
+/** Structured approval request handed to an interactive prompt so UIs can render from data, not parsed text. */
+export type ApprovalPromptRequest = {
+  actionType: AgentTaskRunApproval["actionType"];
+  capability: AgentTaskRunCapability;
+  summary: string;
+  label: string;
+  reason: string;
+  risky: boolean;
+  scope?: AgentTaskRunApprovalScope;
+  changePreview?: AgentTaskRunApprovalChangePreview;
+};
+
 export type AgentTaskRunReportStatus = "passed" | "failed" | "unknown";
 
 export type AgentTaskRunFailedTest = {
@@ -253,7 +292,7 @@ export type AgentTaskRunTestReport = {
 
 export type AgentTaskRunArtifact = {
   id: string;
-  kind: "browser_screenshot" | "command_output" | "file_change" | "patch" | "tool_result";
+  kind: "browser_screenshot" | "browser_task_log" | "command_output" | "file_change" | "patch" | "tool_result";
   title: string;
   summary?: string;
   path?: string;
@@ -488,6 +527,19 @@ export type AgentTaskRunVerification = {
   updatedAt: string;
 };
 
+export type AgentTaskRunUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  requestCount: number;
+};
+
+export type AgentTaskRunCheckpoint = {
+  changedPaths: string[];
+  capturedAt: string;
+  revertedAt?: string;
+};
+
 export type AgentTaskRun = {
   id: string;
   userMessageIndex: number;
@@ -496,6 +548,8 @@ export type AgentTaskRun = {
   model?: string;
   providerName?: string;
   modelSelectionReason?: string;
+  usage?: AgentTaskRunUsage;
+  checkpoint?: AgentTaskRunCheckpoint;
   loop?: {
     enabled: boolean;
     maxIterations: number;

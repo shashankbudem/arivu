@@ -5,7 +5,8 @@ import { Agent } from "../agent/Agent.js";
 import { chatContentToText } from "../agent/content.js";
 import { COMPACT_RECENT_MESSAGE_COUNT, compactSessionMessages } from "../agent/contextCompaction.js";
 import { OpenAICompatibleChatClient } from "../agent/OpenAICompatibleChatClient.js";
-import type { AgentRunEvent, AgentSession, ChatMessage } from "../agent/types.js";
+import { AgentRunAbortedError } from "../agent/types.js";
+import type { AgentRunEvent, AgentSession, ChatMessage, ChatUsage } from "../agent/types.js";
 import { workspacePolicyOverridesForRoot, workspaceScopeRulesForRoot, type AppConfig } from "../config.js";
 import { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { SessionStore } from "../sessions/SessionStore.js";
@@ -45,7 +46,7 @@ export type TuiPaneScrollShortcut = {
   action: TuiPaneScrollAction;
 };
 export type TuiSlashCommand =
-  | { kind: "clear" | "diff" | "exit" | "help" | "status" }
+  | { kind: "clear" | "continue" | "diff" | "exit" | "help" | "status" | "summarize" }
   | { kind: "compact"; recentMessageCount?: number }
   | { kind: "sessions"; limit: number; filters?: SessionListFilters; pick?: boolean }
   | { kind: "resume"; sessionId: string }
@@ -92,6 +93,8 @@ export class TuiApp {
   private readonly log: LogLine[] = [];
   private readonly activityLog: ActivityLine[] = [];
   private busy = false;
+  private runAbortController: AbortController | undefined;
+  private lastRunUsage: { promptTokens: number; completionTokens: number; totalTokens: number; requestCount: number } | undefined;
   private status = "Ready";
   private focusTarget: FocusTarget = "input";
   private spinnerFrame = 0;
@@ -155,6 +158,7 @@ export class TuiApp {
       bottom: 6,
       label: " conversation ",
       tags: true,
+      wrap: true,
       scrollable: true,
       alwaysScroll: true,
       keys: true,
@@ -241,9 +245,19 @@ export class TuiApp {
 
     this.screen.key(["C-c"], () => this.exit());
     this.screen.key(["escape"], () => {
-      if (!this.busy && !this.modalOpen) {
-        this.exit();
+      if (this.modalOpen) {
+        return;
       }
+      if (this.busy) {
+        // Esc during a run cancels it instead of exiting the app.
+        if (this.runAbortController && !this.runAbortController.signal.aborted) {
+          this.runAbortController.abort(new AgentRunAbortedError());
+          this.setStatus("Stopping run");
+          this.render();
+        }
+        return;
+      }
+      this.exit();
     });
     this.screen.key(["tab"], () => this.focusNext());
     this.screen.key(["S-tab"], () => this.focusPrevious());
@@ -285,6 +299,7 @@ export class TuiApp {
       tavilyApiKey: this.config.tavilyApiKey,
       mcpServers: this.config.mcpServers,
       scopePolicyRules,
+      contextWindowTokens: this.config.contextWindowTokens,
       session
     });
   }
@@ -311,10 +326,7 @@ export class TuiApp {
     if (this.log.length === 0) {
       this.log.push({
         kind: "system",
-        text: [
-          "Welcome to Arivu.",
-          "Ask a coding task, or type /help for commands."
-        ].join("\n"),
+        text: ["Welcome to Arivu.", "Ask a coding task, or type /help for commands."].join("\n"),
         time: new Date()
       });
     }
@@ -342,20 +354,58 @@ export class TuiApp {
       return;
     }
 
+    this.log.push({ kind: "user", text: value, time: new Date() });
+    await this.executeAgentTurn((signal) =>
+      this.agent.run(value, {
+        onEvent: (event) => this.handleAgentEvent(event),
+        onUsage: (usage) => this.recordRunUsage(usage),
+        signal
+      })
+    );
+  }
+
+  private async continueTurn(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    if (!this.currentSession || this.currentSession.messages.length === 0) {
+      this.setStatus("Nothing to continue");
+      this.render();
+      return;
+    }
+    await this.executeAgentTurn((signal) =>
+      this.agent.continue({
+        onEvent: (event) => this.handleAgentEvent(event),
+        onUsage: (usage) => this.recordRunUsage(usage),
+        signal
+      })
+    );
+  }
+
+  private recordRunUsage(usage: ChatUsage) {
+    const previous = this.lastRunUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, requestCount: 0 };
+    this.lastRunUsage = {
+      promptTokens: previous.promptTokens + (usage.promptTokens ?? 0),
+      completionTokens: previous.completionTokens + (usage.completionTokens ?? 0),
+      totalTokens: previous.totalTokens + (usage.totalTokens ?? (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
+      requestCount: previous.requestCount + 1
+    };
+  }
+
+  private async executeAgentTurn(runner: (signal: AbortSignal) => Promise<{ output: string; session: AgentSession }>): Promise<void> {
     this.busy = true;
+    this.runAbortController = new AbortController();
+    this.lastRunUsage = undefined;
     this.streamingAssistantIndex = undefined;
     this.liveActivity = false;
     this.streamingToolRows.clear();
     this.startSpinner();
-    this.log.push({ kind: "user", text: value, time: new Date() });
-    this.setStatus("Running agent");
+    this.setStatus("Running agent (Esc to stop)");
     this.render();
 
     try {
       const before = this.lastMessageCount;
-      const result = await this.agent.run(value, {
-        onEvent: (event) => this.handleAgentEvent(event)
-      });
+      const result = await runner(this.runAbortController.signal);
       await this.store.save(result.session);
       this.currentSession = result.session;
       this.cwd = result.session.cwd;
@@ -370,16 +420,22 @@ export class TuiApp {
       }
       this.setStatus(`Saved session ${result.session.id}`);
     } catch (error) {
-      this.log.push({ kind: "error", text: error instanceof Error ? error.message : String(error), time: new Date() });
-      this.activityLog.push({
-        kind: "error",
-        title: "agent error",
-        detail: error instanceof Error ? error.message : String(error),
-        time: new Date()
-      });
-      this.setStatus("Error");
+      if (error instanceof AgentRunAbortedError || this.runAbortController?.signal.aborted) {
+        this.log.push({ kind: "assistant", text: "Run stopped.", time: new Date() });
+        this.setStatus("Run stopped");
+      } else {
+        this.log.push({ kind: "error", text: error instanceof Error ? error.message : String(error), time: new Date() });
+        this.activityLog.push({
+          kind: "error",
+          title: "agent error",
+          detail: error instanceof Error ? error.message : String(error),
+          time: new Date()
+        });
+        this.setStatus("Error");
+      }
     } finally {
       this.busy = false;
+      this.runAbortController = undefined;
       this.stopSpinner();
       this.focusInput();
       this.render();
@@ -407,6 +463,11 @@ export class TuiApp {
       return true;
     }
 
+    if (command.kind === "continue") {
+      await this.continueTurn();
+      return true;
+    }
+
     if (command.kind === "status") {
       this.showStatus();
       return true;
@@ -419,6 +480,11 @@ export class TuiApp {
 
     if (command.kind === "compact") {
       await this.compactCurrentSession(command.recentMessageCount);
+      return true;
+    }
+
+    if (command.kind === "summarize") {
+      await this.summarizeCurrentSession();
       return true;
     }
 
@@ -499,6 +565,18 @@ export class TuiApp {
       return;
     }
 
+    if (event.type === "browser_task_progress") {
+      this.liveActivity = true;
+      const row = this.ensureStreamingToolRow("browser_task_progress", "browser_task");
+      this.activityLog[row] = {
+        ...this.activityLog[row],
+        title: `browser_task (step ${event.stepIndex})`,
+        detail: event.summary
+      };
+      this.render();
+      return;
+    }
+
     this.liveActivity = true;
     this.streamingAssistantIndex = undefined;
     this.activityLog.push({
@@ -544,9 +622,11 @@ export class TuiApp {
         "Commands:",
         "/help          Show this help",
         "/clear         Clear the visible conversation",
+        "/continue      Resume the current session without a new prompt",
         "/status        Show workspace and model status",
         "/diff          Show staged, unstaged, and untracked git changes",
         "/compact [n]   Compact the saved chat, keeping n recent messages",
+        "/summarize     Compact by asking the model to summarize older context",
         "/sessions [n] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]",
         "/resume <id>   Resume a saved session in this TUI",
         "/exit          Quit",
@@ -575,7 +655,10 @@ export class TuiApp {
         `Git: ${this.workspace.gitBranch ?? "no branch"} / ${this.workspace.dirty ? "dirty" : "clean"}`,
         `Model: ${this.config.model}`,
         `Base URL: ${this.config.baseUrl}`,
-        `Trust: ${this.config.trustMode}`
+        `Trust: ${this.config.trustMode}`,
+        this.lastRunUsage
+          ? `Last run tokens: ${this.lastRunUsage.totalTokens} total (${this.lastRunUsage.promptTokens} prompt / ${this.lastRunUsage.completionTokens} completion) over ${this.lastRunUsage.requestCount} request${this.lastRunUsage.requestCount === 1 ? "" : "s"}`
+          : "Last run tokens: not reported"
       ].join("\n"),
       time: new Date()
     });
@@ -663,6 +746,75 @@ export class TuiApp {
         time: new Date()
       });
       this.setStatus("Compaction failed");
+    }
+  }
+
+  private async summarizeCurrentSession() {
+    if (!this.currentSession) {
+      this.log.push({
+        kind: "system",
+        text: "No saved session to summarize yet. Send a prompt first, then run /summarize.",
+        time: new Date()
+      });
+      this.setStatus("No session");
+      return;
+    }
+    if (this.busy) {
+      return;
+    }
+
+    this.busy = true;
+    this.runAbortController = new AbortController();
+    this.startSpinner();
+    this.setStatus("Summarizing context (Esc to stop)");
+    this.render();
+    try {
+      const agent = this.createAgent(this.currentSession);
+      const result = await agent.summarizeContext({ signal: this.runAbortController.signal });
+      if (!result.compacted) {
+        this.log.push({ kind: "system", text: "Session is already compact enough to skip summarizing.", time: new Date() });
+        this.setStatus("Already compact");
+        return;
+      }
+      const now = new Date();
+      const summarizedSession: AgentSession = { ...result.session, updatedAt: now.toISOString() };
+      await this.store.save(summarizedSession);
+      this.currentSession = summarizedSession;
+      this.agent = this.createAgent(summarizedSession);
+      this.lastMessageCount = summarizedSession.messages.length;
+      this.streamingAssistantIndex = undefined;
+      this.liveActivity = false;
+      this.streamingToolRows.clear();
+      this.log.splice(0, this.log.length);
+      this.activityLog.splice(0, this.activityLog.length);
+      this.seedFromSession(summarizedSession);
+      this.log.push({
+        kind: "system",
+        text: [
+          `Summarized session ${summarizedSession.id} (${result.source}).`,
+          `Summarized messages: ${result.compactedMessageCount}`,
+          `Stored messages now: ${summarizedSession.messages.length}`
+        ].join("\n"),
+        time: now
+      });
+      this.setStatus("Summarized");
+    } catch (error) {
+      if (error instanceof AgentRunAbortedError || this.runAbortController?.signal.aborted) {
+        this.setStatus("Summary stopped");
+      } else {
+        this.log.push({
+          kind: "error",
+          text: `Unable to summarize session: ${error instanceof Error ? error.message : String(error)}`,
+          time: new Date()
+        });
+        this.setStatus("Summary failed");
+      }
+    } finally {
+      this.busy = false;
+      this.runAbortController = undefined;
+      this.stopSpinner();
+      this.focusInput();
+      this.render();
     }
   }
 
@@ -922,8 +1074,7 @@ export class TuiApp {
     return this.activityLog
       .slice(-80)
       .map((line) => {
-        const color =
-          line.kind === "call" ? "yellow" : line.kind === "result" ? "green" : line.kind === "error" ? "red" : "gray";
+        const color = line.kind === "call" ? "yellow" : line.kind === "result" ? "green" : line.kind === "error" ? "red" : "gray";
         const detail = line.detail ? `\n{gray-fg}${truncate(line.detail, 900)}{/gray-fg}` : "";
         return `{${color}-fg}${line.kind.toUpperCase()}{/${color}-fg} {bold}${line.title}{/bold} {gray-fg}${formatTime(line.time)}{/gray-fg}${detail}`;
       })
@@ -1027,9 +1178,15 @@ export class TuiApp {
 
   private applyResponsiveLayout() {
     const width = Number(this.screen.width);
-    if (width < 100) {
+    if (!Number.isFinite(width) || width < 100) {
+      // Narrow terminals: give the conversation the full width and hide the side activity pane.
       this.conversation.width = "100%";
       this.activity.hide();
+    } else if (width < 140) {
+      // Medium terminals: keep the activity pane but give the conversation more room so wrapped
+      // lines stay readable.
+      this.conversation.width = "62%";
+      this.activity.show();
     } else {
       this.conversation.width = "68%";
       this.activity.show();
@@ -1111,12 +1268,16 @@ export function parseTuiSlashCommand(value: string): TuiSlashCommand | undefined
       return { kind: "help" };
     case "/clear":
       return { kind: "clear" };
+    case "/continue":
+      return { kind: "continue" };
     case "/status":
       return { kind: "status" };
     case "/diff":
       return { kind: "diff" };
     case "/compact":
       return parseCompactCommand(args);
+    case "/summarize":
+      return { kind: "summarize" };
     case "/sessions":
       return parseSessionsCommand(args);
     case "/resume":
@@ -1217,12 +1378,7 @@ export function formatTuiSessionList(sessions: AgentSession[], limit = DEFAULT_T
     filterDescription ? `Filters: ${filterDescription}` : undefined,
     "",
     ...visible.map((session) =>
-      [
-        session.id,
-        formatSessionUpdatedAt(session.updatedAt),
-        sessionWorkspaceName(session),
-        sessionDisplayTitle(session)
-      ].join("  ")
+      [session.id, formatSessionUpdatedAt(session.updatedAt), sessionWorkspaceName(session), sessionDisplayTitle(session)].join("  ")
     ),
     "",
     "Resume with /resume <session-id>."
@@ -1367,11 +1523,7 @@ function formatDiffSection(title: string, shortstat: string | undefined, files: 
   if (!shortstat && files.length === 0) {
     return `${title}:\n  none`;
   }
-  return [
-    `${title}:`,
-    shortstat ? `  ${shortstat}` : undefined,
-    ...files.map((file) => `  ${file}`)
-  ]
+  return [`${title}:`, shortstat ? `  ${shortstat}` : undefined, ...files.map((file) => `  ${file}`)]
     .filter((line): line is string => line !== undefined)
     .join("\n");
 }

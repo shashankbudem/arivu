@@ -1,11 +1,28 @@
 import type { AppConfig } from "../config.js";
 import { chatContentHasImage, chatContentHasText, chatContentToText, type ChatContent, type ChatImagePart } from "./content.js";
-import type { ChatClient, ChatMessage, ChatRequest, ChatResponse, ChatStreamHandler, ToolCall } from "./types.js";
+import { recoverTextualToolCalls } from "./textualToolCalls.js";
+import type {
+  ChatCallOptions,
+  ChatClient,
+  ChatMessage,
+  ChatRequest,
+  ChatResponse,
+  ChatStreamHandler,
+  ChatUsage,
+  ToolCall
+} from "./types.js";
 
 type OpenAICompatibleConfig = Pick<AppConfig, "apiKey" | "baseUrl" | "model" | "trustMode"> &
-  Partial<Pick<AppConfig, "toolCalling" | "imageInput" | "tavilyApiKey" | "mcpServers">> & {
+  Partial<Pick<AppConfig, "toolCalling" | "imageInput" | "tavilyApiKey" | "mcpServers" | "requestTimeoutMs">> & {
     onCapabilityObservation?: (observation: ProviderCapabilityObservation) => void | Promise<void>;
+    maxRequestRetries?: number;
   };
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_REQUEST_RETRIES = 2;
+const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const BASE_RETRY_DELAY_MS = 500;
+const MAX_RETRY_DELAY_MS = 8_000;
 
 export type ProviderCapabilityObservation = {
   capability: "toolCalling" | "imageInput";
@@ -53,6 +70,12 @@ type OpenAIToolCallDelta = {
   };
 };
 
+type OpenAIUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+};
+
 type OpenAIStreamChunk = {
   choices?: Array<{
     delta?: {
@@ -60,6 +83,7 @@ type OpenAIStreamChunk = {
       tool_calls?: OpenAIToolCallDelta[];
     };
   }>;
+  usage?: OpenAIUsage | null;
 };
 
 type ToolCallAccumulator = {
@@ -68,33 +92,36 @@ type ToolCallAccumulator = {
   argumentsText: string;
 };
 
+type FetchAttempt = {
+  response: Response;
+  /** Present only for a non-ok response whose body was already consumed by the retry loop. */
+  errorBody?: string;
+};
+
 export class OpenAICompatibleChatClient implements ChatClient {
   constructor(private readonly config: OpenAICompatibleConfig) {}
 
-  async complete(request: ChatRequest): Promise<ChatResponse> {
-    return this.completeWithMode(request, initialCompletionMode(this.config));
+  async complete(request: ChatRequest, options?: ChatCallOptions): Promise<ChatResponse> {
+    return this.completeWithMode(request, initialCompletionMode(this.config), options);
   }
 
-  private async completeWithMode(request: ChatRequest, mode: CompletionMode): Promise<ChatResponse> {
+  private async completeWithMode(request: ChatRequest, mode: CompletionMode, options?: ChatCallOptions): Promise<ChatResponse> {
     if (!this.config.apiKey) {
       throw new Error("Missing ARIVU_API_KEY, legacy SHANKINSTER_API_KEY, or saved apiKey config.");
     }
     assertImageInputAllowed(this.config, request);
 
-    const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(toOpenAIRequestBody(this.config.model, request, false, mode))
-    });
+    const { response, errorBody } = await this.fetchWithRetry(
+      toOpenAIRequestBody(this.config.model, request, false, mode),
+      options?.signal,
+      (status, body) => this.isFallbackError(request, mode, status, body)
+    );
 
     if (!response.ok) {
-      const body = await response.text();
+      const body = errorBody ?? (await response.text());
       if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(response.status, body, request)) {
         await this.observeCapability("toolCalling", response.status, body);
-        return this.completeWithMode(request, "markdown");
+        return this.completeWithMode(request, "markdown", options);
       }
       if (this.config.imageInput !== "enabled" && shouldPersistImageInputUnsupported(response.status, body, request)) {
         await this.observeCapability("imageInput", response.status, body);
@@ -106,61 +133,83 @@ export class OpenAICompatibleChatClient implements ChatClient {
       choices?: Array<{
         message?: OpenAIMessage;
       }>;
+      usage?: OpenAIUsage | null;
     };
     const message = json.choices?.[0]?.message;
     if (!message) {
       throw new Error("Model response did not include a message.");
     }
 
-    return { message: fromOpenAIMessage(message) };
+    // Some providers return the model's tool-call syntax unparsed inside content; recover it
+    // into native tool calls so the agent can execute instead of ending the run on prose.
+    return withUsage(
+      {
+        message: recoverTextualToolCalls(
+          fromOpenAIMessage(message),
+          request.tools.map((tool) => tool.name)
+        )
+      },
+      json.usage
+    );
   }
 
-  async stream(request: ChatRequest, onEvent?: ChatStreamHandler): Promise<ChatResponse> {
+  async stream(request: ChatRequest, onEvent?: ChatStreamHandler, options?: ChatCallOptions): Promise<ChatResponse> {
     if (!this.config.apiKey) {
       throw new Error("Missing ARIVU_API_KEY, legacy SHANKINSTER_API_KEY, or saved apiKey config.");
     }
     assertImageInputAllowed(this.config, request);
 
     const mode = initialCompletionMode(this.config);
-    const response = await fetch(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.config.apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(toOpenAIRequestBody(this.config.model, request, true, mode))
-    });
+    const { response, errorBody } = await this.fetchWithRetry(
+      toOpenAIRequestBody(this.config.model, request, true, mode),
+      options?.signal,
+      (status, body) => this.isFallbackError(request, mode, status, body)
+    );
 
     if (!response.ok) {
-      const body = await response.text();
+      const body = errorBody ?? (await response.text());
       if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(response.status, body, request)) {
         await this.observeCapability("toolCalling", response.status, body);
-        return this.completeWithMode(request, "markdown");
+        return this.completeWithMode(request, "markdown", options);
       }
       if (this.config.imageInput !== "enabled" && shouldPersistImageInputUnsupported(response.status, body, request)) {
         await this.observeCapability("imageInput", response.status, body);
         throw new Error(`Model request failed (${response.status}): ${body}`);
       }
-      return this.completeWithMode(request, mode);
+      return this.completeWithMode(request, mode, options);
     }
 
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().includes("text/event-stream")) {
       const text = await response.text();
       const parsed = parseBatchResponseText(text);
-      return parsed ?? this.complete(request);
+      if (parsed) {
+        // The batch fallback needs textual tool-call recovery just like the other return paths.
+        return {
+          ...parsed,
+          message: recoverTextualToolCalls(
+            parsed.message,
+            request.tools.map((tool) => tool.name)
+          )
+        };
+      }
+      return this.complete(request, options);
     }
 
     if (!response.body) {
-      return this.complete(request);
+      return this.complete(request, options);
     }
 
     const message: ChatMessage = { role: "assistant", content: "" };
     const toolCalls = new Map<number, ToolCallAccumulator>();
     const citationCleaner = new StreamingCitationCleaner();
     let emitted = false;
+    let usage: OpenAIUsage | undefined;
 
     const processChunk = async (chunk: OpenAIStreamChunk) => {
+      if (chunk.usage) {
+        usage = chunk.usage;
+      }
       for (const choice of chunk.choices ?? []) {
         const delta = choice.delta;
         if (!delta) {
@@ -231,7 +280,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
       }
     } catch (error) {
       if (!emitted) {
-        return this.complete(request);
+        return this.complete(request, options);
       }
       throw error;
     }
@@ -254,7 +303,86 @@ export class OpenAICompatibleChatClient implements ChatClient {
       message.toolCalls = assembledToolCalls;
     }
 
-    return { message };
+    // See completeWithMode: recover provider-unparsed textual tool calls from streamed content.
+    return withUsage(
+      {
+        message: recoverTextualToolCalls(
+          message,
+          request.tools.map((tool) => tool.name)
+        )
+      },
+      usage
+    );
+  }
+
+  private async fetchWithRetry(
+    body: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    // Returns true for errors the caller handles itself (tool/markdown/image fallbacks); these are
+    // not transient, so we stop retrying and hand the response back for the fallback path.
+    isFallbackError: (status: number, errorBody: string) => boolean
+  ): Promise<FetchAttempt> {
+    const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    const payload = JSON.stringify(body);
+    const maxRetries = Math.max(0, this.config.maxRequestRetries ?? DEFAULT_MAX_REQUEST_RETRIES);
+    const timeoutMs = this.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+
+    let attempt = 0;
+    for (;;) {
+      throwIfAborted(signal);
+      const attemptController = new AbortController();
+      const removeLink = linkAbortSignal(signal, attemptController);
+      const timeout = setTimeout(() => attemptController.abort(new Error(`Model request timed out after ${timeoutMs}ms.`)), timeoutMs);
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.config.apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: payload,
+          signal: attemptController.signal
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        removeLink();
+        // A caller-initiated abort is terminal; do not retry it.
+        if (signal?.aborted) {
+          throw abortError(signal);
+        }
+        if (attempt >= maxRetries) {
+          throw error;
+        }
+        await delay(retryDelayMs(attempt), signal);
+        attempt += 1;
+        continue;
+      }
+      clearTimeout(timeout);
+      removeLink();
+
+      if (response.ok) {
+        return { response };
+      }
+
+      // Read the error body once; the fallback path and the thrown error both reuse it.
+      const errorBody = await response.text().catch(() => "");
+      const retryable = RETRYABLE_STATUS_CODES.has(response.status) && !isFallbackError(response.status, errorBody);
+      if (!retryable || attempt >= maxRetries) {
+        return { response, errorBody };
+      }
+
+      const retryAfterMs = retryAfterFromHeaders(response.headers) ?? retryDelayMs(attempt);
+      await delay(retryAfterMs, signal);
+      attempt += 1;
+    }
+  }
+
+  private isFallbackError(request: ChatRequest, mode: CompletionMode, status: number, body: string): boolean {
+    if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(status, body, request)) {
+      return true;
+    }
+    return this.config.imageInput !== "enabled" && shouldPersistImageInputUnsupported(status, body, request);
   }
 
   private async observeCapability(capability: ProviderCapabilityObservation["capability"], status: number, body: string) {
@@ -292,6 +420,7 @@ function toOpenAIRequestBody(model: string, request: ChatRequest, stream: boolea
 
   if (stream) {
     body.stream = true;
+    body.stream_options = { include_usage: true };
   }
 
   if (mode === "tool_calls" && request.tools.length > 0) {
@@ -322,7 +451,10 @@ function shouldRetryWithoutTools(status: number, body: string, request: ChatRequ
     return false;
   }
   const toolRelated = /\b(tool|tools|tool_calls|tool_call_id|tool_choice|function calling|function_call|functions)\b/i.test(body);
-  const decodeRelated = /\b(failed to decode json body|decode json|decode json body|invalid json|invalid character|unexpected end of JSON input|invalid request body)\b/i.test(body);
+  const decodeRelated =
+    /\b(failed to decode json body|decode json|decode json body|invalid json|invalid character|unexpected end of JSON input|invalid request body)\b/i.test(
+      body
+    );
   const emptyAssistantContentRelated = /\bempty content\b/i.test(body) && /\bassistant messages?\b/i.test(body);
   return toolRelated || decodeRelated || emptyAssistantContentRelated;
 }
@@ -331,8 +463,12 @@ function shouldPersistImageInputUnsupported(status: number, body: string, reques
   if (!request.messages.some((message) => chatContentHasImage(message.content)) || ![400, 404, 415, 422, 500].includes(status)) {
     return false;
   }
-  const imageRelated = /\b(image|images|image_url|vision|visual|multimodal|multi-modal|content part|content parts|input image|data url|base64)\b/i.test(body);
-  const unsupportedRelated = /\b(unsupported|not supported|does not support|do not support|invalid|unrecognized|unknown|cannot|can't|text[- ]?only|media type)\b/i.test(body);
+  const imageRelated =
+    /\b(image|images|image_url|vision|visual|multimodal|multi-modal|content part|content parts|input image|data url|base64)\b/i.test(body);
+  const unsupportedRelated =
+    /\b(unsupported|not supported|does not support|do not support|invalid|unrecognized|unknown|cannot|can't|text[- ]?only|media type)\b/i.test(
+      body
+    );
   return imageRelated && unsupportedRelated;
 }
 
@@ -375,9 +511,7 @@ function stripToolProtocolMessages(messages: ChatMessage[]): ChatMessage[] {
 
     if (message.toolCalls?.length) {
       const content = chatContentToText(message.content).trim();
-      const toolRequests = message.toolCalls
-        .map((call) => `- ${call.name}: ${formatToolArguments(call.arguments)}`)
-        .join("\n");
+      const toolRequests = message.toolCalls.map((call) => `- ${call.name}: ${formatToolArguments(call.arguments)}`).join("\n");
       return {
         role: message.role,
         content: [content, `Local tool request${message.toolCalls.length === 1 ? "" : "s"}:\n${toolRequests}`].filter(Boolean).join("\n\n")
@@ -422,7 +556,8 @@ function toOpenAIMessage(message: ChatMessage): OpenAIMessage {
 
   return {
     role: message.role,
-    content: message.role === "assistant" && toolCalls?.length && !chatContentHasText(message.content) ? null : toOpenAIContent(message.content),
+    content:
+      message.role === "assistant" && toolCalls?.length && !chatContentHasText(message.content) ? null : toOpenAIContent(message.content),
     tool_calls: toolCalls
   };
 }
@@ -566,12 +701,123 @@ function parseBatchResponseText(text: string): ChatResponse | undefined {
       choices?: Array<{
         message?: OpenAIMessage;
       }>;
+      usage?: OpenAIUsage | null;
     };
     const message = json.choices?.[0]?.message;
-    return message ? { message: fromOpenAIMessage(message) } : undefined;
+    return message ? withUsage({ message: fromOpenAIMessage(message) }, json.usage) : undefined;
   } catch {
     return undefined;
   }
+}
+
+function withUsage(response: ChatResponse, usage: OpenAIUsage | null | undefined): ChatResponse {
+  const normalized = normalizeUsage(usage);
+  return normalized ? { ...response, usage: normalized } : response;
+}
+
+function normalizeUsage(usage: OpenAIUsage | null | undefined): ChatUsage | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const promptTokens = numericField(usage.prompt_tokens);
+  const completionTokens = numericField(usage.completion_tokens);
+  const totalTokens = numericField(usage.total_tokens);
+  if (promptTokens === undefined && completionTokens === undefined && totalTokens === undefined) {
+    return undefined;
+  }
+  return {
+    ...(promptTokens === undefined ? {} : { promptTokens }),
+    ...(completionTokens === undefined ? {} : { completionTokens }),
+    ...(totalTokens === undefined ? { totalTokens: sumTokens(promptTokens, completionTokens) } : { totalTokens })
+  };
+}
+
+function sumTokens(promptTokens: number | undefined, completionTokens: number | undefined) {
+  if (promptTokens === undefined && completionTokens === undefined) {
+    return undefined;
+  }
+  return (promptTokens ?? 0) + (completionTokens ?? 0);
+}
+
+function numericField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined) {
+  if (signal?.aborted) {
+    throw abortError(signal);
+  }
+}
+
+function abortError(signal: AbortSignal | undefined): Error {
+  const reason = signal?.reason;
+  if (reason instanceof Error) {
+    return reason;
+  }
+  const error = new Error(typeof reason === "string" && reason ? reason : "Model request aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function linkAbortSignal(source: AbortSignal | undefined, target: AbortController): () => void {
+  if (!source) {
+    return () => undefined;
+  }
+  if (source.aborted) {
+    target.abort(source.reason);
+    return () => undefined;
+  }
+  const onAbort = () => target.abort(source.reason);
+  source.addEventListener("abort", onAbort, { once: true });
+  return () => source.removeEventListener("abort", onAbort);
+}
+
+function retryDelayMs(attempt: number) {
+  return Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * 2 ** attempt);
+}
+
+function retryAfterFromHeaders(headers: Headers): number | undefined {
+  const value = headers.get("retry-after");
+  if (!value) {
+    return undefined;
+  }
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(MAX_RETRY_DELAY_MS, seconds * 1_000);
+  }
+  const dateMs = Date.parse(value);
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, Math.min(MAX_RETRY_DELAY_MS, dateMs - Date.now()));
+  }
+  return undefined;
+}
+
+function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      cleanup();
+      reject(abortError(signal));
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        cleanup();
+        reject(abortError(signal));
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
 }
 
 function parseJson(value: string): unknown {

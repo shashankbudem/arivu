@@ -251,7 +251,8 @@ async function runOneShot(task: string, config: AppConfig) {
     baseUrl: config.baseUrl,
     tavilyApiKey: config.tavilyApiKey,
     mcpServers: config.mcpServers,
-    scopePolicyRules
+    scopePolicyRules,
+    contextWindowTokens: config.contextWindowTokens
   });
   const store = new SessionStore();
 
@@ -320,9 +321,7 @@ function printDoctorReport(report: DoctorReport) {
     }
   }
   console.log(
-    chalk.dim(
-      `Summary: ${report.summary.pass} pass, ${report.summary.warn} warn, ${report.summary.fail} fail, ${report.summary.skip} skip`
-    )
+    chalk.dim(`Summary: ${report.summary.pass} pass, ${report.summary.warn} warn, ${report.summary.fail} fail, ${report.summary.skip} skip`)
   );
 }
 

@@ -186,7 +186,7 @@ describe("OpenAICompatibleChatClient", () => {
     expect(bodies[1]?.tools).toBeUndefined();
     expect(bodies[1]?.tool_choice).toBeUndefined();
     const retryMessages = JSON.stringify(bodies[1]?.messages);
-    expect(retryMessages).not.toContain("\"role\":\"tool\"");
+    expect(retryMessages).not.toContain('"role":"tool"');
     expect(retryMessages).not.toContain("tool_calls");
     expect(retryMessages).toContain("Local tool request");
     expect(retryMessages).toContain("Local tool result from web_search");
@@ -648,6 +648,259 @@ describe("OpenAICompatibleChatClient", () => {
     expect(streamed.join("")).not.toContain("【");
   });
 
+  it("recovers a provider-unparsed textual tool call from complete() content", async () => {
+    vi.stubGlobal("fetch", async () => {
+      return Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content:
+                'Delegating to the page agent now.\n\nLocal tool request:\n- browser_task: {\n  "instruction": "Create the catalog item",\n  "mode": "visible"\n}'
+            }
+          }
+        ]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.complete({
+      messages: [{ role: "user", content: "create the item" }],
+      tools: [{ name: "browser_task", description: "Delegate a browser task.", parameters: { type: "object", properties: {} } }]
+    });
+
+    expect(response.message.toolCalls).toHaveLength(1);
+    expect(response.message.toolCalls?.[0]).toMatchObject({
+      name: "browser_task",
+      arguments: { instruction: "Create the catalog item", mode: "visible" }
+    });
+    expect(String(response.message.content)).toBe("Delegating to the page agent now.");
+  });
+
+  it("recovers a provider-unparsed textual tool call from streamed content", async () => {
+    vi.stubGlobal("fetch", async () => {
+      const events = [
+        { choices: [{ delta: { content: "On it.\n<tool_call>\n" } }] },
+        { choices: [{ delta: { content: '{"name": "browser_state", "arguments": {}}\n</tool_call>' } }] }
+      ];
+      const body = `${events.map((event) => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.stream?.(
+      {
+        messages: [{ role: "user", content: "check the browser" }],
+        tools: [{ name: "browser_state", description: "Inspect browser state.", parameters: { type: "object", properties: {} } }]
+      },
+      () => undefined
+    );
+
+    expect(response?.message.toolCalls).toHaveLength(1);
+    expect(response?.message.toolCalls?.[0]).toMatchObject({ name: "browser_state", arguments: {} });
+    expect(String(response?.message.content)).toBe("On it.");
+  });
+
+  it("recovers textual tool calls when a provider answers a stream request with a batch body", async () => {
+    vi.stubGlobal("fetch", async () => {
+      return Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: 'Local tool request:\n- browser_task: {\n  "instruction": "Create the item"\n}'
+            }
+          }
+        ]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.stream?.(
+      {
+        messages: [{ role: "user", content: "create the item" }],
+        tools: [{ name: "browser_task", description: "Delegate a browser task.", parameters: { type: "object", properties: {} } }]
+      },
+      () => undefined
+    );
+
+    expect(response?.message.toolCalls).toHaveLength(1);
+    expect(response?.message.toolCalls?.[0]).toMatchObject({ name: "browser_task", arguments: { instruction: "Create the item" } });
+  });
+
+  it("retries retryable status codes with backoff and then succeeds", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response("rate limited", { status: 429, headers: { "Retry-After": "0" } });
+      }
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "Recovered after retry." } }]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] });
+
+    expect(response.message.content).toBe("Recovered after retry.");
+    expect(calls).toBe(2);
+  });
+
+  it("gives up after exhausting retries on retryable errors", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response("upstream unavailable", { status: 503, headers: { "Retry-After": "0" } });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      maxRequestRetries: 1
+    });
+
+    await expect(client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow("Model request failed (503)");
+    expect(calls).toBe(2);
+  });
+
+  it("does not retry non-retryable client errors", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response("nope", { status: 401 });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    await expect(client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow("Model request failed (401)");
+    expect(calls).toBe(1);
+  });
+
+  it("parses token usage from batch responses", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({
+        choices: [{ message: { role: "assistant", content: "Done." } }],
+        usage: { prompt_tokens: 100, completion_tokens: 25, total_tokens: 125 }
+      })
+    );
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] });
+
+    expect(response.usage).toEqual({ promptTokens: 100, completionTokens: 25, totalTokens: 125 });
+  });
+
+  it("requests and parses streamed usage", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const events = [
+        { choices: [{ delta: { content: "Answer." } }] },
+        { choices: [], usage: { prompt_tokens: 40, completion_tokens: 10, total_tokens: 50 } }
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(`${events}data: [DONE]\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" }
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] });
+
+    expect((body?.stream_options as Record<string, unknown>)?.include_usage).toBe(true);
+    expect(response?.usage).toEqual({ promptTokens: 40, completionTokens: 10, totalTokens: 50 });
+  });
+
+  it("does not send a request when the signal is already aborted", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const controller = new AbortController();
+    controller.abort();
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    await expect(
+      client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] }, { signal: controller.signal })
+    ).rejects.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not retry when the caller aborts the request", async () => {
+    let calls = 0;
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
+      calls += 1;
+      controller.abort();
+      const abortError = new Error("aborted");
+      abortError.name = "AbortError";
+      (init?.signal as AbortSignal | undefined)?.throwIfAborted?.();
+      throw abortError;
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    await expect(
+      client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] }, { signal: controller.signal })
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+
   it("strips tool protocol history from no-tools requests", async () => {
     let body: Record<string, unknown> | undefined;
     vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
@@ -692,7 +945,7 @@ describe("OpenAICompatibleChatClient", () => {
 
     expect(body?.tools).toBeUndefined();
     const messages = JSON.stringify(body?.messages);
-    expect(messages).not.toContain("\"role\":\"tool\"");
+    expect(messages).not.toContain('"role":"tool"');
     expect(messages).not.toContain("tool_calls");
     expect(messages).toContain("Local tool request");
     expect(messages).toContain("Local tool result from web_search");

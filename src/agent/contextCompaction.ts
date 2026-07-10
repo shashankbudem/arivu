@@ -9,6 +9,7 @@ export const AUTO_COMPACT_REQUEST_RECENT_CHARACTER_LIMIT = 6_000;
 export const AUTO_COMPACT_REQUEST_ACTIVE_USER_CHARACTER_LIMIT = 32_000;
 
 const COMPACTION_PREFIX = "Context compacted locally to reduce future model requests.";
+export const MODEL_SUMMARY_PREFIX = "Conversation summary (model-generated) to reduce context size.";
 const DEFAULT_ENTRY_LIMIT = 700;
 
 type CompactOptions = {
@@ -61,13 +62,15 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
       ? [toPinnedUserMessage(latestUserMessage, activeUserMessageCharacterLimit)]
       : [];
   const olderMessages = nonSystemMessages.filter((_message, index) => index < recentStart && index !== latestUserMessageIndex);
-  const recentMessages = nonSystemMessages.slice(recentStart).map((message, index) =>
-    toPlainTranscriptMessage(
-      message,
-      recentStart + index === latestUserMessageIndex ? activeUserMessageCharacterLimit : recentEntryCharacterLimit,
-      recentStart + index === latestUserMessageIndex && preserveLatestUserMessage
-    )
-  );
+  const recentMessages = nonSystemMessages
+    .slice(recentStart)
+    .map((message, index) =>
+      toPlainTranscriptMessage(
+        message,
+        recentStart + index === latestUserMessageIndex ? activeUserMessageCharacterLimit : recentEntryCharacterLimit,
+        recentStart + index === latestUserMessageIndex && preserveLatestUserMessage
+      )
+    );
   const compactedAt = (options.now ?? new Date()).toISOString();
   const compactedMessage: ChatMessage = {
     role: "system",
@@ -75,6 +78,10 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
       COMPACTION_PREFIX,
       `Compacted at: ${compactedAt}`,
       `Compacted messages: ${olderMessages.length}`,
+      // Textified tool exchanges below use a "Local tool request/result" transcript format;
+      // without this warning, some models imitate that format in their replies instead of
+      // making native tool calls, and the run ends without executing anything.
+      'Lines like "Local tool request:" and "Local tool result" below are historical records, not a format to reply in. To use a tool, emit a native tool call; never write a tool invocation as plain text.',
       "Older transcript summary:",
       buildCompactionSummary([...previousCompactions, ...olderMessages], entryCharacterLimit)
     ].join("\n")
@@ -121,6 +128,73 @@ export function compactMessagesForModelRequest(messages: ChatMessage[], options:
 export function estimateMessageTokens(messages: ChatMessage[]) {
   const transcript = messages.map((message) => `${message.role}: ${transcriptContent(message)}`).join("\n\n");
   return Math.ceil(transcript.length / 4);
+}
+
+/**
+ * The older, to-be-summarized slice of the conversation (everything but the base system messages and
+ * the most recent `recentMessageCount` turns). Callers feed this to the model to produce a summary.
+ */
+export function messagesToSummarize(messages: ChatMessage[], recentMessageCount = COMPACT_RECENT_MESSAGE_COUNT): ChatMessage[] {
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+  const recentStart = Math.max(0, nonSystemMessages.length - recentMessageCount);
+  return nonSystemMessages.slice(0, recentStart);
+}
+
+/**
+ * Replace the older conversation with a single model-generated summary system message, keeping the
+ * base system prompt(s) and the most recent turns verbatim. Leading orphan tool results (whose
+ * originating tool call fell into the summarized slice) are dropped to keep the tool protocol valid.
+ */
+export function applyModelSummary(
+  messages: ChatMessage[],
+  summary: string,
+  options: { recentMessageCount?: number; now?: Date } = {}
+): ContextCompactionResult {
+  const recentMessageCount = options.recentMessageCount ?? COMPACT_RECENT_MESSAGE_COUNT;
+  const systemMessages = messages.filter(
+    (message) => message.role === "system" && !isCompactionMessage(message) && !isModelSummaryMessage(message)
+  );
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+  const recentStart = Math.max(0, nonSystemMessages.length - recentMessageCount);
+  const olderCount = recentStart;
+  let recentMessages = nonSystemMessages.slice(recentStart);
+  let droppedOrphans = 0;
+  while (recentMessages.length > 0 && recentMessages[0]?.role === "tool") {
+    recentMessages = recentMessages.slice(1);
+    droppedOrphans += 1;
+  }
+
+  const summarizedCount = olderCount + droppedOrphans;
+  if (summarizedCount === 0) {
+    return {
+      messages,
+      compacted: false,
+      compactedMessageCount: 0,
+      remainingMessageCount: nonSystemMessages.length
+    };
+  }
+
+  const summaryMessage: ChatMessage = {
+    role: "system",
+    content: [
+      MODEL_SUMMARY_PREFIX,
+      `Summarized at: ${(options.now ?? new Date()).toISOString()}`,
+      `Summarized messages: ${summarizedCount}`,
+      "",
+      summary.trim()
+    ].join("\n")
+  };
+
+  return {
+    messages: [...systemMessages, summaryMessage, ...recentMessages],
+    compacted: true,
+    compactedMessageCount: summarizedCount,
+    remainingMessageCount: recentMessages.length
+  };
+}
+
+function isModelSummaryMessage(message: ChatMessage) {
+  return message.role === "system" && chatContentToText(message.content).startsWith(MODEL_SUMMARY_PREFIX);
 }
 
 function isCompactionMessage(message: ChatMessage) {

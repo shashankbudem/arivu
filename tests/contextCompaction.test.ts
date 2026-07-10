@@ -39,6 +39,8 @@ describe("context compaction", () => {
     expect(result.messages[0]).toEqual({ role: "system", content: "system prompt" });
     expect(result.messages[1]?.role).toBe("system");
     expect(result.messages[1]?.content).toContain("Context compacted locally");
+    // Anti-mimicry warning: models must not imitate the textified tool-transcript format.
+    expect(result.messages[1]?.content).toContain("not a format to reply in");
     expect(result.messages[1]?.content).toContain("User: older question");
     expect(result.messages[1]?.content).toContain("Agent: older answer");
     expect(result.messages.slice(2)).toEqual([
@@ -112,7 +114,9 @@ describe("context compaction", () => {
   });
 
   it("preserves the latest user request when later tool output pushes it out of the recent window", () => {
-    const longTodoPrompt = Array.from({ length: 120 }, (_entry, index) => `TODO-${index + 1}: implement requirement ${index + 1}`).join("\n");
+    const longTodoPrompt = Array.from({ length: 120 }, (_entry, index) => `TODO-${index + 1}: implement requirement ${index + 1}`).join(
+      "\n"
+    );
     const messages: ChatMessage[] = [
       { role: "system", content: "system prompt" },
       { role: "user", content: longTodoPrompt }
@@ -232,7 +236,13 @@ describe("context compaction", () => {
 
     expect(result.compacted).toBe(true);
     expect(Array.isArray(pinnedContent)).toBe(true);
-    expect(pinnedParts).toContainEqual({ type: "image_url", image_url: { url: imageUrl, detail: "low" }, name: "screen.png", mimeType: "image/png", size: 128 });
+    expect(pinnedParts).toContainEqual({
+      type: "image_url",
+      image_url: { url: imageUrl, detail: "low" },
+      name: "screen.png",
+      mimeType: "image/png",
+      size: 128
+    });
     expect(pinnedParts.find((part) => part.type === "text")?.text).toContain("Please inspect this screenshot.");
     expect(pinnedParts.find((part) => part.type === "text")?.text.length).toBeLessThanOrEqual(80);
   });

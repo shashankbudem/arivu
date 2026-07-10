@@ -209,7 +209,7 @@ export function recordTaskRunEvent(
   now = new Date().toISOString(),
   options: RecordTaskRunEventOptions = {}
 ): boolean {
-  if (event.type === "tool_call_delta" || event.type === "assistant_delta") {
+  if (event.type === "tool_call_delta" || event.type === "assistant_delta" || event.type === "browser_task_progress") {
     return false;
   }
 
@@ -242,16 +242,14 @@ export function recordTaskRunEvent(
 
   const capability = capabilityForToolName(event.name);
   const existing = run.tools.find((tool) => tool.toolCallId === event.toolCallId);
-  const tool =
-    existing ??
-    {
-      id: randomUUID(),
-      toolCallId: event.toolCallId,
-      name: event.name,
-      capability,
-      status: "running" as const,
-      startedAt: now
-    };
+  const tool = existing ?? {
+    id: randomUUID(),
+    toolCallId: event.toolCallId,
+    name: event.name,
+    capability,
+    status: "running" as const,
+    startedAt: now
+  };
   if (!existing) {
     run.tools.push(tool);
   }
@@ -519,7 +517,7 @@ function collectPlanAfterHeading(
 }
 
 function parsePlanItem(line: string): AgentTaskRunPlanItem | undefined {
-  const match = /^\s*(?:[-*+]\s+(?:\[([ xX~\-])\]\s*)?|\d+[.)]\s+)(.+)$/.exec(line);
+  const match = /^\s*(?:[-*+]\s+(?:\[([ xX~-])\]\s*)?|\d+[.)]\s+)(.+)$/.exec(line);
   if (!match) {
     return undefined;
   }
@@ -577,7 +575,7 @@ function collectCompletionAfterHeading(
 }
 
 function parseCompletionItem(line: string): AgentTaskRunCompletionItem | undefined {
-  const match = /^\s*(?:[-*+]\s+(?:\[([ xX~!\-])\]\s*)?|\d+[.)]\s+)(.+)$/.exec(line);
+  const match = /^\s*(?:[-*+]\s+(?:\[([ xX~!-])\]\s*)?|\d+[.)]\s+)(.+)$/.exec(line);
   if (!match) {
     return undefined;
   }
@@ -597,7 +595,7 @@ function parseCompletionItem(line: string): AgentTaskRunCompletionItem | undefin
 }
 
 function extractCompletionEvidence(value: string): { text: string; evidence: NonNullable<AgentTaskRunCompletionItem["evidence"]> } {
-  const match = /^(.*?)(?:\s*[\[(]\s*evidence\s*:\s*(.+?)\s*[\])])\s*$/i.exec(value.trim());
+  const match = /^(.*?)(?:\s*[[(]\s*evidence\s*:\s*(.+?)\s*[\])])\s*$/i.exec(value.trim());
   if (!match) {
     return { text: value, evidence: [] };
   }
@@ -614,7 +612,8 @@ function parseCompletionEvidenceLabels(value: string): NonNullable<AgentTaskRunC
     if (!part) {
       continue;
     }
-    const match = /^(file|files|path|paths|command|cmd|report|reports|check|checks|pr check|pr checks|note|notes)\s*(?:=|:|\s)\s*(.+)$/i.exec(part);
+    const match =
+      /^(file|files|path|paths|command|cmd|report|reports|check|checks|pr check|pr checks|note|notes)\s*(?:=|:|\s)\s*(.+)$/i.exec(part);
     if (!match?.[1] || !match[2]) {
       continue;
     }
@@ -784,6 +783,9 @@ function artifactFromToolResult(
   if (toolName === "write_file") {
     return fileChangeArtifactFromToolResult(toolCallId, result, now, writeFileArgsFromArguments(tool?.arguments));
   }
+  if (toolName === "browser_task") {
+    return browserTaskArtifactFromToolResult(toolCallId, result, now);
+  }
 
   const parsed = parseJsonObject(result);
   if (!parsed) {
@@ -807,6 +809,36 @@ function artifactFromToolResult(
     path: screenshotPath,
     width,
     height,
+    toolCallId,
+    createdAt: now
+  };
+}
+
+function browserTaskArtifactFromToolResult(toolCallId: string, result: string, now: string): AgentTaskRunArtifact | undefined {
+  const parsed = parseJsonObject(result);
+  if (!parsed) {
+    return undefined;
+  }
+  const success = parsed.success === true;
+  const stepCount = numberValue(parsed.stepCount) ?? 0;
+  const stopped = parsed.stopped === true;
+  const stopReason = stringValue(parsed.stopReason);
+  const durationMs = numberValue(parsed.durationMs);
+  const data = typeof parsed.data === "string" ? parsed.data : "";
+  const boundedContent = boundFileChangeContent(data);
+  const summaryParts = [
+    success ? "Completed" : "Did not complete",
+    `${stepCount} step${stepCount === 1 ? "" : "s"}`,
+    stopped && stopReason ? `stopped: ${stopReason}` : undefined,
+    durationMs === undefined ? undefined : formatDuration(durationMs)
+  ].filter((part): part is string => Boolean(part));
+  return {
+    id: `${toolCallId}:browser_task_log`,
+    kind: "browser_task_log",
+    title: "Browser task",
+    summary: summaryParts.join(", "),
+    content: boundedContent.text,
+    contentTruncated: boundedContent.truncated || undefined,
     toolCallId,
     createdAt: now
   };
@@ -1124,21 +1156,11 @@ function verificationSummary(stats: Omit<AgentTaskRunVerification, "summary" | "
       : stats.commandCount > 0
         ? "no failed exits"
         : undefined,
-    stats.timedOutCommandCount && stats.timedOutCommandCount > 0
-      ? `${stats.timedOutCommandCount} timed out`
-      : undefined,
-    stats.parsedReportCount > 0
-      ? `${stats.parsedReportCount} parsed report${stats.parsedReportCount === 1 ? "" : "s"}`
-      : undefined,
-    stats.failedReportCount > 0
-      ? `${stats.failedReportCount} failed report${stats.failedReportCount === 1 ? "" : "s"}`
-      : undefined,
-    stats.passedReportCount > 0
-      ? `${stats.passedReportCount} passed report${stats.passedReportCount === 1 ? "" : "s"}`
-      : undefined,
-    stats.unknownReportCount > 0
-      ? `${stats.unknownReportCount} unknown report${stats.unknownReportCount === 1 ? "" : "s"}`
-      : undefined
+    stats.timedOutCommandCount && stats.timedOutCommandCount > 0 ? `${stats.timedOutCommandCount} timed out` : undefined,
+    stats.parsedReportCount > 0 ? `${stats.parsedReportCount} parsed report${stats.parsedReportCount === 1 ? "" : "s"}` : undefined,
+    stats.failedReportCount > 0 ? `${stats.failedReportCount} failed report${stats.failedReportCount === 1 ? "" : "s"}` : undefined,
+    stats.passedReportCount > 0 ? `${stats.passedReportCount} passed report${stats.passedReportCount === 1 ? "" : "s"}` : undefined,
+    stats.unknownReportCount > 0 ? `${stats.unknownReportCount} unknown report${stats.unknownReportCount === 1 ? "" : "s"}` : undefined
   ].filter((part): part is string => Boolean(part));
   return `${verificationStatusLabel(stats.status)}: ${parts.join(", ")}.`;
 }
@@ -1524,6 +1546,7 @@ function truncateDiagnosticText(value: string): string {
 }
 
 function stripAnsi(value: string) {
+  // eslint-disable-next-line no-control-regex -- matching the ESC control character is the point of ANSI stripping
   return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
@@ -1568,7 +1591,9 @@ function parseReportContent(reportPath: string, content: string): AgentTaskRunTe
 }
 
 function looksLikeSarif(reportPath: string, content: string) {
-  return /\.sarif(?:\.json)?$/i.test(reportPath) || /"version"\s*:\s*"2\.1\.0"/.test(content) || /"\$schema"\s*:\s*"[^"]*sarif/i.test(content);
+  return (
+    /\.sarif(?:\.json)?$/i.test(reportPath) || /"version"\s*:\s*"2\.1\.0"/.test(content) || /"\$schema"\s*:\s*"[^"]*sarif/i.test(content)
+  );
 }
 
 function looksLikeJUnit(reportPath: string, content: string) {
@@ -1584,7 +1609,7 @@ function parseJUnitReport(reportPath: string, content: string): AgentTaskRunTest
   const errors = attrs ? xmlNumberAttr(attrs, "errors") : sumXmlNumberAttrs(suiteAttrs, "errors");
   const skipped = attrs ? xmlNumberAttr(attrs, "skipped") : sumXmlNumberAttrs(suiteAttrs, "skipped");
   const durationSeconds = attrs ? xmlNumberAttr(attrs, "time") : sumXmlNumberAttrs(suiteAttrs, "time");
-  const suites = rootAttrs ? xmlNumberAttr(rootAttrs, "testsuites") ?? suiteAttrs.length : suiteAttrs.length || undefined;
+  const suites = rootAttrs ? (xmlNumberAttr(rootAttrs, "testsuites") ?? suiteAttrs.length) : suiteAttrs.length || undefined;
 
   if (tests === undefined && failures === undefined && errors === undefined && skipped === undefined) {
     return undefined;
@@ -1666,7 +1691,7 @@ function xmlStringAttr(attrs: string, name: string): string | undefined {
 
 function decodeXmlEntities(value: string) {
   return value
-    .replace(/&quot;/g, "\"")
+    .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
