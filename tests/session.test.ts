@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -496,6 +496,53 @@ describe("session store", () => {
     });
   });
 
+  it("round-trips a browser_task_log artifact through save, load, and list", async () => {
+    // Regression guard: the persisted artifact-kind enum must stay in sync with
+    // AgentTaskRunArtifact.kind. When it drifted, sessions with browser_task_log
+    // artifacts failed schema validation and were silently dropped from the list.
+    const store = new SessionStore(tempDir);
+    await store.save({
+      id: "browser-task-session",
+      cwd: "/tmp/project",
+      trustMode: "trusted",
+      taskRuns: [
+        {
+          id: "run-browser-task",
+          userMessageIndex: 1,
+          promptPreview: "fill the form",
+          status: "completed",
+          capabilities: ["browser_control"],
+          tools: [],
+          approvals: [],
+          artifacts: [
+            {
+              id: "artifact-browser-task-log",
+              kind: "browser_task_log",
+              title: "Browser task log",
+              summary: "Filled the form and submitted.",
+              createdAt: "2026-01-01T00:00:01.000Z"
+            }
+          ],
+          startedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+          completedAt: "2026-01-01T00:00:01.000Z"
+        }
+      ],
+      messages: [
+        { role: "system", content: "You are Arivu, a local CLI coding agent." },
+        { role: "user", content: "fill the form" },
+        { role: "assistant", content: "Done." }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z"
+    });
+
+    await expect(store.load("browser-task-session")).resolves.toMatchObject({
+      taskRuns: [{ artifacts: [{ id: "artifact-browser-task-log", kind: "browser_task_log" }] }]
+    });
+    await expect(store.list()).resolves.toMatchObject([{ id: "browser-task-session" }]);
+  });
+
   it("repairs task-run indexes that drifted before a saved user prompt", async () => {
     const driftedSession = {
       id: "drifted-task-run",
@@ -608,5 +655,64 @@ describe("session store", () => {
 
     await expect(store.list()).resolves.toEqual([]);
     await expect(store.load("doomed")).rejects.toThrow();
+  });
+
+  it("externalizes large image attachments and rehydrates them on load", async () => {
+    const store = new SessionStore(tempDir);
+    const bytes = Buffer.alloc(8_000, 7);
+    const dataUrl = `data:image/png;base64,${bytes.toString("base64")}`;
+    await store.save({
+      id: "with-image",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "look at this" },
+            { type: "image_url", image_url: { url: dataUrl, detail: "low" }, name: "shot.png", mimeType: "image/png", size: bytes.length }
+          ]
+        }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    // The stored JSON must not contain the inline base64 payload.
+    const rawFile = await readFile(path.join(tempDir, "with-image.json"), "utf8");
+    expect(rawFile).toContain("arivu-attachment:v1:");
+    expect(rawFile).not.toContain(bytes.toString("base64"));
+
+    const loaded = await store.load("with-image");
+    const imagePart = Array.isArray(loaded.messages[0]?.content)
+      ? loaded.messages[0].content.find((part) => part.type === "image_url")
+      : undefined;
+    expect(imagePart && imagePart.type === "image_url" ? imagePart.image_url.url : "").toBe(dataUrl);
+
+    await store.delete("with-image");
+    await expect(readFile(path.join(tempDir, "attachments", "with-image"))).rejects.toThrow();
+  });
+
+  it("loads legacy sessions with inline image data urls unchanged", async () => {
+    const store = new SessionStore(tempDir);
+    const smallDataUrl = "data:image/png;base64,aGVsbG8=";
+    await writeFile(
+      path.join(tempDir, "legacy-image.json"),
+      JSON.stringify({
+        id: "legacy-image",
+        cwd: "/tmp/project",
+        trustMode: "ask",
+        messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: smallDataUrl } }] }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      }),
+      "utf8"
+    );
+
+    const loaded = await store.load("legacy-image");
+    const imagePart = Array.isArray(loaded.messages[0]?.content)
+      ? loaded.messages[0].content.find((part) => part.type === "image_url")
+      : undefined;
+    expect(imagePart && imagePart.type === "image_url" ? imagePart.image_url.url : "").toBe(smallDataUrl);
   });
 });
