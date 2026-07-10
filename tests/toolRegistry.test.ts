@@ -7,6 +7,7 @@ import { createSkill, readSkill } from "../src/agent/skills.js";
 import { ApprovalManager } from "../src/permissions/ApprovalManager.js";
 import type { WorkspaceScopePolicyRules } from "../src/permissions/scopePolicy.js";
 import type { BrowserToolController } from "../src/tools/browserControl.js";
+import { ChangeCheckpoint } from "../src/tools/changeCheckpoint.js";
 import { DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD } from "../src/tools/directEditReview.js";
 import { createToolRegistry } from "../src/tools/registry.js";
 
@@ -36,9 +37,8 @@ describe("createToolRegistry", () => {
     expect(names).toContain("browser_open");
     expect(names).toContain("browser_state");
     expect(names).toContain("browser_select_tab");
-    expect(names).toContain("browser_snapshot");
-    expect(names).toContain("browser_click");
-    expect(names).toContain("browser_click_at");
+    expect(names).toContain("browser_screenshot");
+    expect(names).toContain("browser_task");
 
     const result = JSON.parse(await withBrowser.execute("browser_open", { url: "localhost:5173" })) as Record<string, unknown>;
     expect(result.action).toBe("open");
@@ -74,13 +74,28 @@ describe("createToolRegistry", () => {
     expect(selectResult.action).toBe("select_tab");
     expect(selectResult.mode).toBe("visible");
     expect(selectResult.activeTabId).toBe("visible-tab-1");
+  });
 
-    const followUpResult = JSON.parse(await withBrowser.execute("browser_snapshot", {})) as Record<string, unknown>;
-    expect(followUpResult.mode).toBe("visible");
+  it("disables the low-level manual browser tools to steer toward browser_task", async () => {
+    const browser = createFakeBrowser();
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser
+    });
+    const names = registry.schemas.map((schema) => schema.name);
 
-    const coordinateResult = JSON.parse(await withBrowser.execute("browser_click_at", { x: 24, y: 48 })) as Record<string, unknown>;
-    expect(coordinateResult.action).toBe("click_at");
-    expect(coordinateResult.mode).toBe("visible");
+    for (const disabled of [
+      "browser_snapshot",
+      "browser_click",
+      "browser_click_at",
+      "browser_type",
+      "browser_scroll",
+      "browser_select_option"
+    ]) {
+      expect(names).not.toContain(disabled);
+      await expect(registry.execute(disabled, {})).rejects.toThrow(/Unknown tool/);
+    }
   });
 
   it("allows browser actions in readonly mode without prompting", async () => {
@@ -96,9 +111,114 @@ describe("createToolRegistry", () => {
     });
 
     await expect(registry.execute("browser_open", { url: "https://example.com" })).resolves.toMatch(/"action": "open"/);
-    await expect(registry.execute("browser_click", { target: "Sign in" })).resolves.toMatch(/"action": "click"/);
-    await expect(registry.execute("browser_type", { target: "Search", text: "ServiceNow", submit: true })).resolves.toMatch(/"action": "type"/);
+    await expect(registry.execute("browser_state", {})).resolves.toMatch(/"action": "state"/);
     expect(prompted).toBe(false);
+  });
+
+  it("registers browser_task only when a browser controller is provided", () => {
+    const withoutBrowser = createRegistry();
+    expect(withoutBrowser.schemas.map((schema) => schema.name)).not.toContain("browser_task");
+
+    const withBrowser = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+    expect(withBrowser.schemas.map((schema) => schema.name)).toContain("browser_task");
+  });
+
+  it("gates browser_task behind approval as a destructive action and forwards instruction/budgets", async () => {
+    const browser = createFakeBrowser();
+    let prompted = false;
+    let requestedLabel: string | undefined;
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager(
+        "trusted",
+        async (label) => {
+          prompted = true;
+          requestedLabel = label;
+          return true;
+        },
+        { browser_control: "prompt" }
+      ),
+      browser,
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: "real-secret-key" }
+    });
+
+    const result = JSON.parse(
+      await registry.execute("browser_task", { instruction: "fill out the form", maxSteps: 12, timeoutMs: 45_000 })
+    ) as Record<string, unknown>;
+
+    expect(prompted).toBe(true);
+    expect(requestedLabel).toContain("Autonomous browser task: fill out the form");
+    expect(result.action).toBe("task");
+    expect(result.success).toBe(true);
+    expect(result.data).toBe("Completed: fill out the form");
+    expect(result.maxSteps).toBe(12);
+    expect(result.timeoutMs).toBe(45_000);
+    expect(result.modelConfig).toMatchObject({ baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" });
+  });
+
+  it("leaves JavaScript execution off unless allowJavaScript is explicitly set", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    const defaultResult = JSON.parse(await registry.execute("browser_task", { instruction: "fill out the form" })) as Record<
+      string,
+      unknown
+    >;
+    expect(defaultResult.allowJavaScript).toBeUndefined();
+
+    const optedInResult = JSON.parse(
+      await registry.execute("browser_task", { instruction: "compute a value the DOM can't expose", allowJavaScript: true })
+    ) as Record<string, unknown>;
+    expect(optedInResult.allowJavaScript).toBe(true);
+  });
+
+  it("surfaces browser_task denial as text instead of throwing", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted", async () => false, { browser_control: "prompt" }),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    await expect(registry.execute("browser_task", { instruction: "do something" })).resolves.toMatch(/denied browser/);
+  });
+
+  it("fails browser_task cleanly when no model is configured for the run", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser()
+    });
+
+    await expect(registry.execute("browser_task", { instruction: "do something" })).resolves.toMatch(
+      /Error: browser_task has no model configured/
+    );
+  });
+
+  it("forwards an aborted run signal into browser_task", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" },
+      signal: controller.signal
+    });
+
+    const result = JSON.parse(await registry.execute("browser_task", { instruction: "do something" })) as Record<string, unknown>;
+    expect(result.success).toBe(false);
+    expect(result.stopped).toBe(true);
+    expect(result.stopReason).toBe("cancelled");
   });
 
   it("honors workspace browser control overrides", async () => {
@@ -312,7 +432,7 @@ describe("createToolRegistry", () => {
         )
       });
 
-      await expect(registry.execute("read", { path: "README.md" })).resolves.toBe("hello\n");
+      await expect(registry.execute("read", { path: "README.md" })).resolves.toBe("1\thello");
       expect(prompts).toHaveLength(1);
       expect(prompts[0]).toContain("Repo read: read file");
       expect(prompts[0]).toContain("Path: README.md");
@@ -467,8 +587,10 @@ describe("createToolRegistry", () => {
 
       const readResult = await registry.execute("read", { path: "large.txt" });
       expect(readResult.length).toBeLessThan(21_000);
-      expect(readResult).toContain("[truncated]");
-      await expect(registry.execute("write_file", { path: "large.txt", content: "new", mode: "replace" })).resolves.toMatch(/has not been read/);
+      expect(readResult).toContain("truncated");
+      await expect(registry.execute("write_file", { path: "large.txt", content: "new", mode: "replace" })).resolves.toMatch(
+        /has not been read/
+      );
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -480,9 +602,132 @@ describe("createToolRegistry", () => {
       await writeFile(path.join(tempDir, "matches.txt"), Array.from({ length: 5000 }, (_, index) => `needle ${index}`).join("\n"), "utf8");
       const registry = createRegistry(tempDir);
 
-      const result = await registry.execute("search", { query: "needle", path: "." });
+      const result = await registry.execute("search", { query: "needle", path: ".", maxResults: 2000 });
       expect(result.length).toBeLessThanOrEqual(60_012);
       expect(result).toContain("[truncated]");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads files with line numbers and pages through them with offset and limit", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-read-lines-"));
+    try {
+      const lines = Array.from({ length: 10 }, (_value, index) => `line ${index + 1}`);
+      await writeFile(path.join(tempDir, "code.txt"), `${lines.join("\n")}\n`, "utf8");
+      const registry = createRegistry(tempDir);
+
+      const full = await registry.execute("read", { path: "code.txt" });
+      expect(full).toContain(" 1\tline 1");
+      expect(full).toContain("10\tline 10");
+
+      const page = await registry.execute("read", { path: "code.txt", offset: 3, limit: 2 });
+      expect(page).toContain("3\tline 3");
+      expect(page).toContain("4\tline 4");
+      expect(page).not.toContain("line 5");
+      expect(page).toContain("Showing lines 3-4 of 10");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("edits an exact unique string and supports replaceAll", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-edit-"));
+    try {
+      await writeFile(path.join(tempDir, "app.ts"), "const a = 1;\nconst b = 1;\n", "utf8");
+      const registry = createRegistry(tempDir);
+      await registry.execute("read", { path: "app.ts" });
+
+      await expect(registry.execute("edit", { path: "app.ts", oldString: "const a = 1;", newString: "const a = 2;" })).resolves.toContain(
+        "Edited app.ts"
+      );
+      await expect(readFile(path.join(tempDir, "app.ts"), "utf8")).resolves.toBe("const a = 2;\nconst b = 1;\n");
+
+      await registry.execute("read", { path: "app.ts" });
+      await expect(registry.execute("edit", { path: "app.ts", oldString: "= ", newString: "= x", replaceAll: true })).resolves.toContain(
+        "2 occurrences"
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects ambiguous, missing, and unread edits", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-edit-guard-"));
+    try {
+      await writeFile(path.join(tempDir, "app.ts"), "x = 1;\nx = 1;\n", "utf8");
+      const registry = createRegistry(tempDir);
+
+      await expect(registry.execute("edit", { path: "app.ts", oldString: "x = 1;", newString: "x = 2;" })).resolves.toMatch(
+        /has not been read/
+      );
+
+      await registry.execute("read", { path: "app.ts" });
+      await expect(registry.execute("edit", { path: "app.ts", oldString: "x = 1;", newString: "x = 2;" })).resolves.toMatch(
+        /matches 2 times/
+      );
+      await expect(registry.execute("edit", { path: "app.ts", oldString: "missing", newString: "x" })).resolves.toMatch(
+        /oldString not found/
+      );
+      await expect(registry.execute("edit", { path: "new.ts", oldString: "a", newString: "b" })).resolves.toMatch(/does not exist/);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("searches with context lines and a glob filter", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-search-opts-"));
+    try {
+      await writeFile(path.join(tempDir, "a.ts"), "before\nNEEDLE here\nafter\n", "utf8");
+      await writeFile(path.join(tempDir, "b.md"), "NEEDLE in markdown\n", "utf8");
+      const registry = createRegistry(tempDir);
+
+      const scoped = await registry.execute("search", { query: "NEEDLE", path: ".", glob: "*.ts", contextLines: 1 });
+      expect(scoped).toContain("a.ts");
+      expect(scoped).toContain("before");
+      expect(scoped).toContain("after");
+      expect(scoped).not.toContain("markdown");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("truncates very large command output at the tool boundary", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("ask", async () => true)
+    });
+
+    const result = await registry.execute("run", {
+      argv: [process.execPath, "-e", "process.stdout.write('a'.repeat(100000))"]
+    });
+
+    expect(result).toContain("characters truncated");
+    expect(result.length).toBeLessThan(60_000);
+  });
+
+  it("checkpoints direct edits so a run's changes can be reverted", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-checkpoint-"));
+    try {
+      await writeFile(path.join(tempDir, "keep.ts"), "original\n", "utf8");
+      const checkpoint = new ChangeCheckpoint();
+      const registry = createToolRegistry({
+        workspaceRoot: tempDir,
+        approvals: new ApprovalManager("trusted", async () => true),
+        checkpoint
+      });
+
+      await registry.execute("read", { path: "keep.ts" });
+      await registry.execute("edit", { path: "keep.ts", oldString: "original", newString: "modified" });
+      await registry.execute("write_file", { path: "new.ts", content: "created\n", mode: "create" });
+
+      expect(new Set(checkpoint.changedPaths())).toEqual(new Set([path.join(tempDir, "keep.ts"), path.join(tempDir, "new.ts")]));
+      await expect(readFile(path.join(tempDir, "keep.ts"), "utf8")).resolves.toBe("modified\n");
+
+      const reverted = await checkpoint.revert();
+      expect(reverted.length).toBe(2);
+      await expect(readFile(path.join(tempDir, "keep.ts"), "utf8")).resolves.toBe("original\n");
+      await expect(readFile(path.join(tempDir, "new.ts"), "utf8")).rejects.toThrow();
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -705,6 +950,51 @@ function createFakeBrowser(): BrowserToolController {
         ok: true,
         target: args.target,
         text: args.text
+      };
+    },
+    async task(args) {
+      activeMode = args.mode ?? activeMode;
+      if (args.signal?.aborted) {
+        return {
+          mode: activeMode,
+          success: false,
+          data: "Browser task was cancelled.",
+          stepCount: 0,
+          stopped: true,
+          stopReason: "cancelled",
+          navigationCount: 0,
+          durationMs: 0
+        };
+      }
+      return {
+        mode: activeMode,
+        success: true,
+        data: `Completed: ${args.instruction}`,
+        stepCount: 3,
+        stopped: false,
+        navigationCount: 0,
+        durationMs: 5,
+        maxSteps: args.maxSteps,
+        timeoutMs: args.timeoutMs,
+        allowJavaScript: args.allowJavaScript,
+        modelConfig: args.modelConfig
+      };
+    },
+    async scroll(args) {
+      activeMode = args.mode ?? activeMode;
+      return {
+        mode: activeMode,
+        ok: true,
+        direction: args.direction
+      };
+    },
+    async selectOption(args) {
+      activeMode = args.mode ?? activeMode;
+      return {
+        mode: activeMode,
+        ok: true,
+        index: args.index,
+        optionText: args.optionText
       };
     }
   };
