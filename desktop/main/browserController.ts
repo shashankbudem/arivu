@@ -10,9 +10,20 @@ import {
   type BrowserMode,
   type BrowserState,
   type BrowserTargetState,
+  type BrowserTaskModelConfig,
   type BrowserToolController,
   type BrowserToolResult
 } from "../../src/tools/browserControl.js";
+import { runBrowserTask } from "./browserTaskSupervisor.js";
+import {
+  boundIndexedContent,
+  clickElementByIndex,
+  freshPageSnapshot,
+  indexedPageState,
+  inputTextByIndex,
+  scrollPage,
+  selectOptionByIndex
+} from "./pageControllerRuntime.js";
 
 type BrowserStateListener = (state: BrowserState) => void;
 
@@ -58,6 +69,10 @@ type BrowserFrameInspection =
     });
 
 const MAX_CONSOLE_LOGS = 300;
+// Budget for the serialized element list in snapshot/screenshot results. Without it a busy
+// page (e.g. ServiceNow) can push a single tool result past the request auto-compaction
+// threshold, which strips native tool protocol and derails tool calling on the next turn.
+const MAX_VISUAL_ELEMENTS_JSON_CHARS = 48_000;
 const DEFAULT_BACKGROUND_BOUNDS = { width: 1280, height: 800 };
 const VISIBLE_CHROME_HEIGHT = 96;
 const VISIBLE_START_PAGE_TITLE = "Arivu Browser";
@@ -209,10 +224,14 @@ export class DesktopBrowserController implements BrowserToolController {
   async selectTab(args: { tabId: string }): Promise<BrowserToolResult> {
     const target = this.selectVisibleTabById(args.tabId);
     this.emitState();
-    return this.resultForMode("visible", {
-      activeTabId: this.activeVisibleTabId,
-      tabs: this.publicVisibleTarget().tabs ?? []
-    }, target);
+    return this.resultForMode(
+      "visible",
+      {
+        activeTabId: this.activeVisibleTabId,
+        tabs: this.publicVisibleTarget().tabs ?? []
+      },
+      target
+    );
   }
 
   closeVisibleTab(tabId: string) {
@@ -264,16 +283,20 @@ export class DesktopBrowserController implements BrowserToolController {
     target.lastScreenshotSize = size;
     target.lastViewport = visual.viewport;
     this.emitState();
-    return this.resultForMode(mode, {
-      screenshotPath,
-      size,
-      viewport: visual.viewport,
-      paint: {
-        preInspect: preInspectPaint,
-        preCapture: preCapturePaint
+    return this.resultForMode(
+      mode,
+      {
+        screenshotPath,
+        size,
+        viewport: visual.viewport,
+        paint: {
+          preInspect: preInspectPaint,
+          preCapture: preCapturePaint
+        },
+        visual
       },
-      visual
-    }, target);
+      target
+    );
   }
 
   async snapshot(args: { mode?: BrowserMode; tabId?: string; maxLength?: number }): Promise<BrowserToolResult> {
@@ -283,6 +306,14 @@ export class DesktopBrowserController implements BrowserToolController {
     assertPageLoaded(contents, mode);
     const maxLength = clampNumber(args.maxLength ?? 12_000, 1_000, 20_000);
     const snapshot = await this.inspectPage(mode, contents, maxLength);
+    const indexed = await indexedPageState(contents).catch(() => undefined);
+    if (indexed) {
+      const bounded = boundIndexedContent(indexed.content);
+      (snapshot as Record<string, unknown>).elementsTree = bounded.text;
+      if (bounded.truncated) {
+        (snapshot as Record<string, unknown>).elementsTreeTruncated = true;
+      }
+    }
     target.lastSnapshotAt = new Date().toISOString();
     this.emitState();
     return this.resultForMode(mode, { snapshot }, target);
@@ -294,24 +325,38 @@ export class DesktopBrowserController implements BrowserToolController {
     const { target } = this.browserContextForMode(mode, args.tabId);
     const allowedLevels = new Set((args.levels ?? []).map((level) => level.toLowerCase()));
     const limit = clampNumber(args.limit ?? 50, 1, 100);
-    const logs = target.logs
-      .filter((entry) => allowedLevels.size === 0 || allowedLevels.has(entry.level))
-      .slice(-limit);
+    const logs = target.logs.filter((entry) => allowedLevels.size === 0 || allowedLevels.has(entry.level)).slice(-limit);
     return this.resultForMode(mode, { logs }, target);
   }
 
-  async click(args: { target: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult> {
+  async click(args: { target?: string; index?: number; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult> {
     const mode = this.targetForMode(args.mode);
     this.rememberMode(mode);
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
     assertPageLoaded(contents, mode);
-    const result = await this.executeAcrossFrames(contents, clickScript(args.target));
+    let result: BrowserToolResult | undefined;
+    if (args.index !== undefined) {
+      const indexedResult = await clickElementByIndex(contents, args.index);
+      if (indexedResult) {
+        result = indexedResult;
+      }
+    }
+    if (!result) {
+      result = await this.executeAcrossFrames(contents, clickScript(args.target ?? ""));
+    }
+    result = await this.withFreshSnapshot(contents, result);
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
     return this.resultForMode(mode, result, target);
   }
 
-  async clickAt(args: { x: number; y: number; mode?: BrowserMode; tabId?: string; coordinateSpace?: "css" | "image" }): Promise<BrowserToolResult> {
+  async clickAt(args: {
+    x: number;
+    y: number;
+    mode?: BrowserMode;
+    tabId?: string;
+    coordinateSpace?: "css" | "image";
+  }): Promise<BrowserToolResult> {
     const mode = this.targetForMode(args.mode);
     this.rememberMode(mode);
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
@@ -325,26 +370,135 @@ export class DesktopBrowserController implements BrowserToolController {
     await delay(120);
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
-    return this.resultForMode(mode, {
-      ok: true,
-      x: point.x,
-      y: point.y,
-      coordinateSpace: "css",
-      requested: {
-        x: args.x,
-        y: args.y,
-        coordinateSpace: args.coordinateSpace ?? "css"
+    return this.resultForMode(
+      mode,
+      {
+        ok: true,
+        x: point.x,
+        y: point.y,
+        coordinateSpace: "css",
+        requested: {
+          x: args.x,
+          y: args.y,
+          coordinateSpace: args.coordinateSpace ?? "css"
+        },
+        matched
       },
-      matched
-    }, target);
+      target
+    );
   }
 
-  async type(args: { target: string; text: string; mode?: BrowserMode; tabId?: string; submit?: boolean }): Promise<BrowserToolResult> {
+  async type(args: {
+    target?: string;
+    index?: number;
+    text: string;
+    mode?: BrowserMode;
+    tabId?: string;
+    submit?: boolean;
+  }): Promise<BrowserToolResult> {
     const mode = this.targetForMode(args.mode);
     this.rememberMode(mode);
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
     assertPageLoaded(contents, mode);
-    const result = await this.executeAcrossFrames(contents, typeScript(args.target, args.text, Boolean(args.submit)));
+    let result: BrowserToolResult | undefined;
+    if (args.index !== undefined && !args.submit) {
+      const indexedResult = await inputTextByIndex(contents, args.index, args.text);
+      if (indexedResult) {
+        result = indexedResult;
+      }
+    }
+    if (!result) {
+      result = await this.executeAcrossFrames(contents, typeScript(args.target ?? "", args.text, Boolean(args.submit)));
+    }
+    result = await this.withFreshSnapshot(contents, result);
+    this.updateTargetFromContents(mode, contents, target);
+    this.emitState();
+    return this.resultForMode(mode, result, target);
+  }
+
+  async scroll(args: {
+    direction: "up" | "down" | "left" | "right";
+    pixels?: number;
+    numPages?: number;
+    index?: number;
+    mode?: BrowserMode;
+    tabId?: string;
+  }): Promise<BrowserToolResult> {
+    const mode = this.targetForMode(args.mode);
+    this.rememberMode(mode);
+    const { contents, target } = this.browserContextForMode(mode, args.tabId);
+    assertPageLoaded(contents, mode);
+    const horizontal = args.direction === "left" || args.direction === "right";
+    const scrollResult = await scrollPage(contents, {
+      horizontal,
+      down: args.direction === "down",
+      right: args.direction === "right",
+      pixels: args.pixels,
+      numPages: args.numPages,
+      index: args.index
+    });
+    let result: BrowserToolResult = scrollResult ?? { ok: false, message: "The scroll engine failed to load on this page." };
+    result = await this.withFreshSnapshot(contents, result);
+    this.updateTargetFromContents(mode, contents, target);
+    this.emitState();
+    return this.resultForMode(mode, result, target);
+  }
+
+  async selectOption(args: { index: number; optionText: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult> {
+    const mode = this.targetForMode(args.mode);
+    this.rememberMode(mode);
+    const { contents, target } = this.browserContextForMode(mode, args.tabId);
+    assertPageLoaded(contents, mode);
+    const selectResult = await selectOptionByIndex(contents, args.index, args.optionText);
+    let result: BrowserToolResult = selectResult ?? { ok: false, message: "The select engine failed to load on this page." };
+    result = await this.withFreshSnapshot(contents, result);
+    this.updateTargetFromContents(mode, contents, target);
+    this.emitState();
+    return this.resultForMode(mode, result, target);
+  }
+
+  private async withFreshSnapshot(contents: WebContents, result: BrowserToolResult): Promise<BrowserToolResult> {
+    const fields = await freshPageSnapshot(contents);
+    return fields ? { ...result, ...fields } : result;
+  }
+
+  async task(args: {
+    instruction: string;
+    mode?: BrowserMode;
+    tabId?: string;
+    maxSteps?: number;
+    timeoutMs?: number;
+    allowedDomains?: string[];
+    allowJavaScript?: boolean;
+    allowSensitiveActions?: boolean;
+    modelConfig: BrowserTaskModelConfig;
+    signal?: AbortSignal;
+    onProgress?: (progress: { stepIndex: number; summary: string }) => void;
+  }): Promise<BrowserToolResult> {
+    const mode = this.targetForMode(args.mode);
+    this.rememberMode(mode);
+    const { contents, target } = this.browserContextForMode(mode, args.tabId);
+    assertPageLoaded(contents, mode);
+    const taskResult = await runBrowserTask(
+      contents,
+      {
+        instruction: args.instruction,
+        maxSteps: args.maxSteps,
+        timeoutMs: args.timeoutMs,
+        allowedDomains: args.allowedDomains,
+        allowJavaScript: args.allowJavaScript,
+        allowSensitiveActions: args.allowSensitiveActions,
+        visible: mode === "visible"
+      },
+      args.modelConfig,
+      args.signal,
+      args.onProgress
+    );
+    // Attach a bounded post-task page snapshot (the same helper the click/type/scroll/select
+    // tools use) so the main agent can verify the delegated outcome from text instead of
+    // spending a whole extra turn on a heavier browser_screenshot. Never throws:
+    // withFreshSnapshot returns the result unchanged if the page-controller can't load here.
+    const result = await this.withFreshSnapshot(contents, taskResult);
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
     return this.resultForMode(mode, result, target);
@@ -395,19 +549,20 @@ export class DesktopBrowserController implements BrowserToolController {
       successful.map((frame) => String((frame.snapshot as Record<string, unknown>).text ?? "")),
       maxLength
     );
-    const elements = successful
-      .flatMap((frame) => {
-        const snapshot = frame.snapshot as Record<string, unknown>;
-        const entries = Array.isArray(snapshot.elements) ? snapshot.elements : [];
-        return entries.filter(isRecord).map((entry) => ({
-          ...entry,
-          frameIndex: frame.index,
-          frameUrl: frame.url,
-          frameName: frame.name,
-          mainFrame: frame.mainFrame
-        }));
-      })
-      .slice(0, 320);
+    // Elements carry only frameIndex (the frames summary maps index -> url/name/origin);
+    // stamping the full frame URL on every element once inflated a single ServiceNow
+    // screenshot result to ~195K chars, forcing request auto-compaction on the first model
+    // call, which textified the tool protocol and broke native tool calling downstream.
+    const allElements = successful.flatMap((frame) => {
+      const snapshot = frame.snapshot as Record<string, unknown>;
+      const entries = Array.isArray(snapshot.elements) ? snapshot.elements : [];
+      return entries.filter(isRecord).map((entry) => ({
+        ...entry,
+        frameIndex: frame.index,
+        mainFrame: frame.mainFrame
+      }));
+    });
+    const elements = capElementsBySerializedSize(allElements.slice(0, 320), MAX_VISUAL_ELEMENTS_JSON_CHARS);
     const mainSnapshot = successful.find((frame) => frame.mainFrame)?.snapshot as Record<string, unknown> | undefined;
     const viewport = isRecord(mainSnapshot?.viewport) ? (mainSnapshot.viewport as BrowserViewport) : undefined;
     const frameSummaries = frameResults.map((frame) => {
@@ -431,11 +586,12 @@ export class DesktopBrowserController implements BrowserToolController {
       inspectedFrameCount: frameResults.length,
       textLength: text.length,
       elementCount: elements.length,
+      ...(allElements.length > elements.length ? { elementsTruncated: allElements.length - elements.length } : {}),
       empty: text.length === 0 && elements.length === 0,
       note:
         text.length === 0 && elements.length === 0
-          ? "No accessible text or elements were found. Capture a screenshot and use browser_click_at if visible content is present."
-          : "Coordinates are CSS viewport pixels. Use browser_click_at with an element center when selector clicks fail."
+          ? "No accessible text or elements were found. If visible content is present, delegate interaction to browser_task."
+          : "Coordinates are CSS viewport pixels."
     };
     const accessibility = await this.accessibilitySnapshot(contents);
 
@@ -825,7 +981,9 @@ export class DesktopBrowserController implements BrowserToolController {
     if (window && !window.isDestroyed()) {
       try {
         window.removeBrowserView(target.view);
-      } catch {}
+      } catch {
+        // The view may already be detached; closing continues regardless.
+      }
     }
     this.visibleTabs.delete(tabId);
     const orderIndex = this.visibleTabOrder.indexOf(tabId);
@@ -848,7 +1006,9 @@ export class DesktopBrowserController implements BrowserToolController {
     for (const target of this.visibleTabs.values()) {
       try {
         target.view.webContents.close({ waitForBeforeUnload: false });
-      } catch {}
+      } catch {
+        // The tab's webContents may already be destroyed; reset continues regardless.
+      }
     }
     this.visibleTabs.clear();
     this.visibleTabOrder.splice(0);
@@ -1563,6 +1723,23 @@ function visibleStartPageHtml() {
   </script>
 </body>
 </html>`;
+}
+
+/**
+ * Keeps elements (in document order, so earlier/on-screen elements win) until their combined
+ * serialized size reaches the budget. Element index positions stay stable for the kept prefix.
+ */
+function capElementsBySerializedSize<T>(elements: T[], budgetChars: number): T[] {
+  let used = 0;
+  let kept = 0;
+  for (const element of elements) {
+    used += JSON.stringify(element).length + 1;
+    if (used > budgetChars) {
+      break;
+    }
+    kept += 1;
+  }
+  return kept === elements.length ? elements : elements.slice(0, kept);
 }
 
 function initialTarget(mode: BrowserMode, id: string = mode): BrowserTargetRecord {

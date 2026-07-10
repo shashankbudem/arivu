@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Contenteditable</title>
+  </head>
+  <body>
+    <div id="editor" contenteditable="true" aria-label="Notes"></div>
+    <div id="result">none</div>
+    <script>
+      document.getElementById("editor").addEventListener("input", (event) => {
+        document.getElementById("result").textContent = "content:" + event.target.textContent;
+      });
+    </script>
+  </body>
+</html>

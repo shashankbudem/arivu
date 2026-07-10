@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Pointer events</title>
+  </head>
+  <body>
+    <!-- Mimics React's synthetic event delegation: listeners require a full pointer sequence
+       (pointerdown -> pointerup -> click), not a bare synthetic "click" dispatch. -->
+    <button id="target">React-style button</button>
+    <div id="result">none</div>
+    <script>
+      const button = document.getElementById("target");
+      let sawPointerDown = false;
+      let sawPointerUp = false;
+      button.addEventListener("pointerdown", () => {
+        sawPointerDown = true;
+      });
+      button.addEventListener("pointerup", () => {
+        sawPointerUp = true;
+      });
+      button.addEventListener("click", () => {
+        document.getElementById("result").textContent =
+          sawPointerDown && sawPointerUp ? "full-sequence-clicked" : "incomplete-sequence-clicked";
+      });
+    </script>
+  </body>
+</html>

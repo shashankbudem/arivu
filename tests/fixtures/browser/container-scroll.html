@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Container scroll</title>
+    <style>
+      #scroll-box {
+        width: 300px;
+        height: 150px;
+        overflow-y: scroll;
+        border: 1px solid black;
+      }
+      #scroll-box .item {
+        height: 60px;
+        border-bottom: 1px solid #ccc;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="scroll-box" data-scrollable="true">
+      <div class="item">Item 1</div>
+      <div class="item">Item 2</div>
+      <div class="item">Item 3</div>
+      <div class="item">Item 4</div>
+      <div class="item">Item 5</div>
+      <div class="item">Item 6</div>
+      <div class="item">Item 7 (below the fold)</div>
+      <div class="item">Item 8 (below the fold)</div>
+    </div>
+    <div id="result">scrollTop:0</div>
+    <script>
+      const box = document.getElementById("scroll-box");
+      box.addEventListener("scroll", () => {
+        document.getElementById("result").textContent = "scrollTop:" + box.scrollTop;
+      });
+    </script>
+  </body>
+</html>
