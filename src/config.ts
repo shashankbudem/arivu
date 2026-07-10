@@ -5,7 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { CapabilityPolicyOverrideEffect } from "./permissions/capabilityPolicy.js";
 import { normalizeWorkspaceScopePolicyRules, scopePolicyHasRules, type WorkspaceScopePolicyRules } from "./permissions/scopePolicy.js";
-import { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
+import { normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
 
 export { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
 

@@ -314,7 +314,7 @@ Reason: users need to recover the exact query that failed, edit or copy it, and 
 
 ## 2026-06-06: One web search per answer turn
 
-Decision: after one `web_search` call for a user request, disable tools for the next model turn and instruct the model to answer from the gathered results.
+Decision: after one `web_search` call for a user request, withhold only `web_search` and instruct the model to answer from the gathered results while leaving other tools available.
 
 Reason: some models repeatedly reissued `web_search` instead of answering. The agent now prevents search loops, ignores unadvertised tool calls, and rolls back unsaved in-memory messages if a run fails.
 
@@ -608,7 +608,7 @@ Reason: stale workspace paths should be easy to clean up without losing conversa
 
 ## 2026-07-07: Browser current-page answers require fresh tab state
 
-Decision: browser control exposes `browser_state` and `browser_select_tab` to the agent. Browser targets now record last snapshot and screenshot timestamps. For current/latest/open-browser, page, tab, or recent browser-task continuation prompts, the harness automatically records `browser_state` and then a targeted `browser_snapshot` before the first model answer attempt. The agent prompt still tells the model to refresh browser state for these questions, but correctness no longer depends only on model compliance.
+Decision: browser control exposes `browser_state` and `browser_select_tab` to the agent. Browser targets record last snapshot and screenshot timestamps. For current/latest/open-browser, page, tab, or recent browser-task continuation prompts, the harness automatically records `browser_state` and then a targeted `browser_screenshot` before the first model answer attempt. The agent prompt still tells the model to refresh browser state for these questions, but correctness no longer depends only on model compliance.
 
 Reason: users can manually open, close, or switch visible browser tabs outside the agent's previous tool call. Treating old snapshots as current evidence causes stale answers, especially after login or new-tab flows.
 

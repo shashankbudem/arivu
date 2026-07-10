@@ -2906,7 +2906,7 @@ export function App() {
                 {visibleMessages.length === 0 ? (
                   <EmptyConversation />
                 ) : (
-                  visibleMessages.map(({ message, messageIndex, sourceIndexes, key: messageKey }, index) => {
+                  visibleMessages.map(({ message, sourceIndexes, key: messageKey }, index) => {
                     const failedUserPrompt =
                       message.role === "user" &&
                       failedPrompt !== null &&

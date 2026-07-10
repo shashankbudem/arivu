@@ -48,7 +48,6 @@ type ToolDefinition = {
   execute(args: unknown): Promise<string>;
 };
 
-const MAX_TOOL_READ_BYTES = 20_000;
 const MAX_TOOL_SEARCH_OUTPUT = 60_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MIN_COMMAND_TIMEOUT_MS = 1_000;

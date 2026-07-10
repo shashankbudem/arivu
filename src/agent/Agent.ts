@@ -9,7 +9,7 @@ import { stripFencedCodeBlocks } from "./textualToolCalls.js";
 import { applyModelSummary, compactMessagesForModelRequest, compactSessionMessages, messagesToSummarize } from "./contextCompaction.js";
 import { discoverSkills, readSkill, skillsSystemMessage } from "./skills.js";
 import { AgentRunAbortedError } from "./types.js";
-import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse, ChatUsage, ToolCall } from "./types.js";
+import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCall } from "./types.js";
 import type { AppConfig } from "../config.js";
 
 const MAX_STEPS = 20;

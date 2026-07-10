@@ -28,8 +28,6 @@ jobs:
   lint:
     name: lint / format
     runs-on: ubuntu-latest
-    # Non-blocking until the initial violation backlog is triaged; flip once clean.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

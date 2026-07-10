@@ -4,7 +4,7 @@ Reviewed 2026-07-08 against the full codebase (agent core, provider client, tool
 
 ## Progress log
 
-Updated 2026-07-08 (implementation pass). Test suite now 319 passing across 33 files (`npm test`; the ~10 `tests/cli.test.ts` failures that appear only in sandboxes blocking `/tmp` IPC pipes, or when the shell forces chalk colors, pass in a normal environment). `npm run typecheck`, `npm run build`, and `npm run desktop:build` are all green.
+Updated 2026-07-11 (release-gate pass). Test suite now has 399 passing tests across 36 files. Typecheck, lint with zero warnings, Prettier verification, core build, desktop build, the Electron browser smoke test, an unpacked Electron Builder package, and a packaged-app smoke launch are green.
 
 **P0 — all done.**
 
@@ -18,7 +18,7 @@ Updated 2026-07-08 (implementation pass). Test suite now 319 passing across 33 f
 **P1 — done except the incremental monolith breakup.**
 
 - **P1.1 Break up the monoliths — STARTED (incremental).** Extracted pure formatters from `App.tsx` into `desktop/renderer/src/format.ts` (with `tests/rendererFormat.test.ts`); structured approval rendering moved to data (see P1.4). The bulk of the App.tsx/main.ts/styles.css decomposition remains deliberately incremental future work.
-- **P1.2 Delivery pipeline — DONE (needs one install step).** CI workflow, ESLint/Prettier config, and `tests/agentSmoke.test.ts`. Still requires `npm install` to pull the eslint/prettier devDeps, then triage the initial lint output and flip the CI lint job to blocking.
+- **P1.2 Delivery pipeline — DONE.** CI runs typecheck, tests, core/desktop builds, zero-warning ESLint, and Prettier checks as blocking jobs. `tests/agentSmoke.test.ts` covers an end-to-end tool edit, and the opt-in Electron browser smoke covers tabs, screenshots, and website popup handling.
 - **P1.3 Session durability — DONE.** Atomic `SessionStore.save` (temp file + rename); large image attachments externalized to per-session files with references and rehydrated on load (backward compatible). Tests in `session.test.ts`.
 - **P1.4 Structured approval payloads — DONE.** `ApprovalManager` sends a structured `ApprovalPromptRequest` to the prompt; the desktop forwards it over IPC and renders from data, falling back to text parsing. Concurrent prompts are serialized. Tests in `approvalParsing.test.ts`.
 

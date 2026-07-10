@@ -9,7 +9,7 @@ This roadmap is ordered by development leverage for the current MVP.
 - Expand file/diff preview panels beyond task worktrees.
 - Polish doctor/model health-check remediation. Desktop Settings health checks and CLI `arivu doctor` are implemented.
 - Add keyboard shortcuts for common desktop actions.
-- Add optional first-run setup for model, API key, and trust mode.
+- First-run setup for provider URL, model, API key, and trust mode is implemented; continue polishing validation and remediation copy.
 
 ## Milestone 2: TUI fallback quality
 
@@ -47,11 +47,7 @@ This roadmap is ordered by development leverage for the current MVP.
 - Add richer multimodal composer workflows beyond the implemented picker, paste, and drag-and-drop image attachment paths.
 - Add safer command parsing instead of broad shell execution. Shallow shell-aware command analysis now records risk summaries for approvals and command artifacts, structured argv execution avoids shell parsing for simple commands while preserving argv-specific risk detection, and command timeout metadata now feeds Activity/audit verification. Sandbox-backed common command profiles remain future work.
 
-## Milestone 6: Packaging
+## Milestone 6: Packaging and release automation
 
-- Add release script.
-- Add Electron packaging/notarization path.
-- Add package metadata for publishing.
-- Add CI for typecheck, tests, and build.
-- Add installation docs for npm/global use.
-- Add smoke tests against a fixture repo.
+- Electron Builder packaging, conditional macOS notarization, npm publishing metadata, installation docs, fixture-agent smoke coverage, and blocking CI for typecheck/tests/build/lint/format are implemented.
+- Add automated versioning, changelog generation, GitHub release creation, and cross-platform signed artifact publication.

@@ -37,6 +37,8 @@ npm run dist:dir      # unpacked app (fast, for local smoke testing)
 
 Output goes to `release/`.
 
+Tracked Electron Builder resources live in `build/`: the Arivu application icon, macOS hardened-runtime entitlements, and the conditional notarization hook. Generated compiler output under `build/` remains ignored.
+
 ### macOS signing & notarization
 
 `build/notarize.cjs` runs as the electron-builder `afterSign` hook. It is a no-op unless all three

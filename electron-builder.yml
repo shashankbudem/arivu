@@ -15,6 +15,7 @@ extraMetadata:
 # afterSign runs notarization when Apple credentials are present (see build/notarize.cjs).
 afterSign: build/notarize.cjs
 mac:
+  icon: build/icon.png
   category: public.app-category.developer-tools
   target:
     - dmg
@@ -26,12 +27,14 @@ mac:
 dmg:
   title: ${productName} ${version}
 win:
+  icon: build/icon.png
   target:
     - nsis
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
 linux:
+  icon: build/icon.png
   target:
     - AppImage
     - deb
