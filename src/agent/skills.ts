@@ -55,10 +55,7 @@ export async function discoverSkills(root = globalSkillsDir()): Promise<SkillSum
 
 export async function readSkill(name: string, root = globalSkillsDir()): Promise<SkillReadResult> {
   const normalized = slugify(name);
-  const candidates = [
-    path.join(root, normalized, "SKILL.md"),
-    path.join(root, `${normalized}.md`)
-  ];
+  const candidates = [path.join(root, normalized, "SKILL.md"), path.join(root, `${normalized}.md`)];
 
   for (const filePath of candidates) {
     try {
@@ -166,7 +163,10 @@ async function readSkillFile(root: string, filePath: string, fallbackName: strin
 
 function parseSkill(content: string, fallbackName: string): Omit<SkillSummary, "path"> {
   const lines = content.split(/\r?\n/);
-  const heading = lines.find((line) => /^#\s+/.test(line))?.replace(/^#\s+/, "").trim();
+  const heading = lines
+    .find((line) => /^#\s+/.test(line))
+    ?.replace(/^#\s+/, "")
+    .trim();
   const descriptionLine = lines.find((line) => /^description\s*:/i.test(line));
   const description = descriptionLine
     ? descriptionLine.replace(/^description\s*:/i, "").trim()
@@ -180,15 +180,7 @@ function parseSkill(content: string, fallbackName: string): Omit<SkillSummary, "
   };
 }
 
-function skillMarkdown({
-  title,
-  description,
-  instructions
-}: {
-  title: string;
-  description: string;
-  instructions: string;
-}) {
+function skillMarkdown({ title, description, instructions }: { title: string; description: string; instructions: string }) {
   const lines = [`# ${title}`];
   if (description) {
     lines.push("", `description: ${description}`);
@@ -212,10 +204,12 @@ function firstParagraph(lines: string[]) {
 }
 
 function slugify(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "skill";
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "skill"
+  );
 }
 
 function toSkillPath(root: string, filePath: string) {

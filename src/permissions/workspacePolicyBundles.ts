@@ -1,7 +1,4 @@
-import {
-  parseWorkspacePolicyTransfer,
-  type WorkspacePolicyTransferPayload
-} from "./workspacePolicyTransfer.js";
+import { parseWorkspacePolicyTransfer, type WorkspacePolicyTransferPayload } from "./workspacePolicyTransfer.js";
 
 export const WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH = ".arivu/workspace-policy.json";
 
@@ -11,10 +8,7 @@ export type WorkspacePolicyBundle = WorkspacePolicyTransferPayload & {
   sourcePath: string;
 };
 
-export function parseWorkspacePolicyBundle(
-  text: string,
-  sourcePath = WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH
-): WorkspacePolicyBundle {
+export function parseWorkspacePolicyBundle(text: string, sourcePath = WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH): WorkspacePolicyBundle {
   const container = parseJsonObject(text);
   const policy = parseWorkspacePolicyTransfer(text);
   return {

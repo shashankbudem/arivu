@@ -958,10 +958,11 @@ describe("report remediation prompts", () => {
       updatedAt: "2026-06-27T00:05:00.000Z"
     };
 
-    const prompt = buildTaskRunReplayFailureReviewPrompt(evidenceRun, [
-      replayRun("run-replay-1", "2026-06-27T00:02:00.000Z"),
-      replayRun("run-replay-2", "2026-06-27T00:03:00.000Z")
-    ], currentRun);
+    const prompt = buildTaskRunReplayFailureReviewPrompt(
+      evidenceRun,
+      [replayRun("run-replay-1", "2026-06-27T00:02:00.000Z"), replayRun("run-replay-2", "2026-06-27T00:03:00.000Z")],
+      currentRun
+    );
 
     expect(prompt).toContain("review repeated replay verification failures");
     expect(prompt).toContain("Current run: run-current");

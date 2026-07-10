@@ -252,7 +252,10 @@ function describeCapabilityPolicyMode(
   return summary;
 }
 
-function applyPolicyOverride(decision: CapabilityPolicyDecision, override: CapabilityPolicyOverrideEffect | undefined): CapabilityPolicyDecision {
+function applyPolicyOverride(
+  decision: CapabilityPolicyDecision,
+  override: CapabilityPolicyOverrideEffect | undefined
+): CapabilityPolicyDecision {
   if (!override || EFFECT_RANK[override] < EFFECT_RANK[decision.effect]) {
     return decision;
   }

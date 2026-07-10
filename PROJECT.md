@@ -38,21 +38,33 @@ Tech: TypeScript, ESM, React 19, Electron 42, blessed, tsup, Vite, vitest.
 - The preload bridge exposes `chooseImages()` so the main process owns image file selection and base64 encoding.
 - `ChatMessage.content` supports plain strings or text/image content parts; saved sessions preserve image metadata for renderer display.
 - Activity rows derive from assistant tool calls and tool result messages.
-- Approval dialogs parse approval text into shell/write views while preserving approve/deny behavior.
+- Approval dialogs render from a structured approval payload sent over IPC, falling back to parsing the approval text.
 
 ## Current Tool Set
 
+Read/inspect:
+
 - `list`
-- `read`
-- `search`
-- `web_search`
+- `read` (line-numbered, with `offset`/`limit` paging)
+- `search` (ripgrep with a pure-JS fallback; context lines, glob, result cap)
+- `git_status`
 - `current_datetime`
 - `current_location`
 - `list_skills`
-- `apply_patch`
-- `write_file`
-- `run`
-- `git_status`
+- `read_skill`
+
+Edit/execute:
+
+- `edit` (exact string replace with a uniqueness check)
+- `apply_patch` (unified diff)
+- `write_file` (create/replace)
+- `run` (shell/argv commands; output truncated at the tool boundary)
+
+Network/integration:
+
+- `web_search`
+- `mcp_list_tools`, `mcp_call_tool`
+- `browser_*` (state, open, snapshot, screenshot, click, type, and related) when a browser controller is attached
 
 ## Build & Validation
 
@@ -62,13 +74,12 @@ Tech: TypeScript, ESM, React 19, Electron 42, blessed, tsup, Vite, vitest.
 - `npm run desktop:build`
 - `npm run desktop:dev`
 
-Current test suite: 56 tests.
+Current test suite: 300+ tests across `tests/` (run `npm test` for the exact count).
 
 ## Next Work
 
-- Add recent workspace list.
-- Add first-run setup for base URL, model, API key, and trust mode.
-- Add CLI/TUI session listing.
-- Add provider health/doctor view in desktop.
-- Polish approval copy and risk summaries.
-- Add packaging/release workflow.
+See `docs/IMPROVEMENT_PLAN.md` for the tracked backlog and its progress log. Open highlights:
+
+- First-run onboarding for base URL, model, API key, and trust mode.
+- Packaging/release workflow (electron-builder + notarization).
+- Continue breaking up the large renderer/main modules into feature modules with tests.

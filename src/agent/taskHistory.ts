@@ -245,7 +245,10 @@ export function buildTaskRunPullRequestReadiness(
 }
 
 function normalizePrToken(value?: string) {
-  return value?.trim().toUpperCase().replace(/[\s-]+/g, "_");
+  return value
+    ?.trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
 }
 
 function formatPrReadinessToken(value: string) {
@@ -742,17 +745,15 @@ export function buildTaskRunReplayOutcomeGroups(runs: AgentTaskRun[]): AgentTask
       continue;
     }
     const evidenceRun = runsById.get(evidenceRunId);
-    const group =
-      groups.get(evidenceRunId) ??
-      {
-        evidenceRunId,
-        evidencePromptPreview: evidenceRun?.promptPreview,
-        evidenceVerificationStatus: evidenceRun?.verification?.status,
-        outcomes: [],
-        failedOutcomeCount: 0,
-        passedOutcomeCount: 0,
-        unknownOutcomeCount: 0
-      };
+    const group = groups.get(evidenceRunId) ?? {
+      evidenceRunId,
+      evidencePromptPreview: evidenceRun?.promptPreview,
+      evidenceVerificationStatus: evidenceRun?.verification?.status,
+      outcomes: [],
+      failedOutcomeCount: 0,
+      passedOutcomeCount: 0,
+      unknownOutcomeCount: 0
+    };
     group.outcomes.push({
       runId: run.id,
       promptPreview: run.promptPreview || undefined,

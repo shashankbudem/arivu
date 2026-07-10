@@ -24,4 +24,3 @@ async function hashFile(path: string) {
   const data = await readFile(path);
   return crypto.createHash("sha256").update(data).digest("hex");
 }
-

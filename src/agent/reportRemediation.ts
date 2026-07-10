@@ -51,9 +51,7 @@ export function buildTaskRunReportRemediationInstruction(taskRun: AgentTaskRun |
   }
 
   const usedMarkers = new Set(
-    messages
-      .map((message) => chatContentToText(message.content))
-      .filter((text) => text.includes(REPORT_REMEDIATION_MARKER_PREFIX))
+    messages.map((message) => chatContentToText(message.content)).filter((text) => text.includes(REPORT_REMEDIATION_MARKER_PREFIX))
   );
   const latest = [...taskRun.artifacts]
     .reverse()
@@ -282,7 +280,11 @@ export function buildTaskRunPullRequestReviewPrompt(taskRun: AgentTaskRun): stri
       lines.push(`- ${command}`);
     }
   } else {
-    lines.push("", "Suggested verification:", "- Identify and run the smallest relevant test, lint, build, scan, or command for any PR feedback.");
+    lines.push(
+      "",
+      "Suggested verification:",
+      "- Identify and run the smallest relevant test, lint, build, scan, or command for any PR feedback."
+    );
   }
 
   lines.push("", "If PR or GitHub review details are not accessible, open or cite the PR URL and report the access blocker clearly.");
@@ -319,9 +321,7 @@ function formatPullRequestReviewEvidence(review: AgentTaskRunWorktreePullRequest
               .join(", ");
             const details = [
               item.detailsUrl ? `details ${item.detailsUrl}` : undefined,
-              item.logCommand
-                ? `${item.logSource === "details_url" ? "details capture" : "logs"} \`${item.logCommand}\``
-                : undefined,
+              item.logCommand ? `${item.logSource === "details_url" ? "details capture" : "logs"} \`${item.logCommand}\`` : undefined,
               item.logArtifactId ? `saved evidence artifact \`${item.logArtifactId}\`` : undefined,
               item.logError ? `evidence fetch issue ${item.logError}` : undefined
             ]
@@ -404,7 +404,9 @@ export function buildTaskRunReplayFailureReviewPrompt(
     "",
     "Failure pattern summary:",
     `- Failed replay attempts: ${failedReplayRuns.length}`,
-    latestFailure ? `- Latest failed replay: ${latestFailure.id} - ${latestFailure.verification?.summary ?? "Verification failed without a summary."}` : undefined,
+    latestFailure
+      ? `- Latest failed replay: ${latestFailure.id} - ${latestFailure.verification?.summary ?? "Verification failed without a summary."}`
+      : undefined,
     failingCommands.length > 0 ? `- Repeated failing command(s): ${failingCommands.join(", ")}` : undefined,
     commands.length > 0 ? `- Best first command to reproduce: ${commands[0]}` : undefined,
     "",
@@ -445,11 +447,7 @@ function repeatedFailedCommands(runs: AgentTaskRun[]) {
   const commands: string[] = [];
   for (const run of runs) {
     for (const artifact of run.artifacts) {
-      if (
-        artifact.kind !== "command_output" ||
-        !artifact.command ||
-        !commandHasVerificationFollowupEvidence(artifact)
-      ) {
+      if (artifact.kind !== "command_output" || !artifact.command || !commandHasVerificationFollowupEvidence(artifact)) {
         continue;
       }
       const command = artifact.command.trim();
@@ -494,7 +492,9 @@ function formatReportEvidence(report: AgentTaskRunTestReport) {
 function formatFinding(finding: AgentTaskRunReportFinding) {
   const rule = finding.ruleId ?? "finding";
   const level = finding.level ? ` ${finding.level}` : "";
-  const location = finding.path ? ` at ${finding.path}${finding.line ? `:${finding.line}${finding.column ? `:${finding.column}` : ""}` : ""}` : "";
+  const location = finding.path
+    ? ` at ${finding.path}${finding.line ? `:${finding.line}${finding.column ? `:${finding.column}` : ""}` : ""}`
+    : "";
   const message = boundedText(finding.message);
   return `${rule}${level}${location}${message ? ` - ${message}` : ""}`;
 }
@@ -503,7 +503,9 @@ function formatCommandEvidence(artifact: AgentTaskRunArtifact) {
   const lines = [
     `- ${artifact.command ?? artifact.title}`,
     artifact.exitCode !== undefined ? `  - exit code: ${artifact.exitCode}` : undefined,
-    artifact.timedOut ? `  - timed out${artifact.timeoutMs !== undefined ? ` after ${formatEvidenceDuration(artifact.timeoutMs)}` : ""}` : undefined,
+    artifact.timedOut
+      ? `  - timed out${artifact.timeoutMs !== undefined ? ` after ${formatEvidenceDuration(artifact.timeoutMs)}` : ""}`
+      : undefined,
     artifact.signal ? `  - signal: ${artifact.signal}` : undefined,
     artifact.workingDirectory ? `  - cwd: ${artifact.workingDirectory}` : undefined
   ].filter((line): line is string => line !== undefined);
@@ -519,7 +521,9 @@ function formatCommandEvidence(artifact: AgentTaskRunArtifact) {
 }
 
 function verificationCommandsFromRuns(taskRun: AgentTaskRun, sourceRun?: AgentTaskRun) {
-  const artifacts = [...(sourceRun?.artifacts ?? []), ...taskRun.artifacts].filter((artifact) => artifact.kind === "command_output" && artifact.command);
+  const artifacts = [...(sourceRun?.artifacts ?? []), ...taskRun.artifacts].filter(
+    (artifact) => artifact.kind === "command_output" && artifact.command
+  );
   const prioritized = [...artifacts.filter(commandHasVerificationFollowupEvidence), ...artifacts];
   const commands: string[] = [];
   for (const artifact of prioritized) {

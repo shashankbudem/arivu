@@ -14,12 +14,8 @@ export type DirectEditReview = {
 export function reviewForPatch(diff: string): DirectEditReview {
   const stats = unifiedDiffStats(diff);
   const triggers = [
-    stats.changedLines >= DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD
-      ? `${stats.changedLines} changed lines`
-      : undefined,
-    stats.fileCount >= DIRECT_EDIT_REVIEW_FILE_THRESHOLD
-      ? `${stats.fileCount} files`
-      : undefined
+    stats.changedLines >= DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD ? `${stats.changedLines} changed lines` : undefined,
+    stats.fileCount >= DIRECT_EDIT_REVIEW_FILE_THRESHOLD ? `${stats.fileCount} files` : undefined
   ].filter((trigger): trigger is string => Boolean(trigger));
 
   const summary = `${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}, +${stats.additions}/-${stats.deletions}`;
@@ -34,12 +30,8 @@ export function reviewForFileWrite(content: string): DirectEditReview {
   const bytes = Buffer.byteLength(content, "utf8");
   const lines = countLines(content);
   const triggers = [
-    lines >= DIRECT_EDIT_REVIEW_CONTENT_LINE_THRESHOLD
-      ? `${lines} lines`
-      : undefined,
-    bytes >= DIRECT_EDIT_REVIEW_CONTENT_BYTES_THRESHOLD
-      ? `${formatBytes(bytes)}`
-      : undefined
+    lines >= DIRECT_EDIT_REVIEW_CONTENT_LINE_THRESHOLD ? `${lines} lines` : undefined,
+    bytes >= DIRECT_EDIT_REVIEW_CONTENT_BYTES_THRESHOLD ? `${formatBytes(bytes)}` : undefined
   ].filter((trigger): trigger is string => Boolean(trigger));
 
   return {

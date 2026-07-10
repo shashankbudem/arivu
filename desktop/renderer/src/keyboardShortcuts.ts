@@ -1,12 +1,5 @@
 export type AppKeyboardShortcut =
-  | "focus_composer"
-  | "new_chat"
-  | "search_chat"
-  | "settings"
-  | "refresh_state"
-  | "toggle_browser"
-  | "show_tools"
-  | "show_skills";
+  "focus_composer" | "new_chat" | "search_chat" | "settings" | "refresh_state" | "toggle_browser" | "show_tools" | "show_skills";
 
 export type AppKeyboardShortcutEvent = {
   key: string;

@@ -6,9 +6,7 @@ export function resolveWorkspacePath(workspaceRoot: string, requestedPath: strin
     throw new Error("Path is required.");
   }
 
-  const resolved = path.isAbsolute(requestedPath)
-    ? path.resolve(requestedPath)
-    : path.resolve(workspaceRoot, requestedPath);
+  const resolved = path.isAbsolute(requestedPath) ? path.resolve(requestedPath) : path.resolve(workspaceRoot, requestedPath);
   const root = path.resolve(workspaceRoot);
   const relative = path.relative(root, resolved);
 
@@ -25,7 +23,11 @@ export async function resolveSafeWorkspacePath(workspaceRoot: string, requestedP
   return resolved;
 }
 
-export async function assertRealPathInsideWorkspace(workspaceRoot: string, resolvedPath: string, requestedPath = resolvedPath): Promise<void> {
+export async function assertRealPathInsideWorkspace(
+  workspaceRoot: string,
+  resolvedPath: string,
+  requestedPath = resolvedPath
+): Promise<void> {
   const rootRealPath = await realpath(path.resolve(workspaceRoot));
   const targetRealPath = await realpathExistingTargetOrParent(resolvedPath);
 

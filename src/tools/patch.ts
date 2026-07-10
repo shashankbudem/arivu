@@ -117,7 +117,7 @@ export function parseUnifiedDiff(diff: string): FilePatch[] {
         if (hunkLine === "\\ No newline at end of file") {
           continue;
         }
-        if (/^[ +\-]/.test(hunkLine)) {
+        if (/^[ +-]/.test(hunkLine)) {
           hunk.lines.push(hunkLine);
           continue;
         }

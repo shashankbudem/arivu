@@ -181,7 +181,12 @@ describe("approval manager", () => {
         }),
         expect.objectContaining({
           actionType: "browser",
-          scope: expect.objectContaining({ kind: "browser", label: "Browser target", value: "developer.example.com", detail: "open - visible" })
+          scope: expect.objectContaining({
+            kind: "browser",
+            label: "Browser target",
+            value: "developer.example.com",
+            detail: "open - visible"
+          })
         })
       ])
     );
@@ -465,8 +470,8 @@ describe("approval manager", () => {
         summary: "replace config",
         path: "config.json",
         mode: "replace",
-        original: "{\"old\":true}\n",
-        content: "{\"new\":true}\n"
+        original: '{"old":true}\n',
+        content: '{"new":true}\n'
       })
     ).resolves.toBeUndefined();
 
@@ -478,8 +483,8 @@ describe("approval manager", () => {
       writeMode: "replace",
       lineCount: 1
     });
-    expect(events[0]?.changePreview?.original).toContain("\"old\"");
-    expect(events[0]?.changePreview?.content).toContain("\"new\"");
+    expect(events[0]?.changePreview?.original).toContain('"old"');
+    expect(events[0]?.changePreview?.content).toContain('"new"');
     expect(events[1]?.changePreview).toEqual(events[0]?.changePreview);
   });
 

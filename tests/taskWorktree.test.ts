@@ -795,19 +795,19 @@ describe("task worktrees", () => {
     });
 
     expect(refreshed.pullRequest?.review?.checkItems).toMatchObject([
-        {
-          name: "deploy",
-          bucket: "failed",
-          logSource: "details_url",
-          logCommand: "curl -L --max-time 30 --silent --show-error 'https://ci.example/deploy'"
-        },
-        {
-          name: "lint",
-          bucket: "failed",
-          logSource: "github_actions",
-          logArtifactId: "pr-check-log:lint:123456:7890:command_output",
-          logFetchedAt: "2026-07-01T00:01:00.000Z"
-        }
+      {
+        name: "deploy",
+        bucket: "failed",
+        logSource: "details_url",
+        logCommand: "curl -L --max-time 30 --silent --show-error 'https://ci.example/deploy'"
+      },
+      {
+        name: "lint",
+        bucket: "failed",
+        logSource: "github_actions",
+        logArtifactId: "pr-check-log:lint:123456:7890:command_output",
+        logFetchedAt: "2026-07-01T00:01:00.000Z"
+      }
     ]);
     expect(refreshed.pullRequest?.review?.notifications).toMatchObject([
       { level: "success", summary: "PR is ready for review", detail: "was draft" },
@@ -925,9 +925,9 @@ describe("task worktrees", () => {
     });
 
     await writeFile(path.join(worktree.path, "README.md"), "changed\n", "utf8");
-    await expect(
-      prepareTaskWorktreePullRequest({ enabled: true, status: "ready", ...worktree }, { worktreesRoot })
-    ).rejects.toThrow("Preview the task worktree patch before preparing a PR draft");
+    await expect(prepareTaskWorktreePullRequest({ enabled: true, status: "ready", ...worktree }, { worktreesRoot })).rejects.toThrow(
+      "Preview the task worktree patch before preparing a PR draft"
+    );
   });
 
   it("summarizes committed task branch changes relative to the base commit", async () => {

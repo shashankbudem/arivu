@@ -82,19 +82,13 @@ export function evaluateScopePolicy(action: ApprovalAction, rules: WorkspaceScop
 
 export function normalizeWorkspaceScopePolicyRules(rules: WorkspaceScopePolicyRules | undefined): WorkspaceScopePolicyRules {
   const blockedPathPrefixes = uniqueSorted(
-    (rules?.blockedPathPrefixes ?? [])
-      .map(normalizeWorkspacePathPrefix)
-      .filter((value): value is string => Boolean(value))
+    (rules?.blockedPathPrefixes ?? []).map(normalizeWorkspacePathPrefix).filter((value): value is string => Boolean(value))
   );
   const allowedNetworkDomains = uniqueSorted(
-    (rules?.allowedNetworkDomains ?? [])
-      .map(normalizeDomain)
-      .filter((value): value is string => Boolean(value))
+    (rules?.allowedNetworkDomains ?? []).map(normalizeDomain).filter((value): value is string => Boolean(value))
   );
   const allowedMcpServers = uniqueSorted(
-    (rules?.allowedMcpServers ?? [])
-      .map(normalizeMcpServerName)
-      .filter((value): value is string => Boolean(value))
+    (rules?.allowedMcpServers ?? []).map(normalizeMcpServerName).filter((value): value is string => Boolean(value))
   );
   const allowedBrowserTargetClasses = uniqueSortedBrowserTargetClasses(
     (rules?.allowedBrowserTargetClasses ?? [])
@@ -121,9 +115,9 @@ export function scopePolicyHasRules(rules: WorkspaceScopePolicyRules | undefined
   const normalized = normalizeWorkspaceScopePolicyRules(rules);
   return Boolean(
     normalized.blockedPathPrefixes?.length ||
-      normalized.allowedNetworkDomains?.length ||
-      normalized.allowedMcpServers?.length ||
-      normalized.allowedBrowserTargetClasses?.length
+    normalized.allowedNetworkDomains?.length ||
+    normalized.allowedMcpServers?.length ||
+    normalized.allowedBrowserTargetClasses?.length
   );
 }
 

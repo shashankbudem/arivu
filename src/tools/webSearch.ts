@@ -193,7 +193,7 @@ function decodeXmlEntities(value: string) {
     apos: "'",
     gt: ">",
     lt: "<",
-    quot: "\""
+    quot: '"'
   };
 
   return value.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (entity, body: string) => {
@@ -218,7 +218,8 @@ function normalizeNewsQuery(query: string, now = new Date()) {
   }
 
   const currentMonth = now.toLocaleString("en-US", { month: "long", timeZone: "UTC" });
-  const monthPattern = "\\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\s+20\\d{2}\\b";
+  const monthPattern =
+    "\\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\s+20\\d{2}\\b";
   const withFreshMonth = query.replace(new RegExp(monthPattern, "gi"), `${currentMonth} ${currentYear}`);
   const withFreshYear = withFreshMonth.replace(/\b20\d{2}\b/g, currentYear);
   return withFreshYear.includes(currentYear) ? withFreshYear : `${withFreshYear} ${currentMonth} ${currentYear}`;

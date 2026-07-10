@@ -166,7 +166,13 @@ async function checkStreaming(config: DoctorConfig, fetcher: FetchLike): Promise
     });
     if (!response.ok) {
       const text = await readResponseText(response);
-      return check("streaming", "Streaming", "warn", `Streaming request failed (${response.status}); batch fallback may be used.`, truncate(text, 500));
+      return check(
+        "streaming",
+        "Streaming",
+        "warn",
+        `Streaming request failed (${response.status}); batch fallback may be used.`,
+        truncate(text, 500)
+      );
     }
 
     const contentType = response.headers.get("content-type") ?? "";
@@ -179,7 +185,10 @@ async function checkStreaming(config: DoctorConfig, fetcher: FetchLike): Promise
   }
 }
 
-async function checkToolCalling(config: DoctorConfig, fetcher: FetchLike): Promise<{ check: DoctorCheck; observation?: DoctorCapabilityObservation }> {
+async function checkToolCalling(
+  config: DoctorConfig,
+  fetcher: FetchLike
+): Promise<{ check: DoctorCheck; observation?: DoctorCapabilityObservation }> {
   const response = await postChat(config, fetcher, {
     model: config.model,
     messages: [{ role: "user", content: "Call diagnostic_ping with message ok." }],
@@ -211,7 +220,10 @@ async function checkToolCalling(config: DoctorConfig, fetcher: FetchLike): Promi
 
   if (!response.ok) {
     const status = unsupportedTools(response.text) ? "warn" : "fail";
-    const message = status === "warn" ? "Endpoint appears not to support tool calling; Markdown fallback will be used." : `Tool-call check failed (${response.status}).`;
+    const message =
+      status === "warn"
+        ? "Endpoint appears not to support tool calling; Markdown fallback will be used."
+        : `Tool-call check failed (${response.status}).`;
     const detail = truncate(response.text, 500);
     return {
       check: check("tool-calling", "Tool calling", status, message, detail),
@@ -232,9 +244,10 @@ async function checkToolCalling(config: DoctorConfig, fetcher: FetchLike): Promi
 
   const toolCalls = response.json?.choices?.[0]?.message?.tool_calls ?? [];
   return {
-    check: toolCalls.length > 0
-      ? check("tool-calling", "Tool calling", "pass", "Endpoint returned a tool call.")
-      : check("tool-calling", "Tool calling", "warn", "Request succeeded but no tool call was returned; Markdown fallback may be needed.")
+    check:
+      toolCalls.length > 0
+        ? check("tool-calling", "Tool calling", "pass", "Endpoint returned a tool call.")
+        : check("tool-calling", "Tool calling", "warn", "Request succeeded but no tool call was returned; Markdown fallback may be needed.")
   };
 }
 

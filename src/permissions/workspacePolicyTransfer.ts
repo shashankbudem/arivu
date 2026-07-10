@@ -41,10 +41,7 @@ export function workspacePolicyTransferPayload(
   };
 }
 
-export function serializeWorkspacePolicyTransfer(
-  overrides: WorkspaceCapabilityPolicyOverrides,
-  scopeRules: WorkspaceScopePolicyRules
-) {
+export function serializeWorkspacePolicyTransfer(overrides: WorkspaceCapabilityPolicyOverrides, scopeRules: WorkspaceScopePolicyRules) {
   return JSON.stringify(workspacePolicyTransferPayload(overrides, scopeRules), null, 2);
 }
 

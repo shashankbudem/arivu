@@ -335,7 +335,9 @@ describe("task history helpers", () => {
     expect(review?.completionNotes.map((note) => note.status)).toEqual(["supported", "needs_evidence"]);
     expect(review?.completionNotes[0].matchedPaths).toEqual(["src/agent/taskHistory.ts"]);
     expect(review?.completionNotes[0].matchedCommands).toEqual(["npm test -- tests/taskHistory.test.ts"]);
-    expect(review?.completionNotes[1].evidence).toContain("No item-specific file, command, report, check, diagnostic, or completion note match yet");
+    expect(review?.completionNotes[1].evidence).toContain(
+      "No item-specific file, command, report, check, diagnostic, or completion note match yet"
+    );
   });
 
   it("uses parsed reports and PR checks as item-specific plan evidence", () => {
@@ -430,7 +432,9 @@ describe("task history helpers", () => {
     expect(review?.completionNotes.map((note) => note.status)).toEqual(["supported", "supported"]);
     expect(review?.completionNotes[0].matchedReports).toEqual(["reports/junit.xml: 1 failed test before repair: CheckoutFlowTest"]);
     expect(review?.completionNotes[0].matchedCommands).toEqual([]);
-    expect(review?.completionNotes[0].evidence).toContain("Matched report: reports/junit.xml: 1 failed test before repair: CheckoutFlowTest");
+    expect(review?.completionNotes[0].evidence).toContain(
+      "Matched report: reports/junit.xml: 1 failed test before repair: CheckoutFlowTest"
+    );
     expect(review?.completionNotes[1].matchedChecks).toEqual(["lint: passed"]);
     expect(review?.completionNotes[1].evidence).toContain("Matched PR check: lint: passed");
   });

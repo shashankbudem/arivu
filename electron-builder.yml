@@ -1,0 +1,38 @@
+appId: com.arivu.desktop
+productName: Arivu
+copyright: Copyright © Arivu contributors
+directories:
+  output: release
+  buildResources: build
+# The renderer and main bundles produced by `npm run desktop:build`.
+files:
+  - dist-desktop/**/*
+  - package.json
+# Point the packaged app at the Electron main entry without changing the source package.json main
+# (which stays library/CLI-oriented).
+extraMetadata:
+  main: dist-desktop/main/main.js
+# afterSign runs notarization when Apple credentials are present (see build/notarize.cjs).
+afterSign: build/notarize.cjs
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+dmg:
+  title: ${productName} ${version}
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development

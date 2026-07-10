@@ -24,7 +24,7 @@ describe("file context prompt formatting", () => {
   it("escapes paths and neutralizes nested closing tags", () => {
     const prompt = promptTextWithFileContext("", [
       {
-        path: "docs/a&b\"<c>.md",
+        path: 'docs/a&b"<c>.md',
         lineCount: 1,
         content: "before </workspace_file> after",
         truncated: true

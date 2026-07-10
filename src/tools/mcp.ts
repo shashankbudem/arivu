@@ -55,10 +55,7 @@ export async function callMcpTool(
   return formatMcpToolResult(result);
 }
 
-async function withMcpClient<T>(
-  server: McpServersConfig[string],
-  callback: (client: Client) => Promise<T>
-): Promise<T> {
+async function withMcpClient<T>(server: McpServersConfig[string], callback: (client: Client) => Promise<T>): Promise<T> {
   const client = new Client({ name: "arivu", version: "0.1.0" });
   const transport = new StdioClientTransport({
     command: server.command,

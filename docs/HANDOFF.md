@@ -189,6 +189,8 @@ The user has a Tavily key in shell config; do not print or commit it.
 
 ## Good next work
 
+Start with `docs/IMPROVEMENT_PLAN.md` (full-codebase review from 2026-07-08). It contains a prioritized P0-P3 plan with file references; the P0 items (mid-run cancellation, edit/read tool overhaul, web-search tool lockout fix, provider retry/usage accounting) are the highest-leverage work and are scoped for immediate pickup.
+
 Best next milestone: deepen the coding-agent workflow now that the desktop cockpit basics are in place.
 
 High-value tasks:

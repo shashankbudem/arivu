@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  capabilityForApprovalAction,
-  describeCapabilityPolicies,
-  evaluateCapabilityPolicy
-} from "../src/permissions/capabilityPolicy.js";
+import { capabilityForApprovalAction, describeCapabilityPolicies, evaluateCapabilityPolicy } from "../src/permissions/capabilityPolicy.js";
 
 describe("capability policy", () => {
   it("allows local read-style capabilities in every trust mode", () => {

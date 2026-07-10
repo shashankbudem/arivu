@@ -12,11 +12,7 @@ export type WorkspaceInfo = {
 
 export async function detectWorkspace(cwd: string): Promise<WorkspaceInfo> {
   const root = await gitRoot(cwd);
-  const [branch, status, packageJson] = await Promise.all([
-    gitBranch(root),
-    gitStatus(root),
-    readPackageJson(root)
-  ]);
+  const [branch, status, packageJson] = await Promise.all([gitBranch(root), gitStatus(root), readPackageJson(root)]);
 
   return {
     root,
@@ -80,4 +76,3 @@ async function readPackageJson(root: string): Promise<{ name?: string } | undefi
     return undefined;
   }
 }
-

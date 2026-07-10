@@ -7,12 +7,7 @@ import {
 
 describe("workspace policy presets", () => {
   it("offers conservative workspace policy presets", () => {
-    expect(WORKSPACE_POLICY_PRESETS.map((preset) => preset.id)).toEqual([
-      "inherit",
-      "review_first",
-      "local_only",
-      "locked_down"
-    ]);
+    expect(WORKSPACE_POLICY_PRESETS.map((preset) => preset.id)).toEqual(["inherit", "review_first", "local_only", "locked_down"]);
     expect(WORKSPACE_POLICY_PRESETS.find((preset) => preset.id === "inherit")).toMatchObject({
       overrides: {},
       scopeRules: {}

@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-desktop/
+build/
+release/
 coverage/
 .agents/
 .DS_Store

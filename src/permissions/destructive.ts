@@ -186,7 +186,10 @@ function shellOperatorAt(command: string, index: number) {
 }
 
 function commandHeadsFromTokens(tokens: ShellToken[]) {
-  return commandHeadsFromWords(tokens.filter((token) => token.kind === "word").map((token) => token.value), tokens);
+  return commandHeadsFromWords(
+    tokens.filter((token) => token.kind === "word").map((token) => token.value),
+    tokens
+  );
 }
 
 function commandHeadsFromWords(words: string[], tokens?: ShellToken[]) {
@@ -260,7 +263,10 @@ function mediumPatternReasonsFromArgv(words: string[]) {
   const effectiveWords = effectiveArgvWords(words);
   const head = normalizeCommandHead(effectiveWords[0] ?? "");
   const subcommand = effectiveWords[1] ?? "";
-  if (["npm", "pnpm", "yarn", "bun"].includes(head) && ["install", "add", "remove", "rm", "update", "upgrade", "link", "ci"].includes(subcommand)) {
+  if (
+    ["npm", "pnpm", "yarn", "bun"].includes(head) &&
+    ["install", "add", "remove", "rm", "update", "upgrade", "link", "ci"].includes(subcommand)
+  ) {
     reasons.push("package mutation");
   }
   if (["pip", "pip3", "brew"].includes(head) && ["install", "uninstall", "upgrade", "update"].includes(subcommand)) {

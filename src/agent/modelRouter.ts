@@ -85,9 +85,12 @@ const PROVIDER_PROFILES: ProviderProfile[] = [
   }
 ];
 
-const CODING_RE = /\b(code|coding|repo|repository|file|files|function|class|component|typescript|javascript|react|node|electron|python|api|bug|fix|implement|build|test|failing|error|stack trace|diff|patch|refactor|debug|compile|typecheck|lint)\b/i;
-const REASONING_RE = /\b(deep|careful|carefully|reason|reasoning|analy[sz]e|architecture|design|plan|strategy|trade[- ]?off|root cause|security|review|complex|think through)\b/i;
-const BACKGROUND_RE = /\b(take your time|background|exhaustive|maximum|best possible|slow is ok|slow is fine|thorough|large model|heaviest|ultra)\b/i;
+const CODING_RE =
+  /\b(code|coding|repo|repository|file|files|function|class|component|typescript|javascript|react|node|electron|python|api|bug|fix|implement|build|test|failing|error|stack trace|diff|patch|refactor|debug|compile|typecheck|lint)\b/i;
+const REASONING_RE =
+  /\b(deep|careful|carefully|reason|reasoning|analy[sz]e|architecture|design|plan|strategy|trade[- ]?off|root cause|security|review|complex|think through)\b/i;
+const BACKGROUND_RE =
+  /\b(take your time|background|exhaustive|maximum|best possible|slow is ok|slow is fine|thorough|large model|heaviest|ultra)\b/i;
 const FAST_RE = /\b(quick|short|brief|simple|summari[sz]e|rewrite|grammar|translate|one[- ]?liner|tl;dr)\b/i;
 const CURRENT_RE = /\b(latest|today|current|now|recent|news|price|weather|score|schedule)\b/i;
 
@@ -155,7 +158,9 @@ export function resolveModelForPrompt(
   const provider = chooseProviderForTask(providers, task);
   const model = chooseModelForProvider(provider, task);
   if (!model) {
-    throw new Error(`Auto model selection could not find a concrete model for ${provider.name}. Select a model manually for this provider.`);
+    throw new Error(
+      `Auto model selection could not find a concrete model for ${provider.name}. Select a model manually for this provider.`
+    );
   }
 
   return {
@@ -238,7 +243,7 @@ function chooseModelForProvider(provider: ModelProviderCandidate, task: AutoMode
   const profile = profileForProvider(provider);
   const preferred = [
     ...(profile?.models[task] ?? []),
-    ...(task === "general" ? [] : profile?.models.general ?? []),
+    ...(task === "general" ? [] : (profile?.models.general ?? [])),
     ...(!isAutoModel(provider.model) ? [provider.model] : [])
   ];
   const uniquePreferred = Array.from(new Set(preferred.filter(Boolean)));
@@ -262,7 +267,11 @@ function chooseModelForProvider(provider: ModelProviderCandidate, task: AutoMode
     return provider.models.find(modelLooksFast) ?? (!isAutoModel(provider.model) ? provider.model : provider.models[0]);
   }
   if (task === "background") {
-    return provider.models.find(modelLooksLarge) ?? provider.models.find(modelLooksReasoningCapable) ?? (!isAutoModel(provider.model) ? provider.model : provider.models[0]);
+    return (
+      provider.models.find(modelLooksLarge) ??
+      provider.models.find(modelLooksReasoningCapable) ??
+      (!isAutoModel(provider.model) ? provider.model : provider.models[0])
+    );
   }
   if (task === "reasoning") {
     return provider.models.find(modelLooksReasoningCapable) ?? (!isAutoModel(provider.model) ? provider.model : provider.models[0]);

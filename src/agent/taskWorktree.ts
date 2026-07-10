@@ -226,7 +226,9 @@ export async function prepareTaskWorktreePullRequest(
     diff
   });
   const remoteName = remote ? "origin" : undefined;
-  const pushCommand = remoteName ? `git -C ${shellQuote(prepared.path)} push -u ${shellQuote(remoteName)} ${shellQuote(prepared.branch)}` : undefined;
+  const pushCommand = remoteName
+    ? `git -C ${shellQuote(prepared.path)} push -u ${shellQuote(remoteName)} ${shellQuote(prepared.branch)}`
+    : undefined;
   const createCommand =
     remoteName && baseBranch
       ? [
@@ -287,19 +289,7 @@ export async function createTaskWorktreePullRequest(
   await run("git", ["push", "-u", draft.remoteName, draft.branch], { cwd: prepared.path });
   const created = await run(
     "gh",
-    [
-      "pr",
-      "create",
-      "--draft",
-      "--base",
-      draft.baseBranch,
-      "--head",
-      draft.branch,
-      "--title",
-      draft.title,
-      "--body",
-      draft.body
-    ],
+    ["pr", "create", "--draft", "--base", draft.baseBranch, "--head", draft.branch, "--title", draft.title, "--body", draft.body],
     { cwd: prepared.path }
   );
   const url = parsePullRequestUrl(`${created.stdout}\n${created.stderr ?? ""}`) ?? created.stdout.trim();
@@ -333,13 +323,7 @@ export async function refreshTaskWorktreePullRequest(
   const run = options.commandRunner ?? runTaskWorktreeCommand;
   const result = await run(
     "gh",
-    [
-      "pr",
-      "view",
-      pullRequest.url,
-      "--json",
-      "state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,comments,reviews,url"
-    ],
+    ["pr", "view", pullRequest.url, "--json", "state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,comments,reviews,url"],
     { cwd: prepared.path }
   );
   const reviewThreads = await fetchPullRequestReviewThreads(pullRequest.url, prepared.path, run);
@@ -384,19 +368,10 @@ export async function syncTaskWorktreeWithOriginal(
     };
   }
 
-  const merge = await execa(
-    "git",
-    [
-      "-c",
-      "user.name=Arivu",
-      "-c",
-      "user.email=arivu@local.invalid",
-      "merge",
-      "--no-edit",
-      originalHead
-    ],
-    { cwd: prepared.path, reject: false }
-  );
+  const merge = await execa("git", ["-c", "user.name=Arivu", "-c", "user.email=arivu@local.invalid", "merge", "--no-edit", originalHead], {
+    cwd: prepared.path,
+    reject: false
+  });
   if (merge.exitCode !== 0) {
     return {
       status: worktree.status,
@@ -430,18 +405,10 @@ export async function continueTaskWorktreeConflict(
   if (conflicts.length > 0) {
     throw new Error(`Resolve conflict markers before continuing: ${conflicts.join(", ")}`);
   }
-  const committed = await execa(
-    "git",
-    [
-      "-c",
-      "user.name=Arivu",
-      "-c",
-      "user.email=arivu@local.invalid",
-      "commit",
-      "--no-edit"
-    ],
-    { cwd: prepared.path, reject: false }
-  );
+  const committed = await execa("git", ["-c", "user.name=Arivu", "-c", "user.email=arivu@local.invalid", "commit", "--no-edit"], {
+    cwd: prepared.path,
+    reject: false
+  });
   if (committed.exitCode !== 0) {
     throw new Error(committed.stderr || committed.stdout || "Unable to complete task worktree conflict resolution.");
   }
@@ -503,10 +470,7 @@ export async function cleanupMergedTaskWorktree(
   };
 }
 
-export async function resolveTaskWorktreePath(
-  worktree: AgentTaskRunWorktree,
-  options: TaskWorktreeActionOptions = {}
-): Promise<string> {
+export async function resolveTaskWorktreePath(worktree: AgentTaskRunWorktree, options: TaskWorktreeActionOptions = {}): Promise<string> {
   const prepared = assertTaskWorktreeReady(worktree, options.worktreesRoot);
   await assertPathExists(prepared.path, "Task worktree no longer exists.");
   return prepared.path;
@@ -613,7 +577,10 @@ async function assertPathExists(filePath: string, message: string) {
 }
 
 async function assertCleanOriginal(originalRoot: string) {
-  await assertCleanWorktree(originalRoot, "Original checkout has uncommitted changes. Commit, stash, or clean them before merging a task worktree.");
+  await assertCleanWorktree(
+    originalRoot,
+    "Original checkout has uncommitted changes. Commit, stash, or clean them before merging a task worktree."
+  );
 }
 
 async function assertCleanWorktree(cwd: string, message: string) {
@@ -667,19 +634,9 @@ async function commitTaskWorktreeChanges(worktreePath: string, taskRunId: string
   if (diff.exitCode !== 1) {
     return;
   }
-  await execa(
-    "git",
-    [
-      "-c",
-      "user.name=Arivu",
-      "-c",
-      "user.email=arivu@local.invalid",
-      "commit",
-      "-m",
-      `Arivu task ${taskRunId}`
-    ],
-    { cwd: worktreePath }
-  );
+  await execa("git", ["-c", "user.name=Arivu", "-c", "user.email=arivu@local.invalid", "commit", "-m", `Arivu task ${taskRunId}`], {
+    cwd: worktreePath
+  });
 }
 
 async function removeTaskWorktree(prepared: { originalRoot: string; path: string; branch: string }) {
@@ -719,7 +676,7 @@ function changedPathsFromPorcelain(output: string) {
     if (!rawPath) {
       continue;
     }
-    paths.add(rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1) ?? rawPath : rawPath);
+    paths.add(rawPath.includes(" -> ") ? (rawPath.split(" -> ").at(-1) ?? rawPath) : rawPath);
   }
   return Array.from(paths).sort((left, right) => left.localeCompare(right));
 }
@@ -738,7 +695,7 @@ function conflictPathsFromPorcelain(output: string) {
     if (!rawPath) {
       continue;
     }
-    paths.add(rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1) ?? rawPath : rawPath);
+    paths.add(rawPath.includes(" -> ") ? (rawPath.split(" -> ").at(-1) ?? rawPath) : rawPath);
   }
   return Array.from(paths).sort((left, right) => left.localeCompare(right));
 }
@@ -956,9 +913,7 @@ function preservePullRequestCheckLogArtifacts(
   if (!currentItems?.length || !previousItems?.length) {
     return currentItems;
   }
-  const previousByLogCommand = new Map(
-    previousItems.filter((item) => item.logCommand).map((item) => [item.logCommand, item] as const)
-  );
+  const previousByLogCommand = new Map(previousItems.filter((item) => item.logCommand).map((item) => [item.logCommand, item] as const));
   return currentItems.map((item) => {
     const previous = item.logCommand ? previousByLogCommand.get(item.logCommand) : undefined;
     if (!previous?.logArtifactId && !previous?.logFetchedAt && !previous?.logError) {
@@ -1157,7 +1112,10 @@ function feedbackNotificationLevel(
   previous: AgentTaskRunWorktreePullRequestFeedback | undefined,
   current: AgentTaskRunWorktreePullRequestFeedback | undefined
 ): AgentTaskRunWorktreePullRequestReviewNotification["level"] {
-  if ((current?.changesRequested ?? 0) > (previous?.changesRequested ?? 0) || (current?.unresolvedThreads ?? 0) > (previous?.unresolvedThreads ?? 0)) {
+  if (
+    (current?.changesRequested ?? 0) > (previous?.changesRequested ?? 0) ||
+    (current?.unresolvedThreads ?? 0) > (previous?.unresolvedThreads ?? 0)
+  ) {
     return "warning";
   }
   if ((current?.approved ?? 0) > (previous?.approved ?? 0) || (current?.unresolvedThreads ?? 0) < (previous?.unresolvedThreads ?? 0)) {
@@ -1175,9 +1133,7 @@ function summarizePullRequestFeedback(
   const comments = pullRequestFeedbackItems(commentsValue, "comment");
   const reviews = pullRequestFeedbackItems(reviewsValue, "review");
   const threads = pullRequestReviewThreadItems(reviewThreadsValue);
-  const reviewStates = reviews
-    .map((item) => optionalString(item.state)?.toUpperCase())
-    .filter((state): state is string => Boolean(state));
+  const reviewStates = reviews.map((item) => optionalString(item.state)?.toUpperCase()).filter((state): state is string => Boolean(state));
   const unresolvedThreads = threads.filter((thread) => thread.state === "UNRESOLVED").length;
   const resolvedThreads = threads.filter((thread) => thread.state === "RESOLVED").length;
   const allItems = [...comments, ...reviews, ...threads].sort(comparePullRequestFeedbackItems);
@@ -1273,7 +1229,10 @@ function pullRequestReviewThreadComments(thread: Record<string, unknown>) {
   return [];
 }
 
-function comparePullRequestFeedbackItems(left: AgentTaskRunWorktreePullRequestFeedbackItem, right: AgentTaskRunWorktreePullRequestFeedbackItem) {
+function comparePullRequestFeedbackItems(
+  left: AgentTaskRunWorktreePullRequestFeedbackItem,
+  right: AgentTaskRunWorktreePullRequestFeedbackItem
+) {
   const leftTime = Date.parse(left.updatedAt ?? left.createdAt ?? "");
   const rightTime = Date.parse(right.updatedAt ?? right.createdAt ?? "");
   if (Number.isNaN(leftTime) && Number.isNaN(rightTime)) {
@@ -1455,10 +1414,7 @@ function isHttpUrl(value: string) {
   }
 }
 
-function comparePullRequestCheckItems(
-  left: AgentTaskRunWorktreePullRequestCheckItem,
-  right: AgentTaskRunWorktreePullRequestCheckItem
-) {
+function comparePullRequestCheckItems(left: AgentTaskRunWorktreePullRequestCheckItem, right: AgentTaskRunWorktreePullRequestCheckItem) {
   const rankDelta = pullRequestCheckBucketRank(left.bucket) - pullRequestCheckBucketRank(right.bucket);
   if (rankDelta !== 0) {
     return rankDelta;

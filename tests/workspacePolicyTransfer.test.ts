@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  parseWorkspacePolicyBundle,
-  WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH
-} from "../src/permissions/workspacePolicyBundles.js";
+import { parseWorkspacePolicyBundle, WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH } from "../src/permissions/workspacePolicyBundles.js";
 import {
   parseWorkspacePolicyTransfer,
   serializeWorkspacePolicyTransfer,

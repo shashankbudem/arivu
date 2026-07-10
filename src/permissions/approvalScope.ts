@@ -13,7 +13,7 @@ export function scopeForApprovalAction(action: ApprovalAction): AgentTaskRunAppr
         value: truncateScopeText(action.path ?? action.query ?? action.summary),
         detail: action.path && action.query ? truncateScopeText(`query: ${action.query}`, MAX_SCOPE_DETAIL) : undefined
       };
-    case "write":
+    case "write": {
       const writePaths = action.paths?.length ? action.paths : action.path ? [action.path] : [];
       return {
         kind: writePaths.length > 0 ? "path" : "unknown",
@@ -21,6 +21,7 @@ export function scopeForApprovalAction(action: ApprovalAction): AgentTaskRunAppr
         value: truncateScopeText(writePaths.length > 0 ? summarizeScopeValues(writePaths) : action.summary),
         detail: action.mode ? truncateScopeText(`mode: ${action.mode}`, MAX_SCOPE_DETAIL) : undefined
       };
+    }
     case "shell":
       return {
         kind: "command",

@@ -53,11 +53,7 @@ export function buildTaskRunAuditMarkdown(run: AgentTaskRun) {
     if (run.plan.summary) {
       lines.push(`- Summary: ${inlineText(run.plan.summary)}`);
     }
-    lines.push(
-      ...bulletList(
-        run.plan.items.map((item) => `${item.status ? `${item.status}: ` : ""}${inlineText(item.text)}`)
-      )
-    );
+    lines.push(...bulletList(run.plan.items.map((item) => `${item.status ? `${item.status}: ` : ""}${inlineText(item.text)}`)));
   }
 
   if (run.loop?.iterations?.length) {
@@ -115,12 +111,8 @@ function loopIterationLines(run: AgentTaskRun) {
     const details = [
       loopIterationStatusLabel(iteration.status),
       iteration.decision ? `decision ${iteration.decision}` : undefined,
-      iteration.toolCallCount !== undefined
-        ? `${iteration.toolCallCount} tool${iteration.toolCallCount === 1 ? "" : "s"}`
-        : undefined,
-      iteration.artifactCount !== undefined
-        ? `${iteration.artifactCount} artifact${iteration.artifactCount === 1 ? "" : "s"}`
-        : undefined,
+      iteration.toolCallCount !== undefined ? `${iteration.toolCallCount} tool${iteration.toolCallCount === 1 ? "" : "s"}` : undefined,
+      iteration.artifactCount !== undefined ? `${iteration.artifactCount} artifact${iteration.artifactCount === 1 ? "" : "s"}` : undefined,
       iteration.completedAt ? `completed ${iteration.completedAt}` : `updated ${iteration.updatedAt}`
     ].filter((item): item is string => Boolean(item));
     const preview = iteration.error ?? iteration.outputPreview;
@@ -135,11 +127,7 @@ function toolLines(run: AgentTaskRun) {
 
   return truncateList(
     run.tools.map((tool, index) => {
-      const parts = [
-        `${index + 1}. \`${tool.name}\``,
-        capabilityLabel(tool.capability),
-        toolStatusLabel(tool.status)
-      ];
+      const parts = [`${index + 1}. \`${tool.name}\``, capabilityLabel(tool.capability), toolStatusLabel(tool.status)];
       if (tool.durationMs !== undefined) {
         parts.push(formatDurationMs(tool.durationMs));
       }
@@ -180,16 +168,14 @@ function matchingApprovalForTool(run: AgentTaskRun, tool: AgentTaskRun["tools"][
   if (approvals.length === 0) {
     return undefined;
   }
-  return approvals
-    .slice()
-    .sort((left, right) => {
-      const leftRank = approvalMatchRank(left.status);
-      const rightRank = approvalMatchRank(right.status);
-      if (leftRank !== rightRank) {
-        return rightRank - leftRank;
-      }
-      return approvalTimestamp(right).localeCompare(approvalTimestamp(left));
-    })[0];
+  return approvals.slice().sort((left, right) => {
+    const leftRank = approvalMatchRank(left.status);
+    const rightRank = approvalMatchRank(right.status);
+    if (leftRank !== rightRank) {
+      return rightRank - leftRank;
+    }
+    return approvalTimestamp(right).localeCompare(approvalTimestamp(left));
+  })[0];
 }
 
 function approvalMatchRank(status: AgentTaskRunApprovalStatus) {
@@ -374,7 +360,9 @@ function worktreeLines(run: AgentTaskRun) {
     }
   }
   if (worktree.conflict) {
-    lines.push(`- Conflict: ${inlineText(worktree.conflict.message)} (${worktree.conflict.files.length} file${worktree.conflict.files.length === 1 ? "" : "s"})`);
+    lines.push(
+      `- Conflict: ${inlineText(worktree.conflict.message)} (${worktree.conflict.files.length} file${worktree.conflict.files.length === 1 ? "" : "s"})`
+    );
   }
   if (worktree.error) {
     lines.push(`- Error: ${inlineText(worktree.error)}`);

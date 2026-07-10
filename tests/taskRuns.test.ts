@@ -831,7 +831,7 @@ boom`
     );
 
     expect(run.artifacts[0]).toMatchObject({
-      command: "node -e \"setTimeout(() => {}, 2000)\"",
+      command: 'node -e "setTimeout(() => {}, 2000)"',
       commandMode: "argv",
       timeoutMs: 1000,
       timedOut: true,
