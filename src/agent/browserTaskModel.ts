@@ -22,6 +22,8 @@ export function resolveBrowserTaskModel(config: AppConfig, fallback: ModelSelect
   return {
     baseUrl: override.baseUrl ?? base.baseUrl,
     model: override.model ?? base.model,
-    apiKey: override.apiKey ?? base.apiKey
+    apiKey: override.apiKey ?? base.apiKey,
+    maxSteps: override.maxSteps,
+    stepDelayMs: override.stepDelayMs
   };
 }

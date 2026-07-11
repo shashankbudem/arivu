@@ -74,6 +74,14 @@ describe("resolveBrowserTaskModel", () => {
     expect(resolved).toEqual({ baseUrl: "https://chat.example/v1", model: "special-model", apiKey: "chat-key" });
   });
 
+  it("preserves browser-agent loop and rate-limit overrides", () => {
+    const resolved = resolveBrowserTaskModel(
+      configWith({ browserTaskModel: { providerId: "browser-provider", maxSteps: 80, stepDelayMs: 12_000 } }),
+      FALLBACK
+    );
+    expect(resolved).toMatchObject({ maxSteps: 80, stepDelayMs: 12_000 });
+  });
+
   it("falls back to the chat model when the referenced provider no longer exists", () => {
     const resolved = resolveBrowserTaskModel(configWith({ browserTaskModel: { providerId: "deleted-provider" } }), FALLBACK);
     expect(resolved).toEqual({ baseUrl: "https://chat.example/v1", model: "chat-model", apiKey: "chat-key" });

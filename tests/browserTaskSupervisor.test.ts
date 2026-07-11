@@ -202,6 +202,8 @@ describe("runBrowserTask", () => {
     expect(result.data).toBe("Done.");
     expect(result.stepCount).toBe(2);
     expect(scripts.length).toBeGreaterThan(0);
+    expect(scripts.some((script) => script.includes("maxSteps: 100"))).toBe(true);
+    expect(scripts.some((script) => script.includes("stepDelay: 35"))).toBe(true);
     for (const script of scripts) {
       expect(script.includes(REAL_API_KEY)).toBe(false);
     }

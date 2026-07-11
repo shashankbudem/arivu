@@ -244,6 +244,7 @@ Desktop workflows to check manually after UI changes:
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.
 - Browser tools appear in the Tools drawer in desktop mode. Verify `browser_state`, `browser_select_tab`, `browser_open`, `browser_snapshot`, `browser_console`, `browser_screenshot`, `browser_click`, and `browser_type` are listed with hidden-browser status.
 - In Settings, choose a Browser task LLM provider and open the Browser task model picker. Confirm it loads models from that provider, excludes the chat-only `Auto` choice, supports search and manual model IDs, and the reset icon returns to the provider's default model.
+- Start a browser task and inspect the injected page-agent configuration. Confirm the default loop cap is 100, the delay between loops is 35 seconds, and cancelling the chat run stops the browser task without waiting for the full 70-minute wall-clock budget.
 - The `Images` item in the prompt `+` menu opens a native image picker, attaches PNG/JPEG/WebP/GIF files, renders removable thumbnails, and sends those images with the next prompt.
 - The `Files` item in the prompt `+` menu opens a native picker rooted in the active workspace, attaches bounded text/code files, renders removable file chips, includes the file text in the composer token estimate, and sends the contents as quoted file context with the next prompt.
 - Pasting or dropping PNG/JPEG/WebP/GIF image data into the composer attaches thumbnails without inserting text.

@@ -691,11 +691,11 @@ export function createToolRegistry(context: ToolContext) {
             description: "Optional browser mode. Defaults to the active browser mode."
           },
           tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
-          maxSteps: { type: "number", description: "Maximum number of agent steps, from 1 to 200. Defaults to 40." },
+          maxSteps: { type: "number", description: "Maximum number of agent loops, from 1 to 200. Defaults to 100." },
           timeoutMs: {
             type: "number",
             description:
-              "Wall-clock budget in milliseconds, from 5000 to 600000. Defaults to 360000. Raise it toward the maximum for tasks with many steps (long forms, multi-record setups) — slow model providers can take minutes per step."
+              "Wall-clock budget in milliseconds, from 5000 to 14400000. Defaults to 4200000. The browser agent waits 35 seconds between loops, so use a smaller budget for short tasks and a larger one for long workflows."
           },
           allowedDomains: {
             type: "array",
@@ -721,7 +721,7 @@ export function createToolRegistry(context: ToolContext) {
             mode: z.enum(["visible", "background"]).optional(),
             tabId: z.string().trim().min(1).optional(),
             maxSteps: z.number().int().min(1).max(200).optional(),
-            timeoutMs: z.number().int().min(5_000).max(600_000).optional(),
+            timeoutMs: z.number().int().min(5_000).max(14_400_000).optional(),
             allowedDomains: z.array(z.string().trim().min(1)).optional(),
             allowJavaScript: z.boolean().optional(),
             allowSensitiveActions: z.boolean().optional()

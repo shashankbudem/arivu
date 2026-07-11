@@ -49,6 +49,8 @@ export type BrowserTaskModelConfig = {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  maxSteps?: number;
+  stepDelayMs?: number;
 };
 
 export type BrowserToolController = {

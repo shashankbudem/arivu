@@ -47,18 +47,18 @@ const SENSITIVE_ACTION_PATTERN =
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const PAGE_AGENT_BUNDLE_PATH = path.resolve(currentDir, "../pageAgentBundle/page-agent.iife.js");
 
-const DEFAULT_MAX_STEPS = 40;
+const DEFAULT_MAX_STEPS = 100;
 const MIN_MAX_STEPS = 1;
 const MAX_MAX_STEPS = 200;
-// Real task logs show hosted OSS providers (NVIDIA NIM) taking 30-170s per completion under
-// queue pressure; a 10+ step form-filling task cannot fit in 3 minutes. 6 minutes still keeps
-// runaway tasks bounded, and callers can pass timeoutMs up to MAX_TIMEOUT_MS.
-const DEFAULT_TIMEOUT_MS = 360_000;
+// The page agent is deliberately rate-limited to one loop every 35 seconds. Give the default
+// 100-loop budget enough wall-clock room for those intervals; callers can still choose a
+// smaller budget for short tasks or cancel a run at any time.
+const DEFAULT_TIMEOUT_MS = 4_200_000;
 const MIN_TIMEOUT_MS = 1_000;
-const MAX_TIMEOUT_MS = 600_000;
+const MAX_TIMEOUT_MS = 14_400_000;
 const STOP_GRACE_MS = 5_000;
 const PROXY_TOKEN_TTL_SLOP_MS = 60_000;
-const STEP_DELAY_SECONDS = 0.4;
+const STEP_DELAY_SECONDS = 35;
 // page-agent defaults to 2 retries with a flat 100ms delay; NIM queue timeouts routinely burn
 // both. Extra attempts are cheap relative to failing the whole multi-step task.
 const LLM_MAX_RETRIES = 4;
@@ -106,7 +106,8 @@ export async function runBrowserTask(
   signal?: AbortSignal,
   onProgress?: (progress: { stepIndex: number; summary: string }) => void
 ): Promise<BrowserToolResult> {
-  const maxSteps = clamp(Math.trunc(args.maxSteps ?? DEFAULT_MAX_STEPS), MIN_MAX_STEPS, MAX_MAX_STEPS);
+  const maxSteps = clamp(Math.trunc(args.maxSteps ?? modelConfig.maxSteps ?? DEFAULT_MAX_STEPS), MIN_MAX_STEPS, MAX_MAX_STEPS);
+  const stepDelaySeconds = Math.max(0, (modelConfig.stepDelayMs ?? STEP_DELAY_SECONDS * 1_000) / 1_000);
   const timeoutMs = clamp(Math.trunc(args.timeoutMs ?? DEFAULT_TIMEOUT_MS), MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
   // Normalize here (not just in-page) so a mixed-case or dot-prefixed entry from the model
   // ("Example.COM", ".example.com") cannot make the in-page host check reject every page.
@@ -167,6 +168,7 @@ export async function runBrowserTask(
         token,
         model: modelConfig.model,
         maxSteps: remainingSteps,
+        stepDelaySeconds,
         allowedDomains,
         allowJavaScript: Boolean(args.allowJavaScript),
         allowSensitiveActions: Boolean(args.allowSensitiveActions),
@@ -330,6 +332,7 @@ function injectedTaskScript(
     token: string;
     model: string;
     maxSteps: number;
+    stepDelaySeconds: number;
     allowedDomains: string[];
     allowJavaScript: boolean;
     allowSensitiveActions: boolean;
@@ -397,7 +400,7 @@ var core = new lib.PageAgentCore({
   model: ${JSON.stringify(options.model)},
   apiKey: ${JSON.stringify(options.token)},
   maxSteps: ${JSON.stringify(options.maxSteps)},
-  stepDelay: ${JSON.stringify(STEP_DELAY_SECONDS)},
+  stepDelay: ${JSON.stringify(options.stepDelaySeconds)},
   maxRetries: ${JSON.stringify(LLM_MAX_RETRIES)},
   experimentalScriptExecutionTool: ${JSON.stringify(options.allowJavaScript)},
   instructions: { system: ${JSON.stringify(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS)} },

@@ -59,7 +59,7 @@ const BrowserTaskModelSchema = z.object({
   model: z.string().min(1).optional(),
   apiKey: z.string().optional(),
   maxSteps: z.number().int().min(1).max(200).optional(),
-  stepDelayMs: z.number().int().min(0).max(30_000).optional()
+  stepDelayMs: z.number().int().min(0).max(120_000).optional()
 });
 
 const WorkspaceCapabilityPolicySchema = z.object({
