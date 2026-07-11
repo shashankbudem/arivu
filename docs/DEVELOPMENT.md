@@ -216,7 +216,7 @@ npm run desktop:build
 ARIVU_BROWSER_SMOKE=1 ./node_modules/.bin/electron dist-desktop/main/main.js
 ```
 
-Browser smoke mode opens the visible browser window, creates two visible tabs, verifies that a page-created `window.open()` popup becomes a maximized Arivu-managed window and agent-addressable tab without reporting a popup blocker, captures tab screenshots, and checks that both white fixture pages remain mostly light after switching back from the popup. This pixel assertion catches blank, clipped, or black compositor surfaces before the smoke can pass. It prints tab ids, page screenshot paths, and a separate shell-only screenshot path, then exits.
+Browser smoke mode opens the visible browser window, creates two visible tabs, verifies that a page-created `window.open()` popup becomes a maximized Arivu-managed window and agent-addressable tab without reporting a popup blocker, makes that popup close itself and confirms its tab is pruned, captures tab screenshots, and checks that both white fixture pages remain mostly light after switching back from the popup. This catches stale popup state plus blank, clipped, or black compositor surfaces before the smoke can pass. It prints tab ids, page screenshot paths, and a separate shell-only screenshot path, then exits.
 
 Desktop workflows to check manually after UI changes:
 

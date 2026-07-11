@@ -63,6 +63,7 @@ const MAX_SEARCH_MAX_RESULTS = 2_000;
 const MAX_SEARCH_CONTEXT_LINES = 10;
 const MAX_JS_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_JS_SEARCH_FILES = 5_000;
+const MIN_DELEGATED_BROWSER_TASK_TIMEOUT_MS = 600_000;
 
 // Low-level manual browser tools are temporarily disabled so the agent is steered toward the
 // higher-level browser_task tool instead of driving snapshot/click/type rounds itself. Flip this
@@ -695,7 +696,7 @@ export function createToolRegistry(context: ToolContext) {
           timeoutMs: {
             type: "number",
             description:
-              "Wall-clock budget in milliseconds, from 5000 to 14400000. Defaults to 4200000 (a ceiling, not an expected wait). Use a smaller budget for short tasks; slow model providers can take minutes per loop, so keep a generous budget for long workflows."
+              "Wall-clock ceiling in milliseconds, from 5000 to 14400000. Defaults to 4200000. Values below 600000 are raised to 600000 because the browser agent is deliberately rate-paced and provider calls can take minutes; fast tasks still return immediately when complete."
           },
           allowedDomains: {
             type: "array",
@@ -737,6 +738,7 @@ export function createToolRegistry(context: ToolContext) {
         if (mode === "background" && parsed.tabId && parsed.tabId !== "background") {
           throw new Error("browser_task cannot target a visible tab id in background mode. Omit tabId or switch to visible mode.");
         }
+        const timeoutMs = parsed.timeoutMs === undefined ? undefined : Math.max(parsed.timeoutMs, MIN_DELEGATED_BROWSER_TASK_TIMEOUT_MS);
         await context.approvals.require({
           type: "browser",
           action: "task",
@@ -749,6 +751,7 @@ export function createToolRegistry(context: ToolContext) {
           "task",
           await browser.task({
             ...parsed,
+            timeoutMs,
             mode,
             modelConfig: context.browserTaskModel,
             signal: context.signal,

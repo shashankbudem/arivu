@@ -309,8 +309,24 @@ export function upsertTaskRunCommandArtifact(run: AgentTaskRun, input: CommandAr
 }
 
 export function finishTaskRun(run: AgentTaskRun, status: AgentTaskRunStatus, error?: string, now = new Date().toISOString()) {
-  const latestBrowserTask = [...run.tools].reverse().find((tool) => tool.name === "browser_task");
-  const unresolvedBrowserFailure = status === "completed" && latestBrowserTask?.status === "failed";
+  let latestFailedBrowserTaskIndex = -1;
+  for (let index = run.tools.length - 1; index >= 0; index -= 1) {
+    const tool = run.tools[index];
+    if (tool?.name === "browser_task" && tool.status === "failed") {
+      latestFailedBrowserTaskIndex = index;
+      break;
+    }
+  }
+  const browserRecoveryEvidence =
+    latestFailedBrowserTaskIndex >= 0 &&
+    run.tools
+      .slice(latestFailedBrowserTaskIndex + 1)
+      .some(
+        (tool) =>
+          (tool.name === "browser_task" && tool.status === "done") ||
+          (tool.name === "browser_screenshot" && tool.status === "done" && Boolean(tool.artifactIds?.length))
+      );
+  const unresolvedBrowserFailure = status === "completed" && latestFailedBrowserTaskIndex >= 0 && !browserRecoveryEvidence;
   run.status = unresolvedBrowserFailure ? "failed" : status;
   run.updatedAt = now;
   run.completedAt = now;

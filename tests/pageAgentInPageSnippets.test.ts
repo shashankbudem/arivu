@@ -13,6 +13,13 @@ function evalSnippet<T>(source: string): T {
   return new Function(`return ${source}`)() as T;
 }
 
+describe("ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS", () => {
+  it("steers reference fields away from child-window lookups", () => {
+    expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("Avoid lookup buttons that open a popup or new tab");
+    expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("autocomplete/reference input");
+  });
+});
+
 describe("CAP_PAGE_CONTENT_SNIPPET", () => {
   const cap = evalSnippet<(content: string) => string>(CAP_PAGE_CONTENT_SNIPPET);
 

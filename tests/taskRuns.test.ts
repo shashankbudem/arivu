@@ -112,6 +112,45 @@ describe("agent task runs", () => {
     expect(run.error).toMatch(/browser task did not complete/i);
   });
 
+  it("allows persisted browser verification to resolve an earlier delegated task failure", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 0,
+      prompt: "create and verify the record",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_result",
+        toolCallId: "failed-task",
+        name: "browser_task",
+        result: JSON.stringify({ success: false, data: "Timed out after submitting", stepCount: 2 })
+      },
+      "2026-01-01T00:00:01.000Z"
+    );
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_result",
+        toolCallId: "verification-shot",
+        name: "browser_screenshot",
+        result: JSON.stringify({
+          action: "screenshot",
+          title: "Saved record",
+          screenshotPath: "/tmp/saved-record.png",
+          size: { width: 1200, height: 800 }
+        })
+      },
+      "2026-01-01T00:00:02.000Z"
+    );
+
+    finishTaskRun(run, "completed", undefined, "2026-01-01T00:00:03.000Z");
+
+    expect(run.status).toBe("completed");
+    expect(run.error).toBeUndefined();
+    expect(run.tools[0]?.status).toBe("failed");
+  });
+
   it("classifies tool names into task-run capabilities", () => {
     expect(capabilityForToolName("read")).toBe("read_repo");
     expect(capabilityForToolName("write_file")).toBe("write_workspace");

@@ -3312,7 +3312,7 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
   }
   await waitForDesktopSmokeContent(window);
   console.log("browser smoke: preparing fixture pages");
-  const secondUrl = await writeBrowserSmokePage("two", "Arivu browser smoke tab two");
+  const secondUrl = await writeBrowserSmokePage("two", "Arivu browser smoke tab two", undefined, true);
   const firstUrl = await writeBrowserSmokePage("one", "Arivu browser smoke tab one", secondUrl);
   console.log("browser smoke: opening fixture tabs");
   const first = await browserController.open({ url: firstUrl, mode: "visible" });
@@ -3339,6 +3339,11 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
   const popupSnapshot = await browserController.snapshot({ mode: "visible", tabId: popupTab.id });
   if (!JSON.stringify(popupSnapshot).includes("Arivu browser smoke tab two")) {
     throw new Error("browser smoke: the popup tab could not be inspected by tab id");
+  }
+  console.log("browser smoke: closing page popup from inside the popup");
+  await browserController.clickAt({ x: 300, y: 142, mode: "visible", tabId: popupTab.id }).catch(() => undefined);
+  if (!(await waitForBrowserTabToClose(popupTab.id, 3_000))) {
+    throw new Error("browser smoke: a self-closed popup remained in visible tab state");
   }
   console.log("browser smoke: capturing second tab");
   const selectedSecond = await browserController.selectTab({ tabId: secondTabId });
@@ -3409,17 +3414,29 @@ async function assertLightBrowserSmokeScreenshot(screenshotPath: unknown, label:
   }
 }
 
-async function writeBrowserSmokePage(name: string, heading: string, popupUrl?: string) {
+async function writeBrowserSmokePage(name: string, heading: string, popupUrl?: string, selfClose = false) {
   const filePath = path.join(os.tmpdir(), `arivu-browser-smoke-${name}.html`);
   const popupMarkup = popupUrl
     ? `<button id="open-popup" type="button">Open popup</button><p id="popup-status">Popup not tested</p><script>document.getElementById("open-popup").addEventListener("click",()=>{const popup=window.open(${JSON.stringify(popupUrl)},"_blank");document.getElementById("popup-status").textContent=popup?"Popup accepted":"Popup blocked";});</script>`
     : "";
+  const closeMarkup = selfClose ? '<button id="close-popup" type="button" onclick="window.close()">Close popup</button>' : "";
   await writeFile(
     filePath,
-    `<!doctype html><html><head><meta charset="utf-8"><title>${heading}</title><style>body{margin:32px;background:#ffffff;color:#111111;font-family:system-ui,sans-serif}main{display:grid;gap:12px}#open-popup{position:fixed;left:40px;top:120px;width:160px;height:44px}</style></head><body><main><h1>${heading}</h1><p>${new Date().toISOString()}</p>${popupMarkup}</main></body></html>`,
+    `<!doctype html><html><head><meta charset="utf-8"><title>${heading}</title><style>body{margin:32px;background:#ffffff;color:#111111;font-family:system-ui,sans-serif}main{display:grid;gap:12px}#open-popup{position:fixed;left:40px;top:120px;width:160px;height:44px}#close-popup{position:fixed;left:220px;top:120px;width:160px;height:44px}</style></head><body><main><h1>${heading}</h1><p>${new Date().toISOString()}</p>${popupMarkup}${closeMarkup}</main></body></html>`,
     "utf8"
   );
   return pathToFileURL(filePath).toString();
+}
+
+async function waitForBrowserTabToClose(tabId: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!browserController.getState().visible.tabs?.some((tab) => tab.id === tabId)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
 }
 
 async function waitForDesktopSmokeContent(window: BrowserWindow) {

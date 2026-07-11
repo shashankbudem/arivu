@@ -1003,6 +1003,7 @@ export class DesktopBrowserController implements BrowserToolController {
     this.visibleTabOrder.push(id);
     this.configureWebContents("visible", target, popupWindow.webContents);
     popupWindow.on("closed", () => this.forgetVisiblePopupTab(id));
+    popupWindow.webContents.once("destroyed", () => this.forgetVisiblePopupTab(id));
     if (disposition !== "background-tab") {
       this.activeVisibleTabId = id;
     }
@@ -1021,6 +1022,11 @@ export class DesktopBrowserController implements BrowserToolController {
     const target = this.visibleTabs.get(tabId);
     if (!target) {
       throw new Error(`Unknown visible browser tab: ${tabId}`);
+    }
+    if (target.contents.isDestroyed()) {
+      this.closeVisibleTabById(tabId);
+      this.emitState();
+      throw new Error(`Visible browser tab closed before it could be selected: ${tabId}`);
     }
     this.activeVisibleTabId = tabId;
     this.rememberMode("visible");

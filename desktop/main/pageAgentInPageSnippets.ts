@@ -26,6 +26,7 @@ export const ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS = [
   '- Checkboxes: checked=true in the browser state means the box is already ON; checked=false means OFF. Clicking toggles it. Never click a checkbox to "verify" or "ensure" its state — click only when its current state differs from what the task needs.',
   "- Native <select> elements: use select_dropdown_option with the visible option text. Clicking a <select> element does nothing useful.",
   "- Autocomplete/reference inputs (search-as-you-type fields): after input_text a suggestion list usually appears — the correct next action is to click the matching suggestion (new elements are marked with *[). The typed text alone does not commit the value.",
+  "- Reference lookups: prefer an unlocked editable autocomplete/reference input and its suggestion list. Avoid lookup buttons that open a popup or new tab when an editable input exists; a task is bound to its current tab and cannot continue inside a child window.",
   '- Lines like "(N more plain text lines omitted)" mean long non-interactive text was shortened to save space. All interactive [index] elements are still listed.'
 ].join("\n");
 

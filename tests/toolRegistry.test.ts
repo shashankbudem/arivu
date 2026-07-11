@@ -157,8 +157,23 @@ describe("createToolRegistry", () => {
     expect(result.success).toBe(true);
     expect(result.data).toBe("Completed: fill out the form");
     expect(result.maxSteps).toBe(12);
-    expect(result.timeoutMs).toBe(45_000);
+    expect(result.timeoutMs).toBe(600_000);
     expect(result.modelConfig).toMatchObject({ baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" });
+  });
+
+  it("raises undersized browser_task budgets so paced provider calls can finish", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://integrate.api.nvidia.com/v1", model: "deepseek-ai/deepseek-v4-flash" }
+    });
+
+    const result = JSON.parse(
+      await registry.execute("browser_task", { instruction: "complete a multi-step form", timeoutMs: 120_000 })
+    ) as Record<string, unknown>;
+
+    expect(result.timeoutMs).toBe(600_000);
   });
 
   it("leaves JavaScript execution off unless allowJavaScript is explicitly set", async () => {

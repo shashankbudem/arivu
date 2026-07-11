@@ -338,6 +338,7 @@ describe("runBrowserTask", () => {
   function createFakeContents(onScript: (script: string) => unknown) {
     const scripts: string[] = [];
     const navigateListeners = new Set<() => void>();
+    const destroyedListeners = new Set<() => void>();
     const contents = {
       executeJavaScript: async (script: string) => {
         scripts.push(script);
@@ -350,11 +351,23 @@ describe("runBrowserTask", () => {
         if (event === "did-navigate") {
           navigateListeners.add(listener);
         }
+        if (event === "destroyed") {
+          destroyedListeners.add(listener);
+        }
+        return contents;
+      },
+      once: (event: string, listener: () => void) => {
+        if (event === "destroyed") {
+          destroyedListeners.add(listener);
+        }
         return contents;
       },
       off: (event: string, listener: () => void) => {
         if (event === "did-navigate") {
           navigateListeners.delete(listener);
+        }
+        if (event === "destroyed") {
+          destroyedListeners.delete(listener);
         }
         return contents;
       }
@@ -364,7 +377,13 @@ describe("runBrowserTask", () => {
         listener();
       }
     };
-    return { contents, scripts, fireNavigate };
+    const fireDestroyed = () => {
+      for (const listener of [...destroyedListeners]) {
+        destroyedListeners.delete(listener);
+        listener();
+      }
+    };
+    return { contents, scripts, fireNavigate, fireDestroyed };
   }
 
   function mainTaskScriptCount(scripts: string[]) {
@@ -494,6 +513,26 @@ describe("runBrowserTask", () => {
     expect(result.success).toBe(false);
     expect(result.stopped).toBe(true);
     expect(result.stopReason).toBe("cancelled");
+  }, 10_000);
+
+  it("stops immediately when a popup task closes its own browser target", async () => {
+    const { contents, fireDestroyed } = createFakeContents((script) => {
+      if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+        return true;
+      }
+      return new Promise(() => undefined);
+    });
+
+    const runPromise = runBrowserTask(
+      contents,
+      { instruction: "select the lookup row" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+    setTimeout(fireDestroyed, 10);
+    const result = await runPromise;
+
+    expect(result).toMatchObject({ success: false, stopped: true, stopReason: "target_closed" });
+    expect(result.data).toMatch(/expected result of selecting a value in a popup lookup/i);
   }, 10_000);
 
   it("resumes on a fresh document after a cross-document navigation destroys the context", async () => {

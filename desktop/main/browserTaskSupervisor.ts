@@ -78,7 +78,7 @@ const TRANSIENT_CIRCUIT_TTL_MS = 2 * 60_000;
 const CONFIG_CIRCUIT_TTL_MS = 15 * 60_000;
 const MAX_RESULT_PROXY_DIAGNOSTICS = 10;
 
-type BrowserTaskStopReason = "timeout" | "cancelled" | "infrastructure";
+type BrowserTaskStopReason = "timeout" | "cancelled" | "infrastructure" | "target_closed";
 type ModelCircuit = { openedAt: number; expiresAt: number; reason: string };
 const modelCircuits = new Map<string, ModelCircuit>();
 
@@ -163,12 +163,13 @@ export async function runBrowserTask(
   const startedAt = Date.now();
   let deadlineTimer: NodeJS.Timeout | undefined;
   let stopReason: BrowserTaskStopReason | undefined;
+  let onTargetDestroyed: (() => void) | undefined;
   let settleInfrastructureStop: ((result: InjectedTaskResult) => void) | undefined;
   const infrastructureStopPromise = new Promise<InjectedTaskResult>((resolve) => {
     settleInfrastructureStop = resolve;
   });
   const stopPromise = new Promise<InjectedTaskResult>((resolve) => {
-    const settleStop = (reason: "timeout" | "cancelled", message: string) => {
+    const settleStop = (reason: "timeout" | "cancelled" | "target_closed", message: string) => {
       if (stopReason) {
         return;
       }
@@ -176,6 +177,8 @@ export async function runBrowserTask(
       resolve({ ok: false, error: message });
     };
     deadlineTimer = setTimeout(() => settleStop("timeout", `Browser task exceeded its ${timeoutMs}ms budget.`), timeoutMs);
+    onTargetDestroyed = () => settleStop("target_closed", "The browser tab closed while the delegated task was running.");
+    contents.on("destroyed", onTargetDestroyed);
     if (signal) {
       if (signal.aborted) {
         settleStop("cancelled", "Browser task was cancelled.");
@@ -205,9 +208,11 @@ export async function runBrowserTask(
           error:
             stopReason === "cancelled"
               ? "Browser task was cancelled."
-              : stopReason === "infrastructure"
-                ? "Browser task stopped because its model endpoint became unavailable."
-                : `Browser task exceeded its ${timeoutMs}ms budget.`
+              : stopReason === "target_closed"
+                ? "The browser tab closed while the delegated task was running. Inspect browser_state and continue on the originating tab."
+                : stopReason === "infrastructure"
+                  ? "Browser task stopped because its model endpoint became unavailable."
+                  : `Browser task exceeded its ${timeoutMs}ms budget.`
         };
         break;
       }
@@ -277,6 +282,10 @@ export async function runBrowserTask(
       lastKnownProgress = lastProgress;
 
       if (stopReason) {
+        if (stopReason === "target_closed") {
+          finalResult = result;
+          break;
+        }
         // A wedged renderer can make executeJavaScript never resolve; the stop request and
         // the settle wait share the same bound so a timeout can never hang the tool call.
         await Promise.race([stopInjectedTask(contents).catch(() => undefined), delay(STOP_GRACE_MS)]);
@@ -344,6 +353,10 @@ export async function runBrowserTask(
       const failure = activeModelCircuit(circuitKey);
       data = `${failure?.reason ?? data} Browser-task retries for this model are paused temporarily; choose another configured model/provider or retry after the circuit cools down.`;
     }
+    if (stopReason === "target_closed" && !success) {
+      data =
+        "The browser tab closed while the delegated task was running. This can be an expected result of selecting a value in a popup lookup; inspect browser_state and continue or verify on the originating tab.";
+    }
     if (!success && stepCount === 0 && isModelConnectivityFailure(data)) {
       data = `${data} — the in-page agent could not reach its model endpoint before taking a single step. This is an infrastructure/connectivity failure, not a problem with the instruction; retrying browser_task with reworded instructions will not help. Check browser_console for CORS or network errors and report the failure to the user.`;
     }
@@ -370,6 +383,9 @@ export async function runBrowserTask(
   } finally {
     if (deadlineTimer) {
       clearTimeout(deadlineTimer);
+    }
+    if (onTargetDestroyed) {
+      contents.off("destroyed", onTargetDestroyed);
     }
     unregisterBrowserTaskProxyEntry(token);
   }
