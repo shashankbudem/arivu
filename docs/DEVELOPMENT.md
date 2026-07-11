@@ -216,7 +216,7 @@ npm run desktop:build
 ARIVU_BROWSER_SMOKE=1 ./node_modules/.bin/electron dist-desktop/main/main.js
 ```
 
-Browser smoke mode opens the visible browser window, creates two visible tabs, verifies that a page-created `window.open()` popup becomes a maximized Arivu-managed window and agent-addressable tab without reporting a popup blocker, captures tab screenshots in the system temp directory, prints the tab ids and screenshot paths, and exits.
+Browser smoke mode opens the visible browser window, creates two visible tabs, verifies that a page-created `window.open()` popup becomes a maximized Arivu-managed window and agent-addressable tab without reporting a popup blocker, captures tab screenshots, and checks that both white fixture pages remain mostly light after switching back from the popup. This pixel assertion catches blank, clipped, or black compositor surfaces before the smoke can pass. It prints tab ids, page screenshot paths, and a separate shell-only screenshot path, then exits.
 
 Desktop workflows to check manually after UI changes:
 
@@ -244,6 +244,9 @@ Desktop workflows to check manually after UI changes:
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.
 - Browser tools appear in the Tools drawer in desktop mode. Verify `browser_state`, `browser_select_tab`, `browser_open`, `browser_snapshot`, `browser_console`, `browser_screenshot`, `browser_click`, and `browser_type` are listed with hidden-browser status.
 - In Settings, choose a Browser task LLM provider and open the Browser task model picker. Confirm it loads models from that provider, excludes the chat-only `Auto` choice, supports search and manual model IDs, and the reset icon returns to the provider's default model.
+- Open prompt options and select Browser LLM; confirm the same picker opens above the composer. Verify `/browsermodel` opens it and `/browsermodel <model-id>` pins the exact model without sending a chat prompt.
+- Set browser task max loops and loop delay in Settings, save, reopen Settings, and confirm both values persist. Blank values should restore the 100-loop and 35000-ms defaults; delay values above 120000 ms must be rejected by the input/schema boundary.
+- Exercise a browser-task provider that returns a temporary 429/503 and confirm bounded backoff occurs inside the proxy. On a terminal failure, confirm Activity preserves the model/provider, trace, stop reason, and endpoint diagnostics and that an immediate retry is stopped by the model-specific circuit.
 - Start a browser task and inspect the injected page-agent configuration. Confirm the default loop cap is 100, the delay between loops is 35 seconds, and cancelling the chat run stops the browser task without waiting for the full 70-minute wall-clock budget.
 - The `Images` item in the prompt `+` menu opens a native image picker, attaches PNG/JPEG/WebP/GIF files, renders removable thumbnails, and sends those images with the next prompt.
 - The `Files` item in the prompt `+` menu opens a native picker rooted in the active workspace, attaches bounded text/code files, renders removable file chips, includes the file text in the composer token estimate, and sends the contents as quoted file context with the next prompt.

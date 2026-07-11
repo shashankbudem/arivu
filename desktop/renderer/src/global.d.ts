@@ -288,6 +288,30 @@ type AgentTaskRunArtifact = {
   reportPaths?: string[];
   testReports?: AgentTaskRunTestReport[];
   diagnostics?: AgentTaskRunDiagnostic[];
+  browserTask?: {
+    success: boolean;
+    model?: string;
+    providerId?: string;
+    providerName?: string;
+    endpoint?: string;
+    maxSteps?: number;
+    timeoutMs?: number;
+    stepDelayMs?: number;
+    stepCount: number;
+    stopReason?: string;
+    navigationCount?: number;
+    tokensUsed?: number;
+    proxyDiagnostics?: Array<{
+      attempt: number;
+      timestamp: string;
+      method: string;
+      path: string;
+      status: number;
+      latencyMs: number;
+      outcome: string;
+      message?: string;
+    }>;
+  };
   toolCallId?: string;
   createdAt: string;
 };
@@ -744,7 +768,7 @@ type ConfigPatch = {
   mcpServers?: McpServersConfig;
   workspacePolicies?: WorkspaceCapabilityPolicies;
   workspacePolicyProfiles?: WorkspacePolicyProfiles;
-  browserTaskModel?: { providerId?: string; model?: string } | null;
+  browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
 };
 
 type WorkspaceScaffoldOptions = {

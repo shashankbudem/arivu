@@ -3,7 +3,8 @@ import {
   ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS,
   BACKFILL_REFLECTION_SNIPPET,
   BUILD_TRACE_SNIPPET,
-  CAP_PAGE_CONTENT_SNIPPET
+  CAP_PAGE_CONTENT_SNIPPET,
+  INSTALL_AGENT_VISUAL_THEME_SNIPPET
 } from "../desktop/main/pageAgentInPageSnippets.js";
 
 // The snippets ship as raw JS source strings injected into the page context.
@@ -156,6 +157,21 @@ describe("BUILD_TRACE_SNIPPET", () => {
     expect(trace.tokensUsed).toBe(450);
   });
 
+  it("offsets step numbers by the steps used before a navigation resume", () => {
+    const history = [
+      {
+        type: "step",
+        stepIndex: 0,
+        reflection: {},
+        action: { name: "click_element_by_index", input: { index: 1 }, output: "✅" },
+        usage: { totalTokens: 5 }
+      }
+    ];
+    const buildTraceWithOffset = evalSnippet<(history: unknown[], offset: number) => { entries: string[] }>(BUILD_TRACE_SNIPPET);
+    expect(buildTraceWithOffset(history, 4).entries[0]).toContain("step 5:");
+    expect(buildTraceWithOffset(history, 0).entries[0]).toContain("step 1:");
+  });
+
   it("collapses whitespace in the goal segment so page-steered goals cannot forge extra trace lines", () => {
     const history = [
       {
@@ -190,5 +206,18 @@ describe("ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS", () => {
     expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("Checkboxes");
     expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("select_dropdown_option");
     expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("suggestion");
+  });
+});
+
+describe("INSTALL_AGENT_VISUAL_THEME_SNIPPET", () => {
+  it("targets the page-agent mask with ServiceNow colors, the reference cursor, and activity panel styling", () => {
+    expect(evalSnippet<() => unknown>(INSTALL_AGENT_VISUAL_THEME_SNIPPET)).toBeTypeOf("function");
+    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("#032d42");
+    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("#00c49a");
+    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("#62d84e");
+    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("%23286fbe");
+    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("page-agent-runtime_agent-panel");
+    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("data-arivu-agent-theme");
+    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("prefers-reduced-motion:reduce");
   });
 });

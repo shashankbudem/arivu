@@ -53,12 +53,24 @@ function configWith(overrides: Partial<AppConfig>): AppConfig {
 describe("resolveBrowserTaskModel", () => {
   it("follows the chat model when no override is configured", () => {
     const resolved = resolveBrowserTaskModel(configWith({}), FALLBACK);
-    expect(resolved).toEqual({ baseUrl: "https://chat.example/v1", model: "chat-model", apiKey: "chat-key" });
+    expect(resolved).toEqual({
+      baseUrl: "https://chat.example/v1",
+      model: "chat-model",
+      apiKey: "chat-key",
+      providerId: "chat-provider",
+      providerName: "Chat provider"
+    });
   });
 
   it("uses the saved provider referenced by providerId", () => {
     const resolved = resolveBrowserTaskModel(configWith({ browserTaskModel: { providerId: "browser-provider" } }), FALLBACK);
-    expect(resolved).toEqual({ baseUrl: "https://browser.example/v1", model: "browser-model", apiKey: "browser-key" });
+    expect(resolved).toMatchObject({
+      baseUrl: "https://browser.example/v1",
+      model: "browser-model",
+      apiKey: "browser-key",
+      providerId: "browser-provider",
+      providerName: "Browser provider"
+    });
   });
 
   it("applies an explicit model override on top of the selected provider", () => {
@@ -66,12 +78,24 @@ describe("resolveBrowserTaskModel", () => {
       configWith({ browserTaskModel: { providerId: "browser-provider", model: "special-model" } }),
       FALLBACK
     );
-    expect(resolved).toEqual({ baseUrl: "https://browser.example/v1", model: "special-model", apiKey: "browser-key" });
+    expect(resolved).toMatchObject({
+      baseUrl: "https://browser.example/v1",
+      model: "special-model",
+      apiKey: "browser-key",
+      providerId: "browser-provider",
+      providerName: "Browser provider"
+    });
   });
 
   it("applies a bare model override on top of the chat model", () => {
     const resolved = resolveBrowserTaskModel(configWith({ browserTaskModel: { model: "special-model" } }), FALLBACK);
-    expect(resolved).toEqual({ baseUrl: "https://chat.example/v1", model: "special-model", apiKey: "chat-key" });
+    expect(resolved).toMatchObject({
+      baseUrl: "https://chat.example/v1",
+      model: "special-model",
+      apiKey: "chat-key",
+      providerId: "chat-provider",
+      providerName: "Chat provider"
+    });
   });
 
   it("preserves browser-agent loop and rate-limit overrides", () => {
@@ -82,8 +106,9 @@ describe("resolveBrowserTaskModel", () => {
     expect(resolved).toMatchObject({ maxSteps: 80, stepDelayMs: 12_000 });
   });
 
-  it("falls back to the chat model when the referenced provider no longer exists", () => {
-    const resolved = resolveBrowserTaskModel(configWith({ browserTaskModel: { providerId: "deleted-provider" } }), FALLBACK);
-    expect(resolved).toEqual({ baseUrl: "https://chat.example/v1", model: "chat-model", apiKey: "chat-key" });
+  it("rejects a stale browser-task provider reference instead of silently using a different model", () => {
+    expect(() => resolveBrowserTaskModel(configWith({ browserTaskModel: { providerId: "deleted-provider" } }), FALLBACK)).toThrow(
+      /unknown provider "deleted-provider"/
+    );
   });
 });

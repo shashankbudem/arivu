@@ -255,10 +255,14 @@ export function recordTaskRunEvent(
   }
   tool.name = event.name;
   tool.capability = capability;
-  tool.status = "done";
+  tool.status = toolResultFailed(event.name, event.result) ? "failed" : "done";
   tool.completedAt = now;
   tool.durationMs = durationMsBetween(tool.startedAt, now);
-  tool.resultPreview = truncateRunText(event.result, 700);
+  // browser_task results carry the in-page agent's step trace and endpoint diagnostics — the
+  // parts that make a failed run reviewable later. Their JSON puts the bulky, transient
+  // snapshotAfter last, so a larger budget preserves the durable fields and still sheds the
+  // page snapshot first.
+  tool.resultPreview = truncateRunText(event.result, event.name === "browser_task" ? 6_000 : 700);
   addCapability(run, capability);
 
   const artifact = artifactFromToolResult(event.toolCallId, event.name, event.result, now, tool, options);
@@ -305,11 +309,13 @@ export function upsertTaskRunCommandArtifact(run: AgentTaskRun, input: CommandAr
 }
 
 export function finishTaskRun(run: AgentTaskRun, status: AgentTaskRunStatus, error?: string, now = new Date().toISOString()) {
-  run.status = status;
+  const latestBrowserTask = [...run.tools].reverse().find((tool) => tool.name === "browser_task");
+  const unresolvedBrowserFailure = status === "completed" && latestBrowserTask?.status === "failed";
+  run.status = unresolvedBrowserFailure ? "failed" : status;
   run.updatedAt = now;
   run.completedAt = now;
-  if (error) {
-    run.error = error;
+  if (error || unresolvedBrowserFailure) {
+    run.error = error ?? "The delegated browser task did not complete successfully.";
     for (const tool of run.tools) {
       if (tool.status === "running") {
         tool.status = "failed";
@@ -825,7 +831,18 @@ function browserTaskArtifactFromToolResult(toolCallId: string, result: string, n
   const stopReason = stringValue(parsed.stopReason);
   const durationMs = numberValue(parsed.durationMs);
   const data = typeof parsed.data === "string" ? parsed.data : "";
-  const boundedContent = boundFileChangeContent(data);
+  const trace = Array.isArray(parsed.trace) ? parsed.trace.filter((entry): entry is string => typeof entry === "string") : [];
+  const model = isRecord(parsed.browserTaskModel) ? parsed.browserTaskModel : undefined;
+  const proxyDiagnostics = Array.isArray(parsed.proxyDiagnostics)
+    ? parsed.proxyDiagnostics.filter(isRecord).map(normalizeBrowserTaskProxyDiagnostic).filter(isDefined)
+    : [];
+  const contentSections = [
+    model ? `Configuration:\n${JSON.stringify(model, null, 2)}` : undefined,
+    proxyDiagnostics.length > 0 ? `Model endpoint diagnostics:\n${JSON.stringify(proxyDiagnostics, null, 2)}` : undefined,
+    trace.length > 0 ? `Trace (${trace.length} entries):\n${trace.map((entry, index) => `${index + 1}. ${entry}`).join("\n")}` : undefined,
+    "Result:\n" + (data || "(no result text)")
+  ].filter((section): section is string => Boolean(section));
+  const boundedContent = boundFileChangeContent(contentSections.join("\n\n"));
   const summaryParts = [
     success ? "Completed" : "Did not complete",
     `${stepCount} step${stepCount === 1 ? "" : "s"}`,
@@ -839,9 +856,50 @@ function browserTaskArtifactFromToolResult(toolCallId: string, result: string, n
     summary: summaryParts.join(", "),
     content: boundedContent.text,
     contentTruncated: boundedContent.truncated || undefined,
+    browserTask: {
+      success,
+      model: stringValue(model?.model),
+      providerId: stringValue(model?.providerId),
+      providerName: stringValue(model?.providerName),
+      endpoint: stringValue(model?.endpoint),
+      maxSteps: numberValue(model?.maxSteps),
+      timeoutMs: numberValue(model?.timeoutMs),
+      stepDelayMs: numberValue(model?.stepDelayMs),
+      stepCount,
+      stopReason,
+      navigationCount: numberValue(parsed.navigationCount),
+      tokensUsed: numberValue(parsed.tokensUsed),
+      proxyDiagnostics: proxyDiagnostics.length > 0 ? proxyDiagnostics : undefined
+    },
     toolCallId,
     createdAt: now
   };
+}
+
+function toolResultFailed(toolName: string, result: string): boolean {
+  if (toolName !== "browser_task") {
+    return false;
+  }
+  const parsed = parseJsonObject(result);
+  return !parsed || parsed.success !== true;
+}
+
+function normalizeBrowserTaskProxyDiagnostic(value: Record<string, unknown>) {
+  const attempt = numberValue(value.attempt);
+  const timestamp = stringValue(value.timestamp);
+  const method = stringValue(value.method);
+  const path = stringValue(value.path);
+  const status = numberValue(value.status);
+  const latencyMs = numberValue(value.latencyMs);
+  const outcome = stringValue(value.outcome);
+  if (attempt === undefined || !timestamp || !method || !path || status === undefined || latencyMs === undefined || !outcome) {
+    return undefined;
+  }
+  return { attempt, timestamp, method, path, status, latencyMs, outcome, message: stringValue(value.message) };
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined;
 }
 
 function fileChangeArtifactFromToolResult(

@@ -86,14 +86,58 @@ export const BACKFILL_REFLECTION_SNIPPET = String.raw`(function(agentInstance, h
 })`;
 
 /**
+ * Restyles page-agent's visible automation mask and activity panel. The upstream
+ * mask ships with a cyan/purple WebGL border and a large arrow asset. Arivu uses
+ * a ServiceNow-inspired evergreen/teal gradient, a compact reference-matched blue
+ * pointer, and a dark branded activity surface for live status and step history.
+ */
+export const INSTALL_AGENT_VISUAL_THEME_SNIPPET = String.raw`(function() {
+  var STYLE_ID = "arivu-agent-visual-theme";
+  var MASK_ID = "page-agent-runtime_simulator-mask";
+  var oldStyle = document.getElementById(STYLE_ID);
+  if (oldStyle) oldStyle.remove();
+  var styleElement = document.createElement("style");
+  styleElement.id = STYLE_ID;
+  styleElement.setAttribute("data-page-agent-ignore", "true");
+  styleElement.textContent =
+    "#" + MASK_ID + "{" +
+      "cursor:none!important;isolation:isolate}" +
+    "#" + MASK_ID + ">canvas{opacity:0!important}" +
+    "#" + MASK_ID + "::before{content:'';position:absolute;inset:0;pointer-events:none;padding:3px;" +
+      "background:linear-gradient(115deg,#032d42,#075985,#00c49a,#62d84e,#81b5a1,#032d42);" +
+      "background-size:300% 300%;-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);" +
+      "-webkit-mask-composite:xor;mask-composite:exclude;filter:drop-shadow(0 0 9px rgba(0,196,154,.72));" +
+      "animation:arivu-agent-border 3.2s linear infinite;z-index:1}" +
+    "#" + MASK_ID + ">div[class*='_cursor_']{width:34px!important;height:34px!important;margin:0!important;filter:drop-shadow(0 3px 5px rgba(3,45,66,.42));z-index:2!important}" +
+    "#" + MASK_ID + ">div[class*='_cursor_']::before{content:'';position:absolute;inset:0;" +
+      "background:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 34 34'%3E%3Cpath d='M4.9 3.35c-.78-.33-1.56.03-1.86.7-.11.25-.12.52-.02.82 2.3 6.9 4.64 14.1 7.03 21.78.43 1.43 2.43 1.4 2.93.03l2.9-7.43c.27-.7.79-1.22 1.47-1.47l7.87-2.66c1.43-.48 1.5-2.47.13-3.04C17.65 8.82 10.82 5.76 4.9 3.35Z' fill='%23286fbe' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\") center/contain no-repeat}" +
+    "#" + MASK_ID + " [class*='cursorFilling'],#" + MASK_ID + " [class*='cursorBorder']{display:none!important}" +
+    "#" + MASK_ID + " [class*='cursorRipple']{width:30px!important;height:30px!important;margin-left:-15px!important;margin-top:-15px!important}" +
+    "#" + MASK_ID + " [class*='cursorRipple']::after{border-color:#286fbe!important;border-width:3px!important}" +
+    "#page-agent-runtime_agent-panel{--width:min(460px,calc(100vw - 32px));bottom:28px!important;filter:drop-shadow(0 18px 44px rgba(3,45,66,.34))}" +
+    "#page-agent-runtime_agent-panel>div[class*='_background_']{display:none!important}" +
+    "#page-agent-runtime_agent-panel div[class*='_header_']{background:rgba(3,45,66,.94)!important;border:1px solid rgba(129,181,161,.72)!important;box-shadow:0 0 0 1px rgba(0,196,154,.18),0 8px 28px rgba(3,45,66,.3)!important}" +
+    "#page-agent-runtime_agent-panel div[class*='historySectionWrapper']{background:rgba(3,45,66,.96)!important;border-color:rgba(129,181,161,.72)!important;box-shadow:0 16px 38px rgba(3,45,66,.38)!important}" +
+    "#page-agent-runtime_agent-panel div[class*='historyItem']{border-left-color:#00c49a!important;background:linear-gradient(135deg,rgba(0,196,154,.15),rgba(129,181,161,.06))!important}" +
+    "#page-agent-runtime_agent-panel div[class*='_indicator_']{background:#62d84e!important}" +
+    "#page-agent-runtime_agent-panel div[class*='inputSectionWrapper']{display:none!important}" +
+    "@keyframes arivu-agent-border{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}" +
+    "@media(prefers-reduced-motion:reduce){#" + MASK_ID + "::before{animation:none}}";
+  (document.head || document.documentElement).appendChild(styleElement);
+  document.documentElement.setAttribute("data-arivu-agent-theme", "servicenow");
+  return true;
+})`;
+
+/**
  * Condenses page-agent's ExecutionResult.history into a bounded, human-readable
  * trace plus a token total, returned to the supervising agent in the tool result.
  * This is the visibility the raw extension logs provide (per-step action, output,
  * goal, usage) without shipping rawRequest/rawResponse payloads across the bridge.
  */
-export const BUILD_TRACE_SNIPPET = String.raw`(function(history) {
+export const BUILD_TRACE_SNIPPET = String.raw`(function(history, stepOffset) {
   var MAX_ENTRIES = 30;
   var MAX_ENTRY_CHARS = 220;
+  var offset = typeof stepOffset === "number" && stepOffset > 0 ? stepOffset : 0;
   var entries = [];
   var tokens = 0;
   var list = history || [];
@@ -117,7 +161,7 @@ export const BUILD_TRACE_SNIPPET = String.raw`(function(history) {
           ? " | goal: " + String(event.reflection.next_goal).replace(/\s+/g, " ")
           : "";
       var inputPart = input && input !== "undefined" ? " " + input : "";
-      entries.push(("step " + (event.stepIndex + 1) + ": " + name + inputPart + " -> " + output + goal).slice(0, MAX_ENTRY_CHARS));
+      entries.push(("step " + (event.stepIndex + 1 + offset) + ": " + name + inputPart + " -> " + output + goal).slice(0, MAX_ENTRY_CHARS));
     } else if (event.type === "observation") {
       entries.push(("observation: " + String(event.content || "").replace(/\s+/g, " ")).slice(0, MAX_ENTRY_CHARS));
     } else if (event.type === "error") {

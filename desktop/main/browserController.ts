@@ -910,7 +910,17 @@ export class DesktopBrowserController implements BrowserToolController {
   }
 
   private async captureTargetPage(mode: BrowserMode, contents: WebContents) {
-    void mode;
+    // A visible BrowserView has a reliable native surface once prepareForScreenshot has
+    // selected and attached it. CDP Page.captureScreenshot can retain stale compositor tiles
+    // after switching away from a native popup window, producing a partly black image even
+    // though the page is painted. Prefer the attached surface for visible tabs and keep CDP
+    // as the fallback; hidden/background contents still need CDP first.
+    if (mode === "visible") {
+      const surfaceImage = await contents.capturePage();
+      if (!surfaceImage.isEmpty()) {
+        return surfaceImage;
+      }
+    }
     const debuggerImage = await capturePageWithDebugger(contents);
     if (debuggerImage && !debuggerImage.isEmpty()) {
       return debuggerImage;

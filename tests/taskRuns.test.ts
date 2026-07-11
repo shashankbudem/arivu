@@ -19,6 +19,99 @@ import {
 } from "../src/agent/taskRuns.js";
 
 describe("agent task runs", () => {
+  it("keeps a larger result preview for browser_task so traces survive, while other tools stay compact", () => {
+    const run = createAgentTaskRun({ userMessageIndex: 0, prompt: "p", now: "2026-01-01T00:00:00.000Z" });
+    const longBrowserResult = JSON.stringify({
+      success: false,
+      trace: Array.from({ length: 30 }, (_, i) => `step ${i + 1}: click -> ok`),
+      snapshotAfter: "x".repeat(10_000)
+    });
+    recordTaskRunEvent(run, { type: "tool_call", call: { id: "b1", name: "browser_task", arguments: {} } }, "2026-01-01T00:00:01.000Z");
+    recordTaskRunEvent(
+      run,
+      { type: "tool_result", toolCallId: "b1", name: "browser_task", result: longBrowserResult },
+      "2026-01-01T00:00:02.000Z"
+    );
+    recordTaskRunEvent(run, { type: "tool_call", call: { id: "r1", name: "read_file", arguments: {} } }, "2026-01-01T00:00:03.000Z");
+    recordTaskRunEvent(
+      run,
+      { type: "tool_result", toolCallId: "r1", name: "read_file", result: "y".repeat(5_000) },
+      "2026-01-01T00:00:04.000Z"
+    );
+    const browserTool = run.tools.find((tool) => tool.toolCallId === "b1");
+    const readTool = run.tools.find((tool) => tool.toolCallId === "r1");
+    expect(browserTool?.resultPreview).toContain("step 30: click -> ok");
+    expect(browserTool?.resultPreview?.length).toBeLessThanOrEqual(6_010);
+    expect(readTool?.resultPreview?.length).toBeLessThanOrEqual(710);
+  });
+
+  it("persists browser-task configuration, trace, diagnostics, and failure status", () => {
+    const run = createAgentTaskRun({ userMessageIndex: 0, prompt: "use the browser", now: "2026-01-01T00:00:00.000Z" });
+    recordTaskRunEvent(
+      run,
+      { type: "tool_call", call: { id: "browser_1", name: "browser_task", arguments: { instruction: "click it" } } },
+      "2026-01-01T00:00:01.000Z"
+    );
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_result",
+        toolCallId: "browser_1",
+        name: "browser_task",
+        result: JSON.stringify({
+          action: "task",
+          success: false,
+          data: "Bad Gateway",
+          stepCount: 1,
+          stopReason: "infrastructure",
+          navigationCount: 0,
+          tokensUsed: 8316,
+          trace: ["Observed catalog page", "Typed Maintain Items"],
+          browserTaskModel: {
+            providerId: "nvidia",
+            providerName: "NVIDIA NIM",
+            model: "google/gemma-4-31b-it",
+            endpoint: "https://integrate.api.nvidia.com/v1",
+            maxSteps: 100,
+            timeoutMs: 4_200_000,
+            stepDelayMs: 35_000
+          },
+          proxyDiagnostics: [
+            {
+              attempt: 1,
+              timestamp: "2026-01-01T00:00:02.000Z",
+              method: "POST",
+              path: "/v1/chat/completions",
+              status: 502,
+              latencyMs: 30_001,
+              outcome: "upstream_error"
+            }
+          ]
+        })
+      },
+      "2026-01-01T00:00:03.000Z"
+    );
+
+    expect(run.tools[0]?.status).toBe("failed");
+    expect(run.artifacts[0]).toMatchObject({
+      kind: "browser_task_log",
+      browserTask: {
+        success: false,
+        providerName: "NVIDIA NIM",
+        model: "google/gemma-4-31b-it",
+        stepCount: 1,
+        tokensUsed: 8316,
+        proxyDiagnostics: [{ status: 502, latencyMs: 30_001 }]
+      }
+    });
+    expect(run.artifacts[0]?.content).toContain("Typed Maintain Items");
+    expect(run.artifacts[0]?.content).toContain("Model endpoint diagnostics");
+
+    finishTaskRun(run, "completed", undefined, "2026-01-01T00:00:04.000Z");
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/browser task did not complete/i);
+  });
+
   it("classifies tool names into task-run capabilities", () => {
     expect(capabilityForToolName("read")).toBe("read_repo");
     expect(capabilityForToolName("write_file")).toBe("write_workspace");

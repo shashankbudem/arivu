@@ -4,7 +4,7 @@ Reviewed 2026-07-08 against the full codebase (agent core, provider client, tool
 
 ## Progress log
 
-Updated 2026-07-11 (release-gate pass). Test suite now has 399 passing tests across 36 files. Typecheck, lint with zero warnings, Prettier verification, core build, desktop build, the Electron browser smoke test, an unpacked Electron Builder package, and a packaged-app smoke launch are green.
+Updated 2026-07-12 (browser-agent reliability pass). Test suite now has 422 passing tests across 36 files. Typecheck, lint with zero warnings, Prettier verification, core build, desktop build, and the strengthened Electron browser smoke are green. The smoke now verifies page pixels after switching away from a native popup, not only tab metadata. The prior unpacked Electron Builder package and packaged-app smoke launch remain the latest packaging evidence.
 
 **P0 — all done.**
 

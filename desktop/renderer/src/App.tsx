@@ -468,7 +468,8 @@ type TaskWorktreeActionOptions = {
   conflictPath?: string;
 };
 
-type SlashCommandId = "compact" | "summarize" | "session" | "tools" | "skills" | "files" | "browser" | "plan" | "loop" | "worktree";
+type SlashCommandId =
+  "compact" | "summarize" | "session" | "tools" | "skills" | "files" | "browser" | "browsermodel" | "plan" | "loop" | "worktree";
 
 type SlashCommandDefinition = {
   id: SlashCommandId;
@@ -545,6 +546,13 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
     keywords: ["open", "page", "window", "visible", "dev"]
   },
   {
+    id: "browsermodel",
+    command: "browsermodel",
+    title: "Browser task model",
+    description: "Set the model the in-page browser_task agent uses. Add a model id to set it instantly, or run bare to pick.",
+    keywords: ["llm", "model", "browser", "task", "agent", "provider", "pin"]
+  },
+  {
     id: "plan",
     command: "plan",
     title: "Plan approval",
@@ -608,6 +616,7 @@ export function App() {
   const [toolsPopoverOpen, setToolsPopoverOpen] = useState(false);
   const [skillsPopoverOpen, setSkillsPopoverOpen] = useState(false);
   const [composerOptionsOpen, setComposerOptionsOpen] = useState(false);
+  const [browserTaskModelPickerOpen, setBrowserTaskModelPickerOpen] = useState(false);
   const [settingsFocus, setSettingsFocus] = useState<SettingsFocus>(null);
   const [selectedSlashCommandIndex, setSelectedSlashCommandIndex] = useState(0);
   const [commandOutput, setCommandOutput] = useState<CommandOutput | null>(null);
@@ -1862,6 +1871,62 @@ export function App() {
     setStatus("Error");
   }
 
+  // Resolves the endpoint/model the browser-task picker should show, mirroring the Settings panel:
+  // a pinned provider/model wins, otherwise it falls back to the active chat provider's values.
+  function browserTaskPickerContext() {
+    const config = state?.config;
+    const providers = config?.providers ?? [];
+    const activeProvider = providers.find((provider) => provider.id === config?.activeProviderId) ?? providers[0];
+    const profile = config?.browserTaskModel;
+    const pinnedProvider = profile?.providerId ? providers.find((provider) => provider.id === profile.providerId) : undefined;
+    const provider = pinnedProvider ?? activeProvider;
+    const baseUrl = profile?.baseUrl ?? provider?.baseUrl ?? config?.baseUrl ?? "";
+    const providerModel = provider?.model ?? config?.model ?? "";
+    const currentModel = profile?.model ?? providerModel;
+    return { baseUrl, currentModel, providerId: profile?.providerId ?? provider?.id };
+  }
+
+  function openBrowserTaskModelPicker() {
+    setComposerOptionsOpen(false);
+    setToolsPopoverOpen(false);
+    setSkillsPopoverOpen(false);
+    setBrowserTaskModelPickerOpen(true);
+  }
+
+  async function applyBrowserTaskModel(model: string) {
+    const trimmed = model.trim();
+    if (!trimmed) {
+      return;
+    }
+    try {
+      // Only change the model; preserve any pinned provider (and the merge layer preserves
+      // hand-configured baseUrl/apiKey/budget fields on the saved profile). This is an explicit
+      // set, so it stays put across later chat-model changes until the user changes it again.
+      const next = await window.arivu.saveConfig({
+        browserTaskModel: { providerId: state?.config.browserTaskModel?.providerId, model: trimmed }
+      });
+      applyDesktopStateSnapshot(next);
+      setError(null);
+      setStatus(`Browser task LLM set to ${modelDisplayName(trimmed)}`);
+    } catch (err) {
+      handleModelError(formatError(err));
+    }
+  }
+
+  // Inline "instant" form typed straight into the prompt box: `/browsermodel <id>` sets the browser
+  // task model from the RAW prompt text (not the lowercased slash query) so case-sensitive model ids
+  // survive. A bare `/browsermodel` (no argument) is left to the slash menu, which opens the picker.
+  // Returns true when it consumed the submit.
+  function tryInlineBrowserTaskModelCommand(): boolean {
+    const match = prompt.trim().match(/^\/browser-?model\s+(\S.*)$/i);
+    if (!match) {
+      return false;
+    }
+    setPrompt("");
+    void applyBrowserTaskModel(match[1].trim());
+    return true;
+  }
+
   function moveChatSearch(direction: 1 | -1) {
     if (chatSearchMatches.length === 0) {
       return;
@@ -1943,6 +2008,9 @@ export function App() {
   }
 
   function handleComposerSubmit() {
+    if (tryInlineBrowserTaskModelCommand()) {
+      return;
+    }
     if (slashQuery !== null) {
       const selectedCommand = filteredSlashCommands[selectedSlashCommandIndex];
       if (selectedCommand) {
@@ -1957,6 +2025,12 @@ export function App() {
   }
 
   function handlePromptKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    // The inline `/browsermodel <id>` form must be caught before the slash menu's Enter handler,
+    // which would otherwise report "no slash command matches" (an argument breaks the menu filter).
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && tryInlineBrowserTaskModelCommand()) {
+      event.preventDefault();
+      return;
+    }
     if (slashCommandMenuOpen) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -2019,6 +2093,12 @@ export function App() {
         setPrompt("");
       }
       requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+
+    if (command.id === "browsermodel") {
+      setPrompt("");
+      openBrowserTaskModelPicker();
       return;
     }
 
@@ -3109,6 +3189,8 @@ export function App() {
                               setView("settings");
                             }}
                             onOpenSkillsSettings={openSkillsSettings}
+                            browserTaskModelLabel={modelDisplayName(browserTaskPickerContext().currentModel)}
+                            onOpenBrowserTaskModel={openBrowserTaskModelPicker}
                           />
                         ) : null}
                       </div>
@@ -3371,6 +3453,20 @@ export function App() {
       </section>
 
       {approval ? <ApprovalDialog approval={approval} onRespond={(approved) => void respondApproval(approved)} /> : null}
+      {browserTaskModelPickerOpen && state ? (
+        <ModelPickerDialog
+          currentModel={browserTaskPickerContext().currentModel}
+          baseUrl={browserTaskPickerContext().baseUrl}
+          providerId={browserTaskPickerContext().providerId}
+          includeAuto={false}
+          title="Select browser task model"
+          onSelect={(nextModel) => {
+            setBrowserTaskModelPickerOpen(false);
+            void applyBrowserTaskModel(nextModel);
+          }}
+          onClose={() => setBrowserTaskModelPickerOpen(false)}
+        />
+      ) : null}
       {state &&
       !onboardingDismissed &&
       !state.config.apiKeyPresent &&
@@ -3551,7 +3647,9 @@ function ComposerOptionsMenu({
   onToggleSkills,
   onToggleBrowser,
   onOpenSettings,
-  onOpenSkillsSettings
+  onOpenSkillsSettings,
+  browserTaskModelLabel,
+  onOpenBrowserTaskModel
 }: {
   state: DesktopState;
   busy: boolean;
@@ -3572,6 +3670,8 @@ function ComposerOptionsMenu({
   onToggleBrowser: () => void;
   onOpenSettings: () => void;
   onOpenSkillsSettings: () => void;
+  browserTaskModelLabel: string;
+  onOpenBrowserTaskModel: () => void;
 }) {
   return (
     <div className="composer-options-menu" role="menu" aria-label="Prompt options">
@@ -3635,6 +3735,13 @@ function ComposerOptionsMenu({
           <span className="browser-option-note">Agent runs hidden</span>
         </div>
       </div>
+      <button className="composer-option-row composer-option-action" type="button" onClick={onOpenBrowserTaskModel}>
+        <span className="composer-option-label">
+          <Cpu size={15} />
+          Browser LLM
+        </span>
+        <span>{browserTaskModelLabel}</span>
+      </button>
       <div className="composer-option-row">
         <span className="composer-option-label">
           <FileText size={15} />
@@ -6704,6 +6811,12 @@ function SettingsView({
   const [tavilyApiKey, setTavilyApiKey] = useState("");
   const [browserTaskProviderId, setBrowserTaskProviderId] = useState(state.config.browserTaskModel?.providerId ?? "");
   const [browserTaskModelId, setBrowserTaskModelId] = useState(state.config.browserTaskModel?.model ?? "");
+  const [browserTaskMaxSteps, setBrowserTaskMaxSteps] = useState(
+    state.config.browserTaskModel?.maxSteps !== undefined ? String(state.config.browserTaskModel.maxSteps) : ""
+  );
+  const [browserTaskStepDelayMs, setBrowserTaskStepDelayMs] = useState(
+    state.config.browserTaskModel?.stepDelayMs !== undefined ? String(state.config.browserTaskModel.stepDelayMs) : ""
+  );
   const [trustMode, setTrustMode] = useState<TrustMode>(state.config.trustMode);
   const [mcpServersText, setMcpServersText] = useState(() => JSON.stringify(state.config.mcpServers ?? {}, null, 2));
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -6822,8 +6935,16 @@ function SettingsView({
         ),
         workspacePolicyProfiles,
         browserTaskModel:
-          browserTaskProviderId.trim() || browserTaskModelId.trim()
-            ? { providerId: browserTaskProviderId.trim() || undefined, model: browserTaskModelId.trim() || undefined }
+          browserTaskProviderId.trim() ||
+          browserTaskModelId.trim() ||
+          parseOptionalInt(browserTaskMaxSteps) !== undefined ||
+          parseOptionalInt(browserTaskStepDelayMs) !== undefined
+            ? {
+                providerId: browserTaskProviderId.trim() || undefined,
+                model: browserTaskModelId.trim() || undefined,
+                maxSteps: parseOptionalInt(browserTaskMaxSteps),
+                stepDelayMs: parseOptionalInt(browserTaskStepDelayMs)
+              }
             : null
       };
       if (providerPatch.activeProvider.apiKey?.trim()) {
@@ -7185,6 +7306,34 @@ function SettingsView({
             Choose from the provider's models or enter an ID manually. Use a model with strong native tool calling.
           </small>
         </label>
+        <label>
+          <span>Browser task max loops</span>
+          <input
+            type="number"
+            min={1}
+            max={200}
+            value={browserTaskMaxSteps}
+            onChange={(event) => setBrowserTaskMaxSteps(event.target.value)}
+            placeholder="100 (default)"
+          />
+          <small className="field-note">Maximum observe/act loops per browser_task call, from 1 to 200.</small>
+        </label>
+        <label>
+          <span>Browser task loop delay (ms)</span>
+          <input
+            type="number"
+            min={0}
+            max={120000}
+            step={500}
+            value={browserTaskStepDelayMs}
+            onChange={(event) => setBrowserTaskStepDelayMs(event.target.value)}
+            placeholder="35000 (default)"
+          />
+          <small className="field-note">
+            Pause between agent loops, from 0 to 120000 ms. Defaults to 35000 ms; provider rate-limit responses are also retried with
+            backoff automatically.
+          </small>
+        </label>
       </div>
 
       <CapabilityPolicyPanel
@@ -7439,7 +7588,12 @@ function SettingsView({
           includeAuto={false}
           title="Select browser task model"
           onSelect={(nextModel) => {
-            setBrowserTaskModelId(nextModel === browserTaskProviderModel ? "" : nextModel);
+            // Pin the concrete model the user picked. Collapsing it to "" when it happens to match
+            // the current chat model would turn the choice into a *relative* "follow the chat model"
+            // reference, so any later chat-model change would silently drag the browser task model
+            // along. The user must fall back to the chat model explicitly (the reset button below or
+            // the "Same as chat model" provider option), never as a side effect of the two coinciding.
+            setBrowserTaskModelId(nextModel);
             setBrowserTaskModelDialogOpen(false);
           }}
           onClose={() => setBrowserTaskModelDialogOpen(false)}
@@ -10959,6 +11113,16 @@ function parseMcpServersText(value: string): McpServersConfig {
     };
   }
   return servers;
+}
+
+/** Parses a numeric settings field: undefined for blank/invalid/negative input. */
+function parseOptionalInt(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

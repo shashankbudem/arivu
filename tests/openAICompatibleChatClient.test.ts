@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OpenAICompatibleChatClient } from "../src/agent/OpenAICompatibleChatClient.js";
+import { OpenAICompatibleChatClient, retryAfterFromHeaders } from "../src/agent/OpenAICompatibleChatClient.js";
 import type { ChatRequest } from "../src/agent/types.js";
 
 describe("OpenAICompatibleChatClient", () => {
@@ -790,6 +790,53 @@ describe("OpenAICompatibleChatClient", () => {
     expect(calls).toBe(2);
   });
 
+  it("retries rate limits past the generic retry budget so a 429 blip doesn't kill the run", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      // Four consecutive 429s — more than the default generic budget of 2 retries (3 attempts).
+      if (calls <= 4) {
+        return new Response("Too Many Requests", { status: 429, headers: { "Retry-After": "0" } });
+      }
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "Recovered after the rate limit cleared." } }]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+      // No maxRateLimitRetries override: the default (5) must carry it past the generic budget.
+    });
+
+    const response = await client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] });
+
+    expect(response.message.content).toBe("Recovered after the rate limit cleared.");
+    expect(calls).toBe(5);
+  });
+
+  it("stops retrying rate limits once the rate-limit budget is exhausted", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response("Too Many Requests", { status: 429, headers: { "Retry-After": "0" } });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      maxRateLimitRetries: 3
+    });
+
+    await expect(client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow("Model request failed (429)");
+    // 1 initial attempt + 3 retries.
+    expect(calls).toBe(4);
+  });
+
   it("does not retry non-retryable client errors", async () => {
     let calls = 0;
     vi.stubGlobal("fetch", async () => {
@@ -949,5 +996,30 @@ describe("OpenAICompatibleChatClient", () => {
     expect(messages).not.toContain("tool_calls");
     expect(messages).toContain("Local tool request");
     expect(messages).toContain("Local tool result from web_search");
+  });
+});
+
+describe("retryAfterFromHeaders", () => {
+  const headers = (value?: string) => new Headers(value === undefined ? {} : { "Retry-After": value });
+
+  it("honors a numeric Retry-After beyond our generic backoff cap", () => {
+    // 30s exceeds the 8s exponential-backoff cap; retrying sooner would just re-hit the limit.
+    expect(retryAfterFromHeaders(headers("30"))).toBe(30_000);
+  });
+
+  it("caps an oversized Retry-After at the 60s ceiling", () => {
+    expect(retryAfterFromHeaders(headers("600"))).toBe(60_000);
+  });
+
+  it("parses an HTTP-date Retry-After into a bounded delay", () => {
+    const tenSecondsOut = new Date(Date.now() + 10_000).toUTCString();
+    const result = retryAfterFromHeaders(headers(tenSecondsOut));
+    expect(result).toBeGreaterThan(0);
+    expect(result).toBeLessThanOrEqual(60_000);
+  });
+
+  it("returns undefined when the header is missing or unparseable", () => {
+    expect(retryAfterFromHeaders(headers())).toBeUndefined();
+    expect(retryAfterFromHeaders(headers("soon"))).toBeUndefined();
   });
 });

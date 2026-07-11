@@ -3,12 +3,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WebContents } from "electron";
 import type { BrowserTaskModelConfig, BrowserToolResult } from "../../src/tools/browserControl.js";
-import { registerBrowserTaskProxyEntry, unregisterBrowserTaskProxyEntry } from "./browserTaskProxy.js";
+import {
+  getBrowserTaskProxyDiagnostics,
+  registerBrowserTaskProxyEntry,
+  unregisterBrowserTaskProxyEntry,
+  type BrowserTaskProxyDiagnostic
+} from "./browserTaskProxy.js";
 import {
   ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS,
   BACKFILL_REFLECTION_SNIPPET,
   BUILD_TRACE_SNIPPET,
-  CAP_PAGE_CONTENT_SNIPPET
+  CAP_PAGE_CONTENT_SNIPPET,
+  INSTALL_AGENT_VISUAL_THEME_SNIPPET
 } from "./pageAgentInPageSnippets.js";
 
 /**
@@ -50,20 +56,31 @@ const PAGE_AGENT_BUNDLE_PATH = path.resolve(currentDir, "../pageAgentBundle/page
 const DEFAULT_MAX_STEPS = 100;
 const MIN_MAX_STEPS = 1;
 const MAX_MAX_STEPS = 200;
-// The page agent is deliberately rate-limited to one loop every 35 seconds. Give the default
-// 100-loop budget enough wall-clock room for those intervals; callers can still choose a
-// smaller budget for short tasks or cancel a run at any time.
+// A generous ceiling, not an expected wait: slow providers can take minutes per completion,
+// and the model circuit below stops genuinely dead endpoints long before this fires. Callers
+// can still choose a smaller budget for short tasks or cancel a run at any time.
 const DEFAULT_TIMEOUT_MS = 4_200_000;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 14_400_000;
 const STOP_GRACE_MS = 5_000;
 const PROXY_TOKEN_TTL_SLOP_MS = 60_000;
+// Default pause between agent loops (override via browserTaskModel.stepDelayMs). This is the
+// requested proactive provider rate limit; reactive 429/503 Retry-After handling in the proxy
+// remains a separate recovery path for provider-side throttling.
 const STEP_DELAY_SECONDS = 35;
 // page-agent defaults to 2 retries with a flat 100ms delay; NIM queue timeouts routinely burn
 // both. Extra attempts are cheap relative to failing the whole multi-step task.
 const LLM_MAX_RETRIES = 4;
 const PROGRESS_POLL_INTERVAL_MS = 1_000;
 const MAX_NAVIGATION_RESUMES = 6;
+const TRANSIENT_FAILURE_THRESHOLD = 3;
+const TRANSIENT_CIRCUIT_TTL_MS = 2 * 60_000;
+const CONFIG_CIRCUIT_TTL_MS = 15 * 60_000;
+const MAX_RESULT_PROXY_DIAGNOSTICS = 10;
+
+type BrowserTaskStopReason = "timeout" | "cancelled" | "infrastructure";
+type ModelCircuit = { openedAt: number; expiresAt: number; reason: string };
+const modelCircuits = new Map<string, ModelCircuit>();
 
 type InjectedTaskResult = {
   ok: boolean;
@@ -109,6 +126,30 @@ export async function runBrowserTask(
   const maxSteps = clamp(Math.trunc(args.maxSteps ?? modelConfig.maxSteps ?? DEFAULT_MAX_STEPS), MIN_MAX_STEPS, MAX_MAX_STEPS);
   const stepDelaySeconds = Math.max(0, (modelConfig.stepDelayMs ?? STEP_DELAY_SECONDS * 1_000) / 1_000);
   const timeoutMs = clamp(Math.trunc(args.timeoutMs ?? DEFAULT_TIMEOUT_MS), MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+  const modelMetadata = {
+    providerId: modelConfig.providerId,
+    providerName: modelConfig.providerName,
+    model: modelConfig.model,
+    endpoint: safeEndpoint(modelConfig.baseUrl),
+    maxSteps,
+    timeoutMs,
+    stepDelayMs: Math.round(stepDelaySeconds * 1_000)
+  };
+  const circuitKey = modelCircuitKey(modelConfig);
+  const openCircuit = activeModelCircuit(circuitKey);
+  if (openCircuit) {
+    return {
+      success: false,
+      data: `Browser task model is temporarily unavailable: ${openCircuit.reason} Retry after ${new Date(openCircuit.expiresAt).toISOString()} or select another browser-task model/provider.`,
+      stepCount: 0,
+      stopped: true,
+      stopReason: "infrastructure",
+      navigationCount: 0,
+      durationMs: 0,
+      browserTaskModel: modelMetadata,
+      proxyDiagnostics: []
+    };
+  }
   // Normalize here (not just in-page) so a mixed-case or dot-prefixed entry from the model
   // ("Example.COM", ".example.com") cannot make the in-page host check reject every page.
   const allowedDomains = normalizeAllowedDomains(args.allowedDomains?.length ? args.allowedDomains : defaultAllowedDomains(contents));
@@ -121,7 +162,11 @@ export async function runBrowserTask(
 
   const startedAt = Date.now();
   let deadlineTimer: NodeJS.Timeout | undefined;
-  let stopReason: "timeout" | "cancelled" | undefined;
+  let stopReason: BrowserTaskStopReason | undefined;
+  let settleInfrastructureStop: ((result: InjectedTaskResult) => void) | undefined;
+  const infrastructureStopPromise = new Promise<InjectedTaskResult>((resolve) => {
+    settleInfrastructureStop = resolve;
+  });
   const stopPromise = new Promise<InjectedTaskResult>((resolve) => {
     const settleStop = (reason: "timeout" | "cancelled", message: string) => {
       if (stopReason) {
@@ -157,7 +202,12 @@ export async function runBrowserTask(
       if (stopReason) {
         finalResult = {
           ok: false,
-          error: stopReason === "cancelled" ? "Browser task was cancelled." : `Browser task exceeded its ${timeoutMs}ms budget.`
+          error:
+            stopReason === "cancelled"
+              ? "Browser task was cancelled."
+              : stopReason === "infrastructure"
+                ? "Browser task stopped because its model endpoint became unavailable."
+                : `Browser task exceeded its ${timeoutMs}ms budget.`
         };
         break;
       }
@@ -169,6 +219,9 @@ export async function runBrowserTask(
         model: modelConfig.model,
         maxSteps: remainingSteps,
         stepDelaySeconds,
+        // Steps already completed by pre-navigation instances; keeps trace step numbers
+        // aligned with the cumulative stepCount in the tool result.
+        stepIndexOffset: stepsUsedSoFar,
         allowedDomains,
         allowJavaScript: Boolean(args.allowJavaScript),
         allowSensitiveActions: Boolean(args.allowSensitiveActions),
@@ -200,12 +253,22 @@ export async function runBrowserTask(
             }
           })
           .catch(() => undefined);
+        const circuitFailure = circuitFailureFromDiagnostics(getBrowserTaskProxyDiagnostics(token));
+        if (circuitFailure && !stopReason) {
+          stopReason = "infrastructure";
+          modelCircuits.set(circuitKey, {
+            openedAt: Date.now(),
+            expiresAt: Date.now() + circuitFailure.ttlMs,
+            reason: circuitFailure.reason
+          });
+          settleInfrastructureStop?.({ ok: false, error: circuitFailure.reason });
+        }
       }, PROGRESS_POLL_INTERVAL_MS);
 
       const taskPromise = executeInjectedTask(contents, script);
       let result: InjectedTaskResult;
       try {
-        result = await Promise.race([taskPromise, stopPromise]);
+        result = await Promise.race([taskPromise, stopPromise, infrastructureStopPromise]);
       } finally {
         instanceSettled = true;
         clearInterval(pollTimer);
@@ -259,6 +322,15 @@ export async function runBrowserTask(
     const success = finalResult.ok ? Boolean(finalResult.success) : false;
     const stepCount = stepsUsedSoFar + (finalResult.stepCount ?? lastKnownProgress?.stepCount ?? 0);
     let data = finalResult.ok ? (finalResult.data ?? "") : (finalResult.error ?? "Browser task failed.");
+    const terminalCircuitFailure = !success ? circuitFailureFromDiagnostics(getBrowserTaskProxyDiagnostics(token)) : undefined;
+    if (terminalCircuitFailure && !stopReason) {
+      stopReason = "infrastructure";
+      modelCircuits.set(circuitKey, {
+        openedAt: Date.now(),
+        expiresAt: Date.now() + terminalCircuitFailure.ttlMs,
+        reason: terminalCircuitFailure.reason
+      });
+    }
     // Only when the task did NOT succeed: a task that completed during the stop grace window
     // keeps its real answer as data (stopReason still records that the deadline fired).
     if (stopReason === "timeout" && !success) {
@@ -267,6 +339,10 @@ export async function runBrowserTask(
       const inPageReport =
         finalResult.ok && finalResult.data && finalResult.data !== "Task aborted" ? ` Last in-page report: ${finalResult.data}` : "";
       data = `Browser task exceeded its ${timeoutMs}ms budget after ${stepCount} step(s). For multi-step tasks on slow model providers, raise timeoutMs (up to ${MAX_TIMEOUT_MS}) or split the instruction into smaller tasks.${inPageReport}`;
+    }
+    if (stopReason === "infrastructure" && !success) {
+      const failure = activeModelCircuit(circuitKey);
+      data = `${failure?.reason ?? data} Browser-task retries for this model are paused temporarily; choose another configured model/provider or retry after the circuit cools down.`;
     }
     if (!success && stepCount === 0 && isModelConnectivityFailure(data)) {
       data = `${data} — the in-page agent could not reach its model endpoint before taking a single step. This is an infrastructure/connectivity failure, not a problem with the instruction; retrying browser_task with reworded instructions will not help. Check browser_console for CORS or network errors and report the failure to the user.`;
@@ -278,7 +354,11 @@ export async function runBrowserTask(
       stopped: Boolean(stopReason),
       stopReason,
       navigationCount: navigationResumeCount,
-      durationMs
+      durationMs,
+      browserTaskModel: modelMetadata,
+      // Diagnostics are for debugging failures; on success they are pure context cost for the
+      // main agent (up to 50 entries per result), so attach a bounded tail only when needed.
+      proxyDiagnostics: success ? [] : getBrowserTaskProxyDiagnostics(token).slice(-MAX_RESULT_PROXY_DIAGNOSTICS)
     };
     if (finalResult.trace?.length) {
       result.trace = finalResult.trace;
@@ -292,6 +372,67 @@ export async function runBrowserTask(
       clearTimeout(deadlineTimer);
     }
     unregisterBrowserTaskProxyEntry(token);
+  }
+}
+
+function modelCircuitKey(config: BrowserTaskModelConfig): string {
+  return `${safeEndpoint(config.baseUrl)}\n${config.model}`;
+}
+
+function activeModelCircuit(key: string): ModelCircuit | undefined {
+  const circuit = modelCircuits.get(key);
+  if (circuit && circuit.expiresAt <= Date.now()) {
+    modelCircuits.delete(key);
+    return undefined;
+  }
+  return circuit;
+}
+
+export function circuitFailureFromDiagnostics(diagnostics: BrowserTaskProxyDiagnostic[]): { reason: string; ttlMs: number } | undefined {
+  let consecutiveTransient = 0;
+  for (let index = diagnostics.length - 1; index >= 0; index -= 1) {
+    const diagnostic = diagnostics[index];
+    // Attempts the proxy is already retrying with backoff are in-flight recoveries, not
+    // endpoint failures; counting them would open the circuit mid-recovery (a single
+    // rate-limited request records several 429s before its eventual 200).
+    if (diagnostic.willRetry) {
+      continue;
+    }
+    if (diagnostic.outcome === "success") {
+      break;
+    }
+    if ([400, 401, 403, 404].includes(diagnostic.status)) {
+      return {
+        reason: `The configured browser-task model endpoint returned HTTP ${diagnostic.status} for ${diagnostic.path} (attempt ${diagnostic.attempt}). The model name, provider, credentials, or endpoint configuration is invalid or unavailable.`,
+        ttlMs: CONFIG_CIRCUIT_TTL_MS
+      };
+    }
+    if (diagnostic.outcome === "network_error" || [408, 429, 500, 502, 503, 504].includes(diagnostic.status)) {
+      consecutiveTransient += 1;
+    } else {
+      break;
+    }
+  }
+  if (consecutiveTransient >= TRANSIENT_FAILURE_THRESHOLD) {
+    const latest = diagnostics[diagnostics.length - 1];
+    return {
+      reason: `The browser-task model endpoint failed ${consecutiveTransient} consecutive attempts (latest HTTP ${latest.status}, ${latest.latencyMs}ms).`,
+      ttlMs: TRANSIENT_CIRCUIT_TTL_MS
+    };
+  }
+  return undefined;
+}
+
+function safeEndpoint(baseUrl: string): string {
+  try {
+    const parsed = new URL(baseUrl);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return baseUrl.replace(/[?#].*$/, "").slice(0, 500);
   }
 }
 
@@ -333,6 +474,7 @@ function injectedTaskScript(
     model: string;
     maxSteps: number;
     stepDelaySeconds: number;
+    stepIndexOffset: number;
     allowedDomains: string[];
     allowJavaScript: boolean;
     allowSensitiveActions: boolean;
@@ -340,7 +482,16 @@ function injectedTaskScript(
   }
 ): string {
   return `(function() {
+// Idempotent, guarded engine load: re-running the ~2MB bundle on a document that already has
+// it is wasted work, and an eval-time throw must surface its real message instead of
+// Electron's opaque "Script failed to execute".
+if (!window.__ArivuPageAgentLib) {
+  try {
 ${bundleText}
+  } catch (engineError) {
+    return { ok: false, error: "The browser task engine failed to load: " + String(engineError && engineError.message ? engineError.message : engineError) };
+  }
+}
 if (window.__arivuPageAgentTask && window.__arivuPageAgentTask.status === "running") {
   return { ok: false, error: "A browser task is already running on this tab." };
 }
@@ -393,7 +544,25 @@ var arivuOnBeforeStep = async function(agentInstance) {
 var arivuCapPageContent = ${CAP_PAGE_CONTENT_SNIPPET};
 var arivuBackfillReflection = ${BACKFILL_REFLECTION_SNIPPET};
 var arivuBuildTrace = ${BUILD_TRACE_SNIPPET};
-var pageController = new lib.PageController({ enableMask: ${JSON.stringify(options.visible)} });
+var arivuInstallAgentVisualTheme = ${INSTALL_AGENT_VISUAL_THEME_SNIPPET};
+var arivuAgentVisualThemeInstalled = false;
+if (${JSON.stringify(options.visible)}) {
+  try {
+    arivuAgentVisualThemeInstalled = arivuInstallAgentVisualTheme();
+  } catch (err) {
+    console.warn("[Arivu] Browser agent visual theme unavailable:", err);
+  }
+}
+var pageController;
+try {
+  pageController = new lib.PageController({ enableMask: ${JSON.stringify(options.visible)} });
+} catch (maskError) {
+  // The action mask is cosmetic. Pages enforcing Trusted Types (e.g. ServiceNow's polaris
+  // shell) reject its raw innerHTML template and throw during construction — seen as an
+  // instant "Script failed to execute" killing the whole task. Fall back to running maskless.
+  console.warn("[Arivu] Browser agent mask unavailable on this page:", maskError);
+  pageController = new lib.PageController({ enableMask: false });
+}
 var core = new lib.PageAgentCore({
   pageController: pageController,
   baseURL: ${JSON.stringify(options.proxyBaseUrl)},
@@ -408,6 +577,22 @@ var core = new lib.PageAgentCore({
   onBeforeStep: arivuOnBeforeStep,
   onAfterStep: arivuBackfillReflection
 });
+if (${JSON.stringify(options.visible)}) {
+  try {
+    if (window.__arivuPageAgentPanel && typeof window.__arivuPageAgentPanel.dispose === "function") {
+      window.__arivuPageAgentPanel.dispose();
+    }
+    var activityPanel = new lib.Panel(core, { promptForNextTask: false });
+    core.onAskUser = undefined;
+    activityPanel.wrapper.setAttribute("aria-label", "Browser agent activity");
+    activityPanel.wrapper.setAttribute("data-arivu-agent-activity", "true");
+    activityPanel.show();
+    activityPanel.expand();
+    window.__arivuPageAgentPanel = activityPanel;
+  } catch (err) {
+    console.warn("[Arivu] Browser activity panel unavailable:", err);
+  }
+}
 window.__arivuPageAgentTask = core;
 return core.execute(${JSON.stringify(options.instruction)}).then(function(result) {
   var history = (result && result.history) || [];
@@ -419,7 +604,7 @@ return core.execute(${JSON.stringify(options.instruction)}).then(function(result
   }
   var trace = { entries: [], tokensUsed: 0 };
   try {
-    trace = arivuBuildTrace(history);
+    trace = arivuBuildTrace(history, ${JSON.stringify(options.stepIndexOffset)});
   } catch (err) {}
   var stopReason = window.__arivuPageAgentStopReason;
   var data = (result && result.data) || "";
@@ -470,8 +655,10 @@ function hostAllowed(host: string, domains: string[]): boolean {
 // The injected result comes from a JS context the page can fully control; bound and coerce
 // every field before it flows into the main agent's tool result.
 const MAX_RESULT_DATA_CHARS = 16_000;
-const MAX_RESULT_TRACE_ENTRIES = 30;
-const MAX_RESULT_TRACE_ENTRY_CHARS = 300;
+// Preserve one bounded entry for every possible agent step. The aggregate stays small
+// enough for the persisted browser-task artifact while avoiding the old last-30-only gap.
+const MAX_RESULT_TRACE_ENTRIES = MAX_MAX_STEPS;
+const MAX_RESULT_TRACE_ENTRY_CHARS = 120;
 
 function sanitizeInjectedResult(raw: unknown): InjectedTaskResult {
   if (!raw || typeof raw !== "object") {

@@ -3,7 +3,7 @@ import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from "electron";
 import type { IpcMainInvokeEvent, NativeImage, WebContents } from "electron";
 import { execa } from "execa";
 import { Agent } from "../../src/agent/Agent.js";
@@ -311,7 +311,7 @@ type ConfigPatch = {
   workspacePolicies?: AppConfig["workspacePolicies"];
   workspacePolicyProfiles?: AppConfig["workspacePolicyProfiles"];
   /** Settings-managed browser_task model override; null clears it back to "follow the chat model". */
-  browserTaskModel?: { providerId?: string; model?: string } | null;
+  browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
 };
 
 type PublicLlmProviderProfile = Omit<LlmProviderProfile, "apiKey"> & {
@@ -2615,14 +2615,13 @@ function toPublicBrowserTaskModel(profile: BrowserTaskModelConfigProfile): Publi
 
 /**
  * Merges a settings-managed browser_task model patch onto the saved profile. The settings UI
- * only manages providerId/model; hand-configured fields (apiKey, baseUrl, maxSteps,
- * stepDelayMs) in the config file are preserved. `null` clears the whole override so
- * browser_task follows the chat model again; a profile with nothing left set collapses to
- * undefined for the same reason.
+ * manages providerId/model/maxSteps/stepDelayMs; hand-configured fields (apiKey, baseUrl) in
+ * the config file are preserved. `null` clears the whole override so browser_task follows the
+ * chat model again; a profile with nothing left set collapses to undefined for the same reason.
  */
 function mergeBrowserTaskModelPatch(
   saved: BrowserTaskModelConfigProfile | undefined,
-  patch: { providerId?: string; model?: string } | null
+  patch: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null
 ): BrowserTaskModelConfigProfile | undefined {
   if (patch === null) {
     return undefined;
@@ -2630,9 +2629,18 @@ function mergeBrowserTaskModelPatch(
   const merged: BrowserTaskModelConfigProfile = {
     ...saved,
     providerId: patch.providerId?.trim() || undefined,
-    model: patch.model?.trim() || undefined
+    model: patch.model?.trim() || undefined,
+    maxSteps: sanitizeSettingsInt(patch.maxSteps, 1, 200),
+    stepDelayMs: sanitizeSettingsInt(patch.stepDelayMs, 0, 120_000)
   };
   return Object.values(merged).some((value) => value !== undefined) ? merged : undefined;
+}
+
+function sanitizeSettingsInt(value: number | undefined, min: number, max: number): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return Math.min(Math.max(Math.trunc(value), min), max);
 }
 
 async function readWorkspacePolicyBundleFromRoot(workspaceRoot: string): Promise<WorkspacePolicyBundleResult> {
@@ -3260,16 +3268,42 @@ async function prepareDesktopSmokeView(window: BrowserWindow) {
         true
       );
       if (smokeView === "browser-task-model") {
-        await window.webContents.executeJavaScript(
-          `document.querySelector('button[aria-label^="Choose browser task model"]')?.click()`,
+        const opened = await window.webContents.executeJavaScript(
+          `(() => {
+            const button = document.querySelector('button[aria-label^="Choose browser task model"]');
+            if (!(button instanceof HTMLButtonElement)) return false;
+            button.click();
+            return true;
+          })()`,
           true
         );
+        if (!opened) {
+          throw new Error("desktop smoke: browser-task model picker trigger was not found");
+        }
+        const dialogOpened = await waitForRendererSelector(window, '.model-dialog[aria-label="Select browser task model"]', 2_000);
+        if (!dialogOpened) {
+          throw new Error("desktop smoke: browser-task model picker did not open");
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 350));
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
+}
+
+async function waitForRendererSelector(window: BrowserWindow, selector: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const found = await window.webContents
+      .executeJavaScript(`Boolean(document.querySelector(${JSON.stringify(selector)}))`, true)
+      .catch(() => false);
+    if (found) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
 }
 
 async function captureBrowserSmoke(window: BrowserWindow | undefined) {
@@ -3309,13 +3343,18 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
   console.log("browser smoke: capturing second tab");
   const selectedSecond = await browserController.selectTab({ tabId: secondTabId });
   const secondScreenshot = await browserController.screenshot({ mode: "visible", tabId: secondTabId });
+  await assertLightBrowserSmokeScreenshot(firstScreenshot.screenshotPath, "first tab");
+  await assertLightBrowserSmokeScreenshot(secondScreenshot.screenshotPath, "second tab after popup switch");
   const browserState = browserController.getState();
   const browserWindow = BrowserWindow.getAllWindows().find((candidate) => candidate !== window && candidate.getTitle() === "Arivu Browser");
-  let chromeScreenshotPath: string | undefined;
+  let browserShellScreenshotPath: string | undefined;
   if (browserWindow && !browserWindow.isDestroyed()) {
     const image = await browserWindow.webContents.capturePage();
-    chromeScreenshotPath = path.join(os.tmpdir(), "arivu-browser-smoke-window.png");
-    await writeFile(chromeScreenshotPath, image.toPNG());
+    // BrowserView pixels are a separate compositor surface and are intentionally absent here;
+    // this artifact validates the native tab/address shell only. Per-tab paths above contain
+    // the actual page pixels.
+    browserShellScreenshotPath = path.join(os.tmpdir(), "arivu-browser-smoke-shell.png");
+    await writeFile(browserShellScreenshotPath, image.toPNG());
   }
   console.log(
     JSON.stringify(
@@ -3333,13 +3372,41 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
         popupTabId: popupTab.id,
         firstScreenshotPath: firstScreenshot.screenshotPath,
         secondScreenshotPath: secondScreenshot.screenshotPath,
-        chromeScreenshotPath
+        browserShellScreenshotPath
       },
       null,
       2
     )
   );
   browserController.detach(window);
+}
+
+async function assertLightBrowserSmokeScreenshot(screenshotPath: unknown, label: string) {
+  if (typeof screenshotPath !== "string" || !screenshotPath) {
+    throw new Error(`browser smoke: ${label} did not return a screenshot path`);
+  }
+  const image = nativeImage.createFromBuffer(await readFile(screenshotPath));
+  const size = image.getSize();
+  const bitmap = image.toBitmap();
+  const strideX = Math.max(1, Math.floor(size.width / 96));
+  const strideY = Math.max(1, Math.floor(size.height / 54));
+  let samples = 0;
+  let lightSamples = 0;
+  for (let y = 0; y < size.height; y += strideY) {
+    for (let x = 0; x < size.width; x += strideX) {
+      const index = (y * size.width + x) * 4;
+      const blue = bitmap[index] ?? 0;
+      const green = bitmap[index + 1] ?? 0;
+      const red = bitmap[index + 2] ?? 0;
+      samples += 1;
+      if (red >= 220 && green >= 220 && blue >= 220) {
+        lightSamples += 1;
+      }
+    }
+  }
+  if (samples === 0 || lightSamples / samples < 0.8) {
+    throw new Error(`browser smoke: ${label} screenshot is blank, clipped, or covered by a stale compositor surface`);
+  }
 }
 
 async function writeBrowserSmokePage(name: string, heading: string, popupUrl?: string) {

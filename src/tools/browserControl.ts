@@ -49,6 +49,8 @@ export type BrowserTaskModelConfig = {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  providerId?: string;
+  providerName?: string;
   maxSteps?: number;
   stepDelayMs?: number;
 };

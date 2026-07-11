@@ -4,10 +4,11 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { WebContents } from "electron";
 import {
   ensureBrowserTaskProxy,
+  getBrowserTaskProxyDiagnostics,
   registerBrowserTaskProxyEntry,
   unregisterBrowserTaskProxyEntry
 } from "../desktop/main/browserTaskProxy.js";
-import { __setPageAgentBundleTextForTests, runBrowserTask } from "../desktop/main/browserTaskSupervisor.js";
+import { __setPageAgentBundleTextForTests, circuitFailureFromDiagnostics, runBrowserTask } from "../desktop/main/browserTaskSupervisor.js";
 
 const REAL_API_KEY = "sk-super-secret-real-key";
 
@@ -57,6 +58,9 @@ describe("browserTaskProxy", () => {
     });
     expect(response.status).toBe(200);
     expect(receivedAuthHeaders).toEqual([`Bearer ${REAL_API_KEY}`]);
+    expect(getBrowserTaskProxyDiagnostics(token)).toMatchObject([
+      { attempt: 1, method: "POST", path: "/v1/chat/completions", status: 200, outcome: "success" }
+    ]);
 
     unregisterBrowserTaskProxyEntry(token);
   });
@@ -103,6 +107,150 @@ describe("browserTaskProxy", () => {
     expect(response.headers.get("access-control-max-age")).toBeTruthy();
   });
 
+  it("retries upstream 429s with backoff before surfacing them to the page", async () => {
+    let hits = 0;
+    const flaky = http.createServer((req, res) => {
+      req.resume();
+      hits += 1;
+      if (hits < 3) {
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
+        res.end(JSON.stringify({ status: 429, title: "Too Many Requests" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => flaky.listen(0, "127.0.0.1", resolve));
+    const flakyUrl = `http://127.0.0.1:${(flaky.address() as AddressInfo).port}`;
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: flakyUrl,
+        realApiKey: REAL_API_KEY,
+        ttlMs: 30_000
+      });
+      const response = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ hello: "world" })
+      });
+      expect(response.status).toBe(200);
+      expect(hits).toBe(3);
+      // In-flight retries are flagged so endpoint-health consumers (the model circuit) skip them.
+      expect(getBrowserTaskProxyDiagnostics(token)).toMatchObject([
+        { status: 429, outcome: "upstream_error", willRetry: true },
+        { status: 429, outcome: "upstream_error", willRetry: true },
+        { status: 200, outcome: "success" }
+      ]);
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      flaky.close();
+    }
+  });
+
+  it("strips parameters a gateway rejects as unsupported and retries the request without them", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const picky = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+        bodies.push(body);
+        if ("thinking" in body) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ status: 400, title: "Validation", detail: "Unsupported parameter(s): `thinking`" }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((resolve) => picky.listen(0, "127.0.0.1", resolve));
+    const pickyUrl = `http://127.0.0.1:${(picky.address() as AddressInfo).port}`;
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: pickyUrl,
+        realApiKey: REAL_API_KEY,
+        ttlMs: 30_000
+      });
+      const response = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "deepseek-v4-flash", thinking: { type: "disabled" }, messages: [] })
+      });
+      expect(response.status).toBe(200);
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0]).toHaveProperty("thinking");
+      expect(bodies[1]).not.toHaveProperty("thinking");
+      expect(bodies[1]).toHaveProperty("model", "deepseek-v4-flash");
+      const diagnostics = getBrowserTaskProxyDiagnostics(token);
+      expect(diagnostics[0]).toMatchObject({ status: 400, willRetry: true });
+      expect(String(diagnostics[0].message)).toMatch(/rejected parameter\(s\) thinking/);
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      picky.close();
+    }
+  });
+
+  it("passes through unrelated 400s untouched instead of retrying", async () => {
+    let hits = 0;
+    const strict = http.createServer((req, res) => {
+      req.resume();
+      hits += 1;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: 400, title: "Validation", detail: "messages must not be empty" }));
+    });
+    await new Promise<void>((resolve) => strict.listen(0, "127.0.0.1", resolve));
+    const strictUrl = `http://127.0.0.1:${(strict.address() as AddressInfo).port}`;
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: strictUrl,
+        realApiKey: REAL_API_KEY,
+        ttlMs: 30_000
+      });
+      const response = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [] })
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ detail: "messages must not be empty" });
+      expect(hits).toBe(1);
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      strict.close();
+    }
+  });
+
+  it("gives up on a persistent 429 after the retry budget and returns the rate-limit response", async () => {
+    let hits = 0;
+    const limited = http.createServer((req, res) => {
+      req.resume();
+      hits += 1;
+      res.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
+      res.end(JSON.stringify({ status: 429, title: "Too Many Requests" }));
+    });
+    await new Promise<void>((resolve) => limited.listen(0, "127.0.0.1", resolve));
+    const limitedUrl = `http://127.0.0.1:${(limited.address() as AddressInfo).port}`;
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: limitedUrl,
+        realApiKey: REAL_API_KEY,
+        ttlMs: 30_000
+      });
+      const response = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ hello: "world" })
+      });
+      expect(response.status).toBe(429);
+      // Initial attempt + 3 retries.
+      expect(hits).toBe(4);
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      limited.close();
+    }
+  });
+
   it("adds CORS headers to proxied and error responses so page-context fetches can read them", async () => {
     await ensureUpstream();
     receivedHeaders = [];
@@ -140,6 +288,49 @@ describe("browserTaskProxy", () => {
     });
     expect(unauthorizedResponse.status).toBe(401);
     expect(unauthorizedResponse.headers.get("access-control-allow-origin")).toBe("https://dev425223.service-now.com");
+  });
+});
+
+describe("circuitFailureFromDiagnostics", () => {
+  const base = { attempt: 1, timestamp: "2026-07-11T00:00:00.000Z", method: "POST", path: "/chat/completions", latencyMs: 100 };
+
+  it("does not open the circuit for 429s the proxy is still retrying", () => {
+    const diagnostics = [
+      { ...base, status: 429, outcome: "upstream_error" as const, willRetry: true },
+      { ...base, status: 429, outcome: "upstream_error" as const, willRetry: true },
+      { ...base, status: 429, outcome: "upstream_error" as const, willRetry: true }
+    ];
+    expect(circuitFailureFromDiagnostics(diagnostics)).toBeUndefined();
+  });
+
+  it("still opens the circuit for terminal consecutive transient failures", () => {
+    const diagnostics = [
+      { ...base, status: 429, outcome: "upstream_error" as const },
+      { ...base, status: 503, outcome: "upstream_error" as const },
+      { ...base, status: 429, outcome: "upstream_error" as const }
+    ];
+    expect(circuitFailureFromDiagnostics(diagnostics)?.reason).toMatch(/3 consecutive attempts/);
+  });
+
+  it("skips in-flight retries but counts the terminal failures around them", () => {
+    const diagnostics = [
+      { ...base, status: 429, outcome: "upstream_error" as const },
+      { ...base, status: 429, outcome: "upstream_error" as const, willRetry: true },
+      { ...base, status: 429, outcome: "upstream_error" as const },
+      { ...base, status: 429, outcome: "upstream_error" as const, willRetry: true },
+      { ...base, status: 429, outcome: "upstream_error" as const }
+    ];
+    expect(circuitFailureFromDiagnostics(diagnostics)?.reason).toMatch(/3 consecutive attempts/);
+  });
+
+  it("resets at the most recent success", () => {
+    const diagnostics = [
+      { ...base, status: 429, outcome: "upstream_error" as const },
+      { ...base, status: 429, outcome: "upstream_error" as const },
+      { ...base, status: 200, outcome: "success" as const },
+      { ...base, status: 429, outcome: "upstream_error" as const }
+    ];
+    expect(circuitFailureFromDiagnostics(diagnostics)).toBeUndefined();
   });
 });
 
@@ -201,11 +392,64 @@ describe("runBrowserTask", () => {
     expect(result.success).toBe(true);
     expect(result.data).toBe("Done.");
     expect(result.stepCount).toBe(2);
+    expect(result.browserTaskModel).toMatchObject({
+      model: "gpt-4.1",
+      endpoint: "https://api.openai.com/v1",
+      maxSteps: 100,
+      timeoutMs: 4_200_000,
+      stepDelayMs: 35_000
+    });
+    expect(result.proxyDiagnostics).toEqual([]);
     expect(scripts.length).toBeGreaterThan(0);
     expect(scripts.some((script) => script.includes("maxSteps: 100"))).toBe(true);
     expect(scripts.some((script) => script.includes("stepDelay: 35"))).toBe(true);
     for (const script of scripts) {
       expect(script.includes(REAL_API_KEY)).toBe(false);
+    }
+  });
+
+  it("opens a model circuit after an unavailable endpoint response and blocks immediate retries", async () => {
+    const unavailable = http.createServer((_req, res) => {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "model not found" }));
+    });
+    await new Promise<void>((resolve) => unavailable.listen(0, "127.0.0.1", resolve));
+    const address = unavailable.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const first = createFakeContents(async (script) => {
+      const baseMatch = script.match(/baseURL: ("[^"]+")/);
+      const tokenMatch = script.match(/apiKey: ("[^"]+")/);
+      if (!baseMatch || !tokenMatch) {
+        return false;
+      }
+      await fetch(`${JSON.parse(baseMatch[1])}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${JSON.parse(tokenMatch[1])}`, "content-type": "application/json" },
+        body: "{}"
+      });
+      return { ok: false, error: "HTTP 404" };
+    });
+
+    try {
+      const firstResult = await runBrowserTask(
+        first.contents,
+        { instruction: "test unavailable model" },
+        { baseUrl, model: "missing-model" }
+      );
+      expect(firstResult).toMatchObject({ success: false, stopped: true, stopReason: "infrastructure" });
+      expect(firstResult.proxyDiagnostics).toMatchObject([{ status: 404, outcome: "upstream_error", attempt: 1 }]);
+
+      const second = createFakeContents(() => ({ ok: true, success: true, data: "should not run" }));
+      const secondResult = await runBrowserTask(
+        second.contents,
+        { instruction: "retry unavailable model" },
+        { baseUrl, model: "missing-model" }
+      );
+      expect(secondResult).toMatchObject({ success: false, stopped: true, stopReason: "infrastructure", durationMs: 0 });
+      expect(second.scripts).toHaveLength(0);
+    } finally {
+      await new Promise<void>((resolve) => unavailable.close(() => resolve()));
     }
   });
 
@@ -363,6 +607,9 @@ describe("runBrowserTask", () => {
     expect(mainScript).toContain('["shop.example.com"]');
     expect(mainScript).toContain("arivuOnBeforeStep");
     expect(mainScript).toContain("enableMask: true");
+    expect(mainScript).toContain("new lib.Panel(core, { promptForNextTask: false })");
+    expect(mainScript).toContain('setAttribute("aria-label", "Browser agent activity")');
+    expect(mainScript).toContain("activityPanel.expand()");
   });
 
   it("disables the action mask in background mode", async () => {
@@ -379,7 +626,9 @@ describe("runBrowserTask", () => {
       { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
     );
 
-    expect(mainScriptFrom(scripts)).toContain("enableMask: false");
+    const mainScript = mainScriptFrom(scripts);
+    expect(mainScript).toContain("enableMask: false");
+    expect(mainScript).toContain("if (false)");
   });
 
   it("wires the in-page agent with instructions, content capping, reflection backfill and retry budget", async () => {
@@ -668,12 +917,36 @@ describe("runBrowserTask", () => {
     expect(String(result.data).length).toBeLessThanOrEqual(16_020);
     expect(result.stepCount).toBe(0);
     expect(Array.isArray(result.trace)).toBe(true);
-    expect((result.trace as string[]).length).toBeLessThanOrEqual(30);
+    expect((result.trace as string[]).length).toBeLessThanOrEqual(200);
     for (const entry of result.trace as string[]) {
       expect(typeof entry).toBe("string");
-      expect(entry.length).toBeLessThanOrEqual(320);
+      expect(entry.length).toBeLessThanOrEqual(140);
     }
     expect(result.tokensUsed).toBeUndefined();
+  });
+
+  it("guards engine load and mask construction so page restrictions cannot kill the task opaquely", async () => {
+    const { contents, scripts } = createFakeContents((script) => {
+      if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+        return true;
+      }
+      return { ok: true, success: true, data: "Done.", stepCount: 1 };
+    });
+
+    await runBrowserTask(
+      contents,
+      { instruction: "fill out the form", visible: true },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    const mainScript = mainScriptFrom(scripts);
+    // Bundle eval is idempotent and reports the real error instead of Electron's opaque
+    // "Script failed to execute".
+    expect(mainScript).toContain("if (!window.__ArivuPageAgentLib) {");
+    expect(mainScript).toContain("The browser task engine failed to load: ");
+    // The cosmetic mask falls back to maskless instead of throwing (Trusted Types pages).
+    expect(mainScript).toContain("enableMask: true");
+    expect(mainScript).toContain("pageController = new lib.PageController({ enableMask: false });");
   });
 
   it("generates an injected script that parses as valid JavaScript", async () => {

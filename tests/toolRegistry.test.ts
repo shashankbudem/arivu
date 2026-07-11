@@ -204,6 +204,22 @@ describe("createToolRegistry", () => {
     );
   });
 
+  it("rejects incompatible browser_task mode and tab targets before execution", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    await expect(registry.execute("browser_task", { instruction: "do something", mode: "visible", tabId: "background" })).resolves.toMatch(
+      /cannot use tabId "background" in visible mode/
+    );
+    await expect(
+      registry.execute("browser_task", { instruction: "do something", mode: "background", tabId: "visible-tab-1" })
+    ).resolves.toMatch(/cannot target a visible tab id in background mode/);
+  });
+
   it("forwards an aborted run signal into browser_task", async () => {
     const controller = new AbortController();
     controller.abort();

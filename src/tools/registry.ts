@@ -682,7 +682,7 @@ export function createToolRegistry(context: ToolContext) {
       schema: {
         name: "browser_task",
         description:
-          "Use it when you need to click, scroll, type, select, or focus elements on the page (including inside same-origin iframes), or execute JavaScript (opt-in via allowJavaScript). Delegates to an autonomous in-page agent that observes and acts on Arivu's isolated browser until done, instead of you driving snapshot/click/type rounds yourself. Best for single-page or short navigation tasks; it cannot open OS file dialogs, follow links that open a new tab, or answer follow-up questions mid-task. The result carries the task's success flag, its data answer, a step-by-step trace of what the in-page agent did, the final url/title, and a snapshotAfter indexed page snapshot — read trace and snapshotAfter to confirm the outcome instead of firing a separate browser_screenshot, which you only need when you require the actual pixels. On failure, read the trace to see where it went wrong before re-running with a clearer instruction; do not re-run zero-step infrastructure failures.",
+          "Use it when you need to click, scroll, type, select, or focus elements on the page (including inside same-origin iframes), or execute JavaScript (opt-in via allowJavaScript). Delegates to an autonomous in-page agent that observes and acts on Arivu's isolated browser until done, instead of you driving snapshot/click/type rounds yourself. Best for single-page or short navigation tasks; it cannot open OS file dialogs, follow links that open a new tab, or answer follow-up questions mid-task. The result carries the task's success flag, its data answer, a step-by-step trace of what the in-page agent did, the final url/title, and a snapshotAfter indexed page snapshot — read trace and snapshotAfter to confirm the outcome instead of firing a separate browser_screenshot, which you only need when you require the actual pixels. On failure, read the trace (and proxyDiagnostics) to see where it went wrong before re-running with a clearer instruction. Provider rate limits and rejected request parameters are already retried automatically inside the tool — never re-run to work around them — and stopReason \"infrastructure\" means the model endpoint itself is failing and retries are paused: report it to the user or switch the browser-task model instead of re-running.",
         parameters: objectSchema({
           instruction: { type: "string", description: "Natural-language description of the task to complete on the current page." },
           mode: {
@@ -695,7 +695,7 @@ export function createToolRegistry(context: ToolContext) {
           timeoutMs: {
             type: "number",
             description:
-              "Wall-clock budget in milliseconds, from 5000 to 14400000. Defaults to 4200000. The browser agent waits 35 seconds between loops, so use a smaller budget for short tasks and a larger one for long workflows."
+              "Wall-clock budget in milliseconds, from 5000 to 14400000. Defaults to 4200000 (a ceiling, not an expected wait). Use a smaller budget for short tasks; slow model providers can take minutes per loop, so keep a generous budget for long workflows."
           },
           allowedDomains: {
             type: "array",
@@ -731,6 +731,12 @@ export function createToolRegistry(context: ToolContext) {
           throw new Error("browser_task has no model configured for this run.");
         }
         const mode = browserActionMode(browser, parsed.mode);
+        if (mode === "visible" && parsed.tabId === "background") {
+          throw new Error('browser_task cannot use tabId "background" in visible mode. Omit tabId to use the active visible tab.');
+        }
+        if (mode === "background" && parsed.tabId && parsed.tabId !== "background") {
+          throw new Error("browser_task cannot target a visible tab id in background mode. Omit tabId or switch to visible mode.");
+        }
         await context.approvals.require({
           type: "browser",
           action: "task",

@@ -230,6 +230,36 @@ const AgentTaskRunArtifactSchema = z.object({
   reportPaths: z.array(z.string()).optional(),
   testReports: z.array(AgentTaskRunTestReportSchema).optional(),
   diagnostics: z.array(AgentTaskRunDiagnosticSchema).optional(),
+  browserTask: z
+    .object({
+      success: z.boolean(),
+      model: z.string().optional(),
+      providerId: z.string().optional(),
+      providerName: z.string().optional(),
+      endpoint: z.string().optional(),
+      maxSteps: z.number().int().min(0).optional(),
+      timeoutMs: z.number().int().min(0).optional(),
+      stepDelayMs: z.number().int().min(0).optional(),
+      stepCount: z.number().int().min(0),
+      stopReason: z.string().optional(),
+      navigationCount: z.number().int().min(0).optional(),
+      tokensUsed: z.number().int().min(0).optional(),
+      proxyDiagnostics: z
+        .array(
+          z.object({
+            attempt: z.number().int().min(1),
+            timestamp: z.string(),
+            method: z.string(),
+            path: z.string(),
+            status: z.number().int(),
+            latencyMs: z.number().int().min(0),
+            outcome: z.string(),
+            message: z.string().optional()
+          })
+        )
+        .optional()
+    })
+    .optional(),
   toolCallId: z.string().optional(),
   createdAt: z.string()
 });
@@ -671,8 +701,25 @@ function compareSessionsForList(left: AgentSession, right: AgentSession) {
   return right.updatedAt.localeCompare(left.updatedAt);
 }
 
+const SESSION_STORE_PROCESS_STARTED_AT = Date.now();
+
 function normalizeTaskRunUserMessageIndexes(session: AgentSession) {
   for (const run of session.taskRuns ?? []) {
+    // A run cannot survive an app process restart. Older versions left these records as
+    // "running" forever, which made historical browser tasks look active in the audit UI.
+    if (run.status === "running" && Date.parse(run.updatedAt) < SESSION_STORE_PROCESS_STARTED_AT) {
+      const interruptedAt = new Date(SESSION_STORE_PROCESS_STARTED_AT).toISOString();
+      run.status = "failed";
+      run.completedAt = interruptedAt;
+      run.updatedAt = interruptedAt;
+      run.error ||= "This task was interrupted when Arivu closed or restarted.";
+      for (const tool of run.tools) {
+        if (tool.status === "running") {
+          tool.status = "failed";
+          tool.completedAt = interruptedAt;
+        }
+      }
+    }
     const current = session.messages[run.userMessageIndex];
     if (current?.role === "user" && taskRunMatchesUserMessage(run.promptPreview, current.content)) {
       continue;

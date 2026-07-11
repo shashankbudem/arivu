@@ -16,13 +16,23 @@ type OpenAICompatibleConfig = Pick<AppConfig, "apiKey" | "baseUrl" | "model" | "
   Partial<Pick<AppConfig, "toolCalling" | "imageInput" | "tavilyApiKey" | "mcpServers" | "requestTimeoutMs">> & {
     onCapabilityObservation?: (observation: ProviderCapabilityObservation) => void | Promise<void>;
     maxRequestRetries?: number;
+    maxRateLimitRetries?: number;
   };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_REQUEST_RETRIES = 2;
+// Rate limits (429) are transient and the server tells us exactly when capacity returns, so they
+// get their own, more generous retry budget than generic 5xx/timeout errors — a rate-limit blip
+// mid-run shouldn't discard minutes of work, but a genuinely broken upstream should still fail fast.
+const DEFAULT_MAX_RATE_LIMIT_RETRIES = 5;
+const RATE_LIMIT_STATUS = 429;
 const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const BASE_RETRY_DELAY_MS = 500;
 const MAX_RETRY_DELAY_MS = 8_000;
+// Our own exponential backoff is capped at MAX_RETRY_DELAY_MS, but a server-directed Retry-After is
+// an explicit "capacity returns at T" — retrying before then just re-hits the limit and wastes an
+// attempt — so we honor it up to a much higher ceiling.
+const MAX_RETRY_AFTER_MS = 60_000;
 
 export type ProviderCapabilityObservation = {
   capability: "toolCalling" | "imageInput";
@@ -325,9 +335,13 @@ export class OpenAICompatibleChatClient implements ChatClient {
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const payload = JSON.stringify(body);
     const maxRetries = Math.max(0, this.config.maxRequestRetries ?? DEFAULT_MAX_REQUEST_RETRIES);
+    const maxRateLimitRetries = Math.max(maxRetries, this.config.maxRateLimitRetries ?? DEFAULT_MAX_RATE_LIMIT_RETRIES);
     const timeoutMs = this.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
+    // Rate-limit retries are counted separately so a 429 storm doesn't consume the (smaller) budget
+    // reserved for genuine transient failures, and vice versa.
     let attempt = 0;
+    let rateLimitAttempt = 0;
     for (;;) {
       throwIfAborted(signal);
       const attemptController = new AbortController();
@@ -367,14 +381,25 @@ export class OpenAICompatibleChatClient implements ChatClient {
 
       // Read the error body once; the fallback path and the thrown error both reuse it.
       const errorBody = await response.text().catch(() => "");
-      const retryable = RETRYABLE_STATUS_CODES.has(response.status) && !isFallbackError(response.status, errorBody);
-      if (!retryable || attempt >= maxRetries) {
+      if (!RETRYABLE_STATUS_CODES.has(response.status) || isFallbackError(response.status, errorBody)) {
         return { response, errorBody };
       }
 
-      const retryAfterMs = retryAfterFromHeaders(response.headers) ?? retryDelayMs(attempt);
+      // 429s draw from their own larger budget; everything else uses the generic retry budget.
+      const isRateLimit = response.status === RATE_LIMIT_STATUS;
+      const usedAttempts = isRateLimit ? rateLimitAttempt : attempt;
+      const budget = isRateLimit ? maxRateLimitRetries : maxRetries;
+      if (usedAttempts >= budget) {
+        return { response, errorBody };
+      }
+
+      const retryAfterMs = retryAfterFromHeaders(response.headers) ?? retryDelayMs(usedAttempts);
       await delay(retryAfterMs, signal);
-      attempt += 1;
+      if (isRateLimit) {
+        rateLimitAttempt += 1;
+      } else {
+        attempt += 1;
+      }
     }
   }
 
@@ -773,21 +798,25 @@ function linkAbortSignal(source: AbortSignal | undefined, target: AbortControlle
 }
 
 function retryDelayMs(attempt: number) {
-  return Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * 2 ** attempt);
+  const capped = Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * 2 ** attempt);
+  // Full jitter (AWS-style): wait between half and all of the capped backoff, so several clients
+  // sharing one API key (e.g. the main agent and an in-page browser task) don't retry in lockstep
+  // and immediately re-trip the same rate limit.
+  return Math.round(capped / 2 + Math.random() * (capped / 2));
 }
 
-function retryAfterFromHeaders(headers: Headers): number | undefined {
+export function retryAfterFromHeaders(headers: Headers): number | undefined {
   const value = headers.get("retry-after");
   if (!value) {
     return undefined;
   }
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.min(MAX_RETRY_DELAY_MS, seconds * 1_000);
+    return Math.min(MAX_RETRY_AFTER_MS, seconds * 1_000);
   }
   const dateMs = Date.parse(value);
   if (!Number.isNaN(dateMs)) {
-    return Math.max(0, Math.min(MAX_RETRY_DELAY_MS, dateMs - Date.now()));
+    return Math.max(0, Math.min(MAX_RETRY_AFTER_MS, dateMs - Date.now()));
   }
   return undefined;
 }

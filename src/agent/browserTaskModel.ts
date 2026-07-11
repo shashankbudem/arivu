@@ -11,18 +11,31 @@ import { providerCandidatesFromConfig, type ModelSelection } from "./modelRouter
 export function resolveBrowserTaskModel(config: AppConfig, fallback: ModelSelection): BrowserTaskModelConfig {
   const override = config.browserTaskModel;
   if (!override) {
-    return { baseUrl: fallback.baseUrl, model: fallback.model, apiKey: fallback.apiKey };
+    return {
+      baseUrl: fallback.baseUrl,
+      model: fallback.model,
+      apiKey: fallback.apiKey,
+      providerId: fallback.providerId,
+      providerName: fallback.providerName
+    };
   }
 
   const provider = override.providerId
     ? providerCandidatesFromConfig(config).find((candidate) => candidate.id === override.providerId)
     : undefined;
+  if (override.providerId && !provider) {
+    throw new Error(
+      `browser_task references unknown provider "${override.providerId}". Choose a configured provider or remove providerId.`
+    );
+  }
   const base = provider ?? fallback;
 
   return {
     baseUrl: override.baseUrl ?? base.baseUrl,
     model: override.model ?? base.model,
     apiKey: override.apiKey ?? base.apiKey,
+    providerId: provider?.id ?? fallback.providerId,
+    providerName: provider?.name ?? fallback.providerName,
     maxSteps: override.maxSteps,
     stepDelayMs: override.stepDelayMs
   };
