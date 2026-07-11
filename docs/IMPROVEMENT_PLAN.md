@@ -99,7 +99,7 @@ Plan:
 
 ### 6. Loop hygiene
 
-- `MAX_STEPS = 20` (`Agent.ts:12`) ends with a dead-end "Stopped after reaching the maximum tool-call depth." — offer continuation (desktop button / TUI command) that resumes with `Agent.continue()`.
+- `MAX_STEPS = 500` (`Agent.ts:12`) now supports long autonomous runs and ends with "Stopped after reaching the maximum tool-call depth." when exhausted. The continuation path remains available through `Agent.continue()`; a dedicated desktop/TUI continuation control can still make that recovery more discoverable.
 - The system-prompt migration block (`Agent.ts:89-115`) patches saved sessions' system message by appending sentences and will accrete forever. Replace with a versioned system prompt rebuilt (not patched) per run; keep saved-session compatibility.
 - `shouldRefreshBrowserEvidence` (`Agent.ts:388`) fires on generic words like "done"/"instance"/"login" and silently spends synthetic browser tool calls. Make it cheaper to be wrong (skip on failure, cap frequency per session) or replace the synthetic calls with a transient hint that lets the model decide.
 

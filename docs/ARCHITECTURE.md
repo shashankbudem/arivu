@@ -77,7 +77,7 @@ The agent creates a tool registry for the detected workspace, discovers global l
 
 User message content can be plain text or multimodal content parts. Text parts and image parts are saved in sessions; image parts use OpenAI-compatible `image_url` payloads and may also retain local display metadata such as filename, MIME type, and byte size. Text-only surfaces such as TUI history, session titles, fallback transcripts, and local compaction use `chatContentToText()` to flatten images into readable placeholders.
 
-The loop has a fixed max depth of 20 tool-call turns. This is a guardrail against runaway tool loops.
+The loop has a fixed max depth of 500 tool-call turns. This permits long autonomous workflows while cancellation, context compaction, one-search-per-request enforcement, and the visible continuation message remain safeguards against runaway or oversized runs. A turn can contain multiple tool calls, so the number of individual tool executions can be higher than 500.
 
 Skills are stored outside workspaces under the app data directory's `skills/` folder, or under `ARIVU_SKILLS_HOME` when set. The desktop composer can queue skills from the prompt `+` menu or `/skills`; queued skill names are sent with the prompt payload, and the agent saves each selected `SKILL.md` as a hidden `Skill loaded into chat` system message so it remains in that chat's context. If a user explicitly names `$skill-name`, the agent attaches that skill's `SKILL.md` as a transient system message before that model turn. For inferred skill use, the model sees the global skill index and can call `read_skill`.
 

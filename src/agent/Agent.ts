@@ -12,7 +12,7 @@ import { AgentRunAbortedError } from "./types.js";
 import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCall } from "./types.js";
 import type { AppConfig } from "../config.js";
 
-const MAX_STEPS = 20;
+const MAX_STEPS = 500;
 const SYSTEM_PROMPT_VERSION = 2;
 const SYSTEM_PROMPT_SIGNATURE = "You are Arivu";
 const WEB_SEARCH_TOOL = "web_search";

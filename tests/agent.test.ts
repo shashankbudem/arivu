@@ -1054,7 +1054,7 @@ describe("agent", () => {
 
   it("saves a visible assistant message when max tool depth is reached", async () => {
     const client = new ScriptedClient(
-      Array.from({ length: 20 }, (_entry, index) => ({
+      Array.from({ length: 500 }, (_entry, index) => ({
         message: {
           role: "assistant",
           content: "",
@@ -1072,6 +1072,7 @@ describe("agent", () => {
     const lastMessage = result.session.messages.at(-1);
 
     expect(result.output).toContain("Stopped after reaching the maximum tool-call depth");
+    expect(result.output).toContain("500 steps");
     expect(result.output).toContain("Continue to resume");
     expect(lastMessage).toEqual({ role: "assistant", content: result.output });
   });
