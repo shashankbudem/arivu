@@ -264,7 +264,24 @@ export class Agent {
         if (!toolCalls || toolCalls.length === 0) {
           const output = chatContentToText(message.content);
           if (output.trim().length === 0) {
-            throw new Error("Model returned an empty assistant response without tool calls.");
+            // Distinguish the two very different causes of an empty turn so the failure is
+            // actionable: (a) the model DID call tools, but every one was filtered out because it
+            // isn't available this step (disabled tool, hallucinated name, or web_search withheld
+            // after a search) — nothing could run; versus (b) the provider genuinely returned no
+            // content and no tool calls (a provider hiccup or a model that stopped early).
+            const requestedCalls = response.message.toolCalls ?? [];
+            if (requestedCalls.length > 0) {
+              const availableNames = new Set(availableTools.map((tool) => tool.name));
+              const droppedNames = [...new Set(requestedCalls.map((call) => call.name).filter((name) => !availableNames.has(name)))];
+              throw new Error(
+                `Model returned an empty assistant response: it only called tools that are not available this turn (${droppedNames.join(
+                  ", "
+                )}), so nothing ran. Those tools are disabled or were withheld for this step — ask the model to use an available tool or answer directly.`
+              );
+            }
+            throw new Error(
+              "Model returned an empty assistant response: the provider returned no content and no tool calls. This is usually a provider-side hiccup or a model that stopped early — retry, and check the API request log to see the raw response."
+            );
           }
           // Only treat the pattern as mimicry when the model truly emitted no native tool
           // calls; a response whose calls were merely filtered out as disallowed is not one.

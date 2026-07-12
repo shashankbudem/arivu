@@ -617,6 +617,8 @@ export function App() {
   const [skillsPopoverOpen, setSkillsPopoverOpen] = useState(false);
   const [composerOptionsOpen, setComposerOptionsOpen] = useState(false);
   const [browserTaskModelPickerOpen, setBrowserTaskModelPickerOpen] = useState(false);
+  const [apiRequestLog, setApiRequestLog] = useState<ApiRequestLogEntry[]>([]);
+  const [apiLogOpen, setApiLogOpen] = useState(false);
   const [settingsFocus, setSettingsFocus] = useState<SettingsFocus>(null);
   const [selectedSlashCommandIndex, setSelectedSlashCommandIndex] = useState(0);
   const [commandOutput, setCommandOutput] = useState<CommandOutput | null>(null);
@@ -661,6 +663,10 @@ export function App() {
     void loadTools();
     void loadSkills();
     void loadBrowserState();
+    void loadApiRequestLog();
+    const stopApiLog = window.arivu.onApiRequestLog((entry) => {
+      setApiRequestLog((current) => [entry, ...current].slice(0, 50));
+    });
     const stopApprovals = window.arivu.onApprovalRequest((payload) => {
       setApproval(payload);
       setStatus("Approval required");
@@ -675,6 +681,7 @@ export function App() {
       applyBrowserState(payload);
     });
     return () => {
+      stopApiLog();
       stopApprovals();
       stopAgentEvents();
       stopSessionEvents();
@@ -1891,6 +1898,30 @@ export function App() {
     setToolsPopoverOpen(false);
     setSkillsPopoverOpen(false);
     setBrowserTaskModelPickerOpen(true);
+  }
+
+  async function loadApiRequestLog() {
+    try {
+      setApiRequestLog(await window.arivu.getApiRequestLog());
+    } catch {
+      // A missing log is non-fatal; the panel just shows empty.
+    }
+  }
+
+  async function clearApiRequestLogEntries() {
+    try {
+      await window.arivu.clearApiRequestLog();
+      setApiRequestLog([]);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  function openApiLog() {
+    setComposerOptionsOpen(false);
+    setToolsPopoverOpen(false);
+    setSkillsPopoverOpen(false);
+    setApiLogOpen(true);
   }
 
   async function applyBrowserTaskModel(model: string) {
@@ -3191,6 +3222,8 @@ export function App() {
                             onOpenSkillsSettings={openSkillsSettings}
                             browserTaskModelLabel={modelDisplayName(browserTaskPickerContext().currentModel)}
                             onOpenBrowserTaskModel={openBrowserTaskModelPicker}
+                            apiLogCount={apiRequestLog.length}
+                            onOpenApiLog={openApiLog}
                           />
                         ) : null}
                       </div>
@@ -3467,6 +3500,13 @@ export function App() {
           onClose={() => setBrowserTaskModelPickerOpen(false)}
         />
       ) : null}
+      {apiLogOpen ? (
+        <ApiRequestLogPanel
+          entries={apiRequestLog}
+          onClear={() => void clearApiRequestLogEntries()}
+          onClose={() => setApiLogOpen(false)}
+        />
+      ) : null}
       {state &&
       !onboardingDismissed &&
       !state.config.apiKeyPresent &&
@@ -3649,7 +3689,9 @@ function ComposerOptionsMenu({
   onOpenSettings,
   onOpenSkillsSettings,
   browserTaskModelLabel,
-  onOpenBrowserTaskModel
+  onOpenBrowserTaskModel,
+  apiLogCount,
+  onOpenApiLog
 }: {
   state: DesktopState;
   busy: boolean;
@@ -3672,6 +3714,8 @@ function ComposerOptionsMenu({
   onOpenSkillsSettings: () => void;
   browserTaskModelLabel: string;
   onOpenBrowserTaskModel: () => void;
+  apiLogCount: number;
+  onOpenApiLog: () => void;
 }) {
   return (
     <div className="composer-options-menu" role="menu" aria-label="Prompt options">
@@ -3755,6 +3799,13 @@ function ComposerOptionsMenu({
           Add skill
         </span>
         <span>{skillCount} installed</span>
+      </button>
+      <button className="composer-option-row composer-option-action" type="button" onClick={onOpenApiLog}>
+        <span className="composer-option-label">
+          <Activity size={15} />
+          API log
+        </span>
+        <span>{apiLogCount} recent</span>
       </button>
       <button className="composer-option-row composer-option-action" type="button" onClick={onOpenSettings}>
         <span className="composer-option-label">
@@ -4302,6 +4353,134 @@ function ModelSwitcher({
       ) : null}
     </div>
   );
+}
+
+function ApiRequestLogPanel({
+  entries,
+  onClear,
+  onClose
+}: {
+  entries: ApiRequestLogEntry[];
+  onClear: () => void;
+  onClose: () => void;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="model-dialog api-log-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="API request log"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="api-log-header">
+          <div className="api-log-header-title">
+            <Activity size={18} />
+            <div>
+              <h2>API requests</h2>
+              <p className="api-log-subtitle">
+                Last {entries.length} model calls, newest first. Metadata + bodies; API key redacted; in-memory only.
+              </p>
+            </div>
+          </div>
+          <div className="api-log-header-actions">
+            <button type="button" className="secondary-command" onClick={onClear} disabled={entries.length === 0}>
+              Clear
+            </button>
+            <button type="button" className="secondary-command" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </div>
+        {entries.length === 0 ? (
+          <p className="api-log-empty">No model calls recorded yet. Send a prompt and they will appear here.</p>
+        ) : (
+          <ul className="api-log-list">
+            {entries.map((entry) => {
+              const expanded = expandedId === entry.id;
+              return (
+                <li key={entry.id} className={`api-log-entry api-log-outcome-${entry.outcome}`}>
+                  <button
+                    type="button"
+                    className="api-log-entry-summary"
+                    onClick={() => setExpandedId(expanded ? null : entry.id)}
+                    aria-expanded={expanded}
+                  >
+                    <span className="api-log-time">{formatApiLogTime(entry.at)}</span>
+                    <span className="api-log-model">{entry.model}</span>
+                    <span className="api-log-status">{entry.status ?? "—"}</span>
+                    <span className="api-log-duration">{(entry.durationMs / 1000).toFixed(1)}s</span>
+                    {entry.retries > 0 ? <span className="api-log-retries">↻{entry.retries}</span> : null}
+                    <span className={`api-log-badge api-log-badge-${entry.outcome}`}>{apiLogOutcomeLabel(entry)}</span>
+                  </button>
+                  {expanded ? (
+                    <div className="api-log-detail">
+                      <ApiLogRow label="Outcome" value={entry.outcome} />
+                      <ApiLogRow label="Finish reason" value={entry.finishReason ?? "—"} />
+                      <ApiLogRow label="Streamed" value={entry.streamed ? "yes" : "no"} />
+                      <ApiLogRow label="Content" value={`${entry.contentChars} chars`} />
+                      <ApiLogRow label="Tools offered" value={entry.toolsOffered.length ? `${entry.toolsOffered.length}` : "none"} />
+                      <ApiLogRow label="Tool calls" value={entry.toolCalls.length ? entry.toolCalls.join(", ") : "none"} />
+                      {entry.droppedToolCalls.length ? (
+                        <ApiLogRow label="Dropped (unavailable)" value={entry.droppedToolCalls.join(", ")} highlight />
+                      ) : null}
+                      {entry.usage?.totalTokens !== undefined ? <ApiLogRow label="Tokens" value={`${entry.usage.totalTokens}`} /> : null}
+                      {entry.error ? <ApiLogRow label="Error" value={entry.error} highlight /> : null}
+                      {entry.requestMessages ? (
+                        <details className="api-log-body">
+                          <summary>Request messages ({entry.requestMessages.length})</summary>
+                          <pre>
+                            {entry.requestMessages
+                              .map((message) => `[${message.role}]${message.toolCalls?.length ? ` calls: ${message.toolCalls.join(", ")}` : ""}\n${message.content}`)
+                              .join("\n\n")}
+                          </pre>
+                        </details>
+                      ) : null}
+                      {entry.responseBody ? (
+                        <details className="api-log-body">
+                          <summary>Response body</summary>
+                          <pre>{entry.responseBody}</pre>
+                        </details>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    </div>,
+    document.body
+  );
+}
+
+function ApiLogRow({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className={highlight ? "api-log-row api-log-row-highlight" : "api-log-row"}>
+      <span className="api-log-row-label">{label}</span>
+      <span className="api-log-row-value">{value}</span>
+    </div>
+  );
+}
+
+function apiLogOutcomeLabel(entry: ApiRequestLogEntry): string {
+  if (entry.outcome === "error") {
+    return "error";
+  }
+  if (entry.outcome === "empty") {
+    return "empty";
+  }
+  return entry.toolCalls.length ? `${entry.toolCalls.length} tool call${entry.toolCalls.length === 1 ? "" : "s"}` : "ok";
+}
+
+function formatApiLogTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString();
+  } catch {
+    return iso;
+  }
 }
 
 function ModelPickerDialog({

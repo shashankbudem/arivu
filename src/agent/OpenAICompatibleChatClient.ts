@@ -17,7 +17,45 @@ type OpenAICompatibleConfig = Pick<AppConfig, "apiKey" | "baseUrl" | "model" | "
     onCapabilityObservation?: (observation: ProviderCapabilityObservation) => void | Promise<void>;
     maxRequestRetries?: number;
     maxRateLimitRetries?: number;
+    /** Invoked once per model call with a redacted diagnostics record (for the API request log). */
+    onRequestLog?: (entry: ApiRequestLogEntry) => void;
+    /** When true, the log entry also carries the (redacted, truncated) request messages and response body. */
+    captureRequestBodies?: boolean;
   };
+
+/**
+ * One model call's diagnostics, as surfaced in the API request log. Never contains the API key
+ * (redacted) or request headers. `outcome: "empty"` is the exact condition the agent rejects with
+ * "empty assistant response" — no content and no tool calls that survive availability filtering.
+ */
+export type ApiRequestLogEntry = {
+  id: string;
+  at: string;
+  model: string;
+  streamed: boolean;
+  status?: number;
+  ok: boolean;
+  outcome: "ok" | "empty" | "error";
+  durationMs: number;
+  retries: number;
+  toolsOffered: string[];
+  toolCalls: string[];
+  /** Tool calls the model made that were NOT offered this turn (the agent filters these out). */
+  droppedToolCalls: string[];
+  contentChars: number;
+  finishReason?: string;
+  usage?: ChatUsage;
+  error?: string;
+  requestMessages?: Array<{ role: string; content: string; toolCalls?: string[] }>;
+  responseBody?: string;
+};
+
+/** Per-call, mutable capture context threaded into fetchWithRetry so logging never races across calls. */
+type RequestCapture = { status?: number; retries: number; finishReason?: string };
+
+const LOG_MESSAGE_CONTENT_MAX = 4_000;
+const LOG_RESPONSE_BODY_MAX = 8_000;
+let apiRequestLogSeq = 0;
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_REQUEST_RETRIES = 2;
@@ -92,6 +130,7 @@ type OpenAIStreamChunk = {
       content?: string | null;
       tool_calls?: OpenAIToolCallDelta[];
     };
+    finish_reason?: string | null;
   }>;
   usage?: OpenAIUsage | null;
 };
@@ -112,10 +151,24 @@ export class OpenAICompatibleChatClient implements ChatClient {
   constructor(private readonly config: OpenAICompatibleConfig) {}
 
   async complete(request: ChatRequest, options?: ChatCallOptions): Promise<ChatResponse> {
-    return this.completeWithMode(request, initialCompletionMode(this.config), options);
+    const startedAt = Date.now();
+    const capture: RequestCapture = { retries: 0 };
+    try {
+      const response = await this.completeWithMode(request, initialCompletionMode(this.config), options, capture);
+      this.emitRequestLog(request, response, capture, startedAt, false);
+      return response;
+    } catch (error) {
+      this.emitRequestLog(request, undefined, capture, startedAt, false, error);
+      throw error;
+    }
   }
 
-  private async completeWithMode(request: ChatRequest, mode: CompletionMode, options?: ChatCallOptions): Promise<ChatResponse> {
+  private async completeWithMode(
+    request: ChatRequest,
+    mode: CompletionMode,
+    options: ChatCallOptions | undefined,
+    capture: RequestCapture
+  ): Promise<ChatResponse> {
     if (!this.config.apiKey) {
       throw new Error("Missing ARIVU_API_KEY, legacy SHANKINSTER_API_KEY, or saved apiKey config.");
     }
@@ -124,14 +177,15 @@ export class OpenAICompatibleChatClient implements ChatClient {
     const { response, errorBody } = await this.fetchWithRetry(
       toOpenAIRequestBody(this.config.model, request, false, mode),
       options?.signal,
-      (status, body) => this.isFallbackError(request, mode, status, body)
+      (status, body) => this.isFallbackError(request, mode, status, body),
+      capture
     );
 
     if (!response.ok) {
       const body = errorBody ?? (await response.text());
       if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(response.status, body, request)) {
         await this.observeCapability("toolCalling", response.status, body);
-        return this.completeWithMode(request, "markdown", options);
+        return this.completeWithMode(request, "markdown", options, capture);
       }
       if (this.config.imageInput !== "enabled" && shouldPersistImageInputUnsupported(response.status, body, request)) {
         await this.observeCapability("imageInput", response.status, body);
@@ -142,6 +196,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
     const json = (await response.json()) as {
       choices?: Array<{
         message?: OpenAIMessage;
+        finish_reason?: string | null;
       }>;
       usage?: OpenAIUsage | null;
     };
@@ -149,6 +204,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
     if (!message) {
       throw new Error("Model response did not include a message.");
     }
+    capture.finishReason = json.choices?.[0]?.finish_reason ?? capture.finishReason;
 
     // Some providers return the model's tool-call syntax unparsed inside content; recover it
     // into native tool calls so the agent can execute instead of ending the run on prose.
@@ -164,6 +220,24 @@ export class OpenAICompatibleChatClient implements ChatClient {
   }
 
   async stream(request: ChatRequest, onEvent?: ChatStreamHandler, options?: ChatCallOptions): Promise<ChatResponse> {
+    const startedAt = Date.now();
+    const capture: RequestCapture = { retries: 0 };
+    try {
+      const response = await this.streamImpl(request, onEvent, options, capture);
+      this.emitRequestLog(request, response, capture, startedAt, true);
+      return response;
+    } catch (error) {
+      this.emitRequestLog(request, undefined, capture, startedAt, true, error);
+      throw error;
+    }
+  }
+
+  private async streamImpl(
+    request: ChatRequest,
+    onEvent: ChatStreamHandler | undefined,
+    options: ChatCallOptions | undefined,
+    capture: RequestCapture
+  ): Promise<ChatResponse> {
     if (!this.config.apiKey) {
       throw new Error("Missing ARIVU_API_KEY, legacy SHANKINSTER_API_KEY, or saved apiKey config.");
     }
@@ -173,20 +247,21 @@ export class OpenAICompatibleChatClient implements ChatClient {
     const { response, errorBody } = await this.fetchWithRetry(
       toOpenAIRequestBody(this.config.model, request, true, mode),
       options?.signal,
-      (status, body) => this.isFallbackError(request, mode, status, body)
+      (status, body) => this.isFallbackError(request, mode, status, body),
+      capture
     );
 
     if (!response.ok) {
       const body = errorBody ?? (await response.text());
       if (mode === "tool_calls" && this.config.toolCalling !== "enabled" && shouldRetryWithoutTools(response.status, body, request)) {
         await this.observeCapability("toolCalling", response.status, body);
-        return this.completeWithMode(request, "markdown", options);
+        return this.completeWithMode(request, "markdown", options, capture);
       }
       if (this.config.imageInput !== "enabled" && shouldPersistImageInputUnsupported(response.status, body, request)) {
         await this.observeCapability("imageInput", response.status, body);
         throw new Error(`Model request failed (${response.status}): ${body}`);
       }
-      return this.completeWithMode(request, mode, options);
+      return this.completeWithMode(request, mode, options, capture);
     }
 
     const contentType = response.headers.get("content-type") ?? "";
@@ -203,11 +278,11 @@ export class OpenAICompatibleChatClient implements ChatClient {
           )
         };
       }
-      return this.complete(request, options);
+      return this.completeWithMode(request, initialCompletionMode(this.config), options, capture);
     }
 
     if (!response.body) {
-      return this.complete(request, options);
+      return this.completeWithMode(request, initialCompletionMode(this.config), options, capture);
     }
 
     const message: ChatMessage = { role: "assistant", content: "" };
@@ -221,6 +296,9 @@ export class OpenAICompatibleChatClient implements ChatClient {
         usage = chunk.usage;
       }
       for (const choice of chunk.choices ?? []) {
+        if (choice.finish_reason) {
+          capture.finishReason = choice.finish_reason;
+        }
         const delta = choice.delta;
         if (!delta) {
           continue;
@@ -290,7 +368,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
       }
     } catch (error) {
       if (!emitted) {
-        return this.complete(request, options);
+        return this.completeWithMode(request, initialCompletionMode(this.config), options, capture);
       }
       throw error;
     }
@@ -330,7 +408,8 @@ export class OpenAICompatibleChatClient implements ChatClient {
     signal: AbortSignal | undefined,
     // Returns true for errors the caller handles itself (tool/markdown/image fallbacks); these are
     // not transient, so we stop retrying and hand the response back for the fallback path.
-    isFallbackError: (status: number, errorBody: string) => boolean
+    isFallbackError: (status: number, errorBody: string) => boolean,
+    capture: RequestCapture
   ): Promise<FetchAttempt> {
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const payload = JSON.stringify(body);
@@ -374,6 +453,10 @@ export class OpenAICompatibleChatClient implements ChatClient {
       }
       clearTimeout(timeout);
       removeLink();
+      // Record the latest attempt's status and how many retries it took, for the request log.
+      // All three return paths below pass through here first, so the log always sees final values.
+      capture.status = response.status;
+      capture.retries = attempt + rateLimitAttempt;
 
       if (response.ok) {
         return { response };
@@ -419,6 +502,95 @@ export class OpenAICompatibleChatClient implements ChatClient {
       detail: compactErrorDetail(body)
     });
   }
+
+  /**
+   * Builds one API-request-log record for a finished model call and hands it to the configured sink.
+   * Defensive: a failure here must never surface as a model-call failure, so everything is wrapped.
+   */
+  private emitRequestLog(
+    request: ChatRequest,
+    response: ChatResponse | undefined,
+    capture: RequestCapture,
+    startedAt: number,
+    streamed: boolean,
+    error?: unknown
+  ): void {
+    const sink = this.config.onRequestLog;
+    if (!sink) {
+      return;
+    }
+    try {
+      const key = this.config.apiKey;
+      const toolsOffered = request.tools.map((tool) => tool.name);
+      const offered = new Set(toolsOffered);
+      const toolCalls = response?.message.toolCalls?.map((call) => call.name) ?? [];
+      const droppedToolCalls = [...new Set(toolCalls.filter((name) => !offered.has(name)))];
+      const survivingToolCalls = toolCalls.filter((name) => offered.has(name));
+      const contentChars = response ? chatContentToText(response.message.content).trim().length : 0;
+      // "empty" mirrors exactly what the agent rejects: no content and no tool call that survives
+      // availability filtering (so a turn that only called unavailable tools reads as empty here too).
+      const outcome: ApiRequestLogEntry["outcome"] = error
+        ? "error"
+        : contentChars === 0 && survivingToolCalls.length === 0
+          ? "empty"
+          : "ok";
+      const entry: ApiRequestLogEntry = {
+        id: `req_${(apiRequestLogSeq += 1)}`,
+        at: new Date().toISOString(),
+        model: this.config.model,
+        streamed,
+        status: capture.status,
+        ok: !error && (capture.status === undefined || capture.status < 400),
+        outcome,
+        durationMs: Date.now() - startedAt,
+        retries: capture.retries,
+        toolsOffered,
+        toolCalls,
+        droppedToolCalls,
+        contentChars,
+        finishReason: capture.finishReason,
+        usage: response?.usage,
+        error: error ? stripApiKey(errorMessageText(error), key) : undefined
+      };
+      if (this.config.captureRequestBodies) {
+        entry.requestMessages = request.messages.map((message) => ({
+          role: message.role,
+          content: truncateForLog(stripApiKey(chatContentToText(message.content), key), LOG_MESSAGE_CONTENT_MAX),
+          toolCalls: message.toolCalls?.map((call) => call.name)
+        }));
+        if (response) {
+          entry.responseBody = truncateForLog(
+            stripApiKey(
+              JSON.stringify({
+                content: chatContentToText(response.message.content),
+                toolCalls: response.message.toolCalls
+              }),
+              key
+            ),
+            LOG_RESPONSE_BODY_MAX
+          );
+        }
+      }
+      sink(entry);
+    } catch {
+      // Diagnostics must never break a real model call.
+    }
+  }
+}
+
+function stripApiKey(text: string, apiKey: string | undefined): string {
+  if (!apiKey || apiKey.length < 8) {
+    return text;
+  }
+  return text.split(apiKey).join("***REDACTED***");
+}
+
+function truncateForLog(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}… (+${text.length - max} more chars)`;
+}
+
+function errorMessageText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 type CompletionMode = "tool_calls" | "markdown";

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OpenAICompatibleChatClient, retryAfterFromHeaders } from "../src/agent/OpenAICompatibleChatClient.js";
+import {
+  OpenAICompatibleChatClient,
+  retryAfterFromHeaders,
+  type ApiRequestLogEntry
+} from "../src/agent/OpenAICompatibleChatClient.js";
 import type { ChatRequest } from "../src/agent/types.js";
 
 describe("OpenAICompatibleChatClient", () => {
@@ -835,6 +839,70 @@ describe("OpenAICompatibleChatClient", () => {
     await expect(client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow("Model request failed (429)");
     // 1 initial attempt + 3 retries.
     expect(calls).toBe(4);
+  });
+
+  it("logs a diagnostics entry that flags a turn calling only unavailable tools as empty", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "",
+              tool_calls: [{ id: "c1", type: "function", function: { name: "browser_snapshot", arguments: "{}" } }]
+            },
+            finish_reason: "tool_calls"
+          }
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 }
+      })
+    );
+
+    const entries: ApiRequestLogEntry[] = [];
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "secret-key-12345678",
+      baseUrl: "https://api.example.test/v1",
+      model: "glm-5.2",
+      trustMode: "ask",
+      onRequestLog: (entry) => entries.push(entry),
+      captureRequestBodies: true
+    });
+
+    await client.complete({
+      messages: [{ role: "user", content: "look at the page" }],
+      tools: [{ name: "read", description: "read a file", parameters: { type: "object", properties: {} } }]
+    });
+
+    expect(entries).toHaveLength(1);
+    const entry = entries[0];
+    expect(entry.outcome).toBe("empty");
+    expect(entry.toolCalls).toEqual(["browser_snapshot"]);
+    expect(entry.droppedToolCalls).toEqual(["browser_snapshot"]);
+    expect(entry.contentChars).toBe(0);
+    expect(entry.model).toBe("glm-5.2");
+    expect(entry.finishReason).toBe("tool_calls");
+    expect(entry.toolsOffered).toEqual(["read"]);
+    expect(entry.requestMessages?.[0]?.content).toContain("look at the page");
+  });
+
+  it("logs an ok diagnostics entry for a normal text answer", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({ choices: [{ message: { role: "assistant", content: "All done." }, finish_reason: "stop" }] })
+    );
+    const entries: ApiRequestLogEntry[] = [];
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "secret-key-12345678",
+      baseUrl: "https://api.example.test/v1",
+      model: "glm-5.2",
+      trustMode: "ask",
+      onRequestLog: (entry) => entries.push(entry)
+    });
+    await client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].outcome).toBe("ok");
+    expect(entries[0].contentChars).toBeGreaterThan(0);
+    // Bodies are opt-in: not captured unless captureRequestBodies is set.
+    expect(entries[0].requestMessages).toBeUndefined();
   });
 
   it("does not retry non-retryable client errors", async () => {

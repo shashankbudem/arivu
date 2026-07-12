@@ -12,7 +12,11 @@ import { compactSessionMessages } from "../../src/agent/contextCompaction.js";
 import { chatContentHasRenderableContent, chatContentToText, trimChatContent } from "../../src/agent/content.js";
 import { buildTaskRunReportRemediationInstruction } from "../../src/agent/reportRemediation.js";
 import { createSkill, discoverSkills, globalSkillsDir, type CreateSkillInput, type SkillSummary } from "../../src/agent/skills.js";
-import { OpenAICompatibleChatClient, type ProviderCapabilityObservation } from "../../src/agent/OpenAICompatibleChatClient.js";
+import {
+  OpenAICompatibleChatClient,
+  type ApiRequestLogEntry,
+  type ProviderCapabilityObservation
+} from "../../src/agent/OpenAICompatibleChatClient.js";
 import {
   MAX_PROMPT_IMAGE_ATTACHMENTS as MAX_IMAGE_ATTACHMENTS,
   MAX_PROMPT_IMAGE_BYTES as MAX_IMAGE_BYTES,
@@ -376,6 +380,19 @@ let mainWindow: BrowserWindow | undefined;
 const pendingApprovals = new Map<string, (approved: boolean) => void>();
 const browserController = new DesktopBrowserController();
 
+// In-memory ring buffer of recent model calls for the API request log panel. Bounded and never
+// persisted; entries are already redacted (no API key) and truncated by the client.
+const API_REQUEST_LOG_LIMIT = 50;
+const apiRequestLog: ApiRequestLogEntry[] = [];
+
+function recordApiRequestLogEntry(entry: ApiRequestLogEntry) {
+  apiRequestLog.push(entry);
+  if (apiRequestLog.length > API_REQUEST_LOG_LIMIT) {
+    apiRequestLog.splice(0, apiRequestLog.length - API_REQUEST_LOG_LIMIT);
+  }
+  mainWindow?.webContents.send("apiRequestLog:entry", entry);
+}
+
 class DesktopController {
   private session: AgentSession | undefined;
   private readonly store = new SessionStore();
@@ -729,7 +746,7 @@ class DesktopController {
       workspaceScopeRulesForRoot(config, policyWorkspace.root)
     );
     const agent = new Agent({
-      client: new OpenAICompatibleChatClient(config),
+      client: new OpenAICompatibleChatClient({ ...config, onRequestLog: recordApiRequestLogEntry, captureRequestBodies: true }),
       approvals,
       cwd: session.cwd,
       projectRoot: session.projectRoot,
@@ -1662,6 +1679,8 @@ class DesktopController {
     const agent = new Agent({
       client: new OpenAICompatibleChatClient({
         ...config,
+        onRequestLog: recordApiRequestLogEntry,
+        captureRequestBodies: true,
         onCapabilityObservation: (observation) =>
           this.recordProviderCapabilityObservation({
             providerId,
@@ -3515,6 +3534,11 @@ handleFromMain("sessions:update", (_event, input: SessionUpdateInput) => control
 handleFromMain("sessions:delete", (_event, id: string) => controller.deleteSession(id));
 handleFromMain("context:compact", () => controller.compactContext());
 handleFromMain("context:summarize", () => controller.summarizeContext());
+handleFromMain("apiRequestLog:list", () => apiRequestLog.slice().reverse());
+handleFromMain("apiRequestLog:clear", () => {
+  apiRequestLog.length = 0;
+  return true;
+});
 handleFromMain("config:save", (_event, patch: ConfigPatch) => controller.saveConfigPatch(patch));
 handleFromMain("models:list", (_event, patch: ConfigPatch) => controller.listModels(patch));
 handleFromMain("doctor:run", (_event, patch: ConfigPatch) => controller.doctor(patch));

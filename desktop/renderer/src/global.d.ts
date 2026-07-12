@@ -969,6 +969,8 @@ type DesktopApi = {
   listModels(patch: ConfigPatch): Promise<ModelListResult>;
   runDoctor(patch: ConfigPatch): Promise<DoctorReport>;
   listTools(): Promise<ToolListResult>;
+  getApiRequestLog(): Promise<ApiRequestLogEntry[]>;
+  clearApiRequestLog(): Promise<boolean>;
   listCapabilityPolicies(): Promise<CapabilityPolicyResult>;
   readWorkspacePolicyBundle(): Promise<WorkspacePolicyBundleResult>;
   listSkills(): Promise<SkillListResult>;
@@ -1029,6 +1031,30 @@ type DesktopApi = {
   onAgentEvent(callback: (payload: AgentStreamEvent) => void): () => void;
   onSessionEvent(callback: (payload: SessionLifecycleEvent) => void): () => void;
   onBrowserState(callback: (payload: BrowserState) => void): () => void;
+  onApiRequestLog(callback: (entry: ApiRequestLogEntry) => void): () => void;
+};
+
+// Mirrors ApiRequestLogEntry in src/agent/OpenAICompatibleChatClient.ts. One model call's redacted
+// diagnostics for the API request log panel.
+type ApiRequestLogEntry = {
+  id: string;
+  at: string;
+  model: string;
+  streamed: boolean;
+  status?: number;
+  ok: boolean;
+  outcome: "ok" | "empty" | "error";
+  durationMs: number;
+  retries: number;
+  toolsOffered: string[];
+  toolCalls: string[];
+  droppedToolCalls: string[];
+  contentChars: number;
+  finishReason?: string;
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  error?: string;
+  requestMessages?: Array<{ role: string; content: string; toolCalls?: string[] }>;
+  responseBody?: string;
 };
 
 interface Window {

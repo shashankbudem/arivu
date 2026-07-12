@@ -22,6 +22,8 @@ const desktopApi = {
   listModels: (patch: unknown) => ipcRenderer.invoke("models:list", patch),
   runDoctor: (patch: unknown) => ipcRenderer.invoke("doctor:run", patch),
   listTools: () => ipcRenderer.invoke("tools:list"),
+  getApiRequestLog: () => ipcRenderer.invoke("apiRequestLog:list"),
+  clearApiRequestLog: () => ipcRenderer.invoke("apiRequestLog:clear"),
   listCapabilityPolicies: () => ipcRenderer.invoke("policy:list"),
   readWorkspacePolicyBundle: () => ipcRenderer.invoke("policy:readWorkspaceBundle"),
   listSkills: () => ipcRenderer.invoke("skills:list"),
@@ -68,6 +70,11 @@ const desktopApi = {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
     ipcRenderer.on("browser:state", listener);
     return () => ipcRenderer.removeListener("browser:state", listener);
+  },
+  onApiRequestLog: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("apiRequestLog:entry", listener);
+    return () => ipcRenderer.removeListener("apiRequestLog:entry", listener);
   }
 };
 
