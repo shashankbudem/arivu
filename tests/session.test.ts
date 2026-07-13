@@ -633,6 +633,59 @@ describe("session store", () => {
     await expect(store.list()).resolves.toMatchObject([{ id: "valid" }]);
   });
 
+  it("recovers a truncated primary session from the previous valid backup", async () => {
+    const store = new SessionStore(tempDir);
+    await store.save({
+      id: "recoverable",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "previous good state" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+    await store.save({
+      id: "recoverable",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "latest state" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z"
+    });
+    await writeFile(path.join(tempDir, "recoverable.json"), "{", "utf8");
+    const restartedStore = new SessionStore(tempDir);
+
+    await expect(restartedStore.list()).resolves.toMatchObject([{ id: "recoverable", messages: [{ content: "previous good state" }] }]);
+    await expect(restartedStore.load("recoverable")).resolves.toMatchObject({
+      id: "recoverable",
+      messages: [{ content: "previous good state" }]
+    });
+
+    const healed = JSON.parse(await readFile(path.join(tempDir, "recoverable.json"), "utf8"));
+    expect(healed.messages).toMatchObject([{ content: "previous good state" }]);
+  });
+
+  it("serializes rapid saves so the last requested snapshot wins", async () => {
+    const store = new SessionStore(tempDir);
+    const saves = Array.from({ length: 20 }, (_, index) =>
+      store.save({
+        id: "rapid",
+        cwd: "/tmp/project",
+        trustMode: "ask",
+        messages: [{ role: "user" as const, content: `snapshot ${index}` }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString()
+      })
+    );
+
+    await Promise.all(saves);
+
+    await expect(store.load("rapid")).resolves.toMatchObject({
+      messages: [{ content: "snapshot 19" }]
+    });
+    const backup = JSON.parse(await readFile(path.join(tempDir, "rapid.json.bak"), "utf8"));
+    expect(backup.messages).toMatchObject([{ content: "snapshot 18" }]);
+  });
+
   it("skips oversized session files when listing", async () => {
     const store = new SessionStore(tempDir);
     await writeFile(path.join(tempDir, "huge.json"), "x".repeat(2 * 1024 * 1024 + 1), "utf8");
@@ -642,19 +695,22 @@ describe("session store", () => {
 
   it("deletes a saved session", async () => {
     const store = new SessionStore(tempDir);
-    await store.save({
+    const session = {
       id: "doomed",
       cwd: "/tmp/project",
-      trustMode: "ask",
-      messages: [{ role: "user", content: "remove me" }],
+      trustMode: "ask" as const,
+      messages: [{ role: "user" as const, content: "remove me" }],
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z"
-    });
+    };
+    await store.save(session);
+    await store.save({ ...session, updatedAt: "2026-01-02T00:00:00.000Z" });
 
     await store.delete("doomed");
 
     await expect(store.list()).resolves.toEqual([]);
     await expect(store.load("doomed")).rejects.toThrow();
+    await expect(readFile(path.join(tempDir, "doomed.json.bak"), "utf8")).rejects.toThrow();
   });
 
   it("externalizes large image attachments and rehydrates them on load", async () => {

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { chmod, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { appDataDir } from "../config.js";
@@ -530,37 +530,72 @@ const MAX_SESSION_LIST_FILE_BYTES = 2 * 1024 * 1024;
 
 export class SessionStore {
   private saveCounter = 0;
+  private readonly pendingWrites = new Map<string, Promise<void>>();
 
   constructor(private readonly root = path.join(appDataDir(), "sessions")) {}
 
   async save(session: AgentSession) {
     normalizeTaskRunUserMessageIndexes(session);
+    const snapshot = structuredClone(session);
+    this.fileFor(snapshot.id);
+    return this.enqueueWrite(snapshot.id, async () => this.persistSnapshot(snapshot));
+  }
+
+  private async persistSnapshot(session: AgentSession) {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     // Persist large image attachments as separate files, keeping the JSON small and diffable.
     const persisted = await this.externalizeAttachments(session);
     const file = this.fileFor(session.id);
-    // Write to a temp file in the same directory, then atomically rename so a crash mid-write
-    // cannot corrupt the session file.
-    const tmp = `${file}.${process.pid}.${(this.saveCounter += 1)}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(persisted, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    const serialized = `${JSON.stringify(persisted, null, 2)}\n`;
+    parseSession(serialized, session.id);
+
+    await this.backUpCurrentSession(file, session.id);
+    await this.writeDurableAtomic(file, serialized);
+  }
+
+  private async backUpCurrentSession(file: string, sessionId: string) {
+    let current: string;
     try {
-      await rename(tmp, file);
+      current = await readFile(file, "utf8");
+      parseSession(current, sessionId);
     } catch (error) {
-      await rm(tmp, { force: true });
-      throw error;
+      if (!isFileMissing(error)) {
+        console.warn(
+          `[SessionStore] Preserving the existing backup for "${sessionId}": the current session is not a valid backup source (${describeSessionLoadError(error)}).`
+        );
+      }
+      return;
     }
-    await chmod(file, 0o600);
+    await this.writeDurableAtomic(this.backupFileFor(sessionId), current);
   }
 
   async load(id: string): Promise<AgentSession> {
-    const raw = await readFile(this.fileFor(id), "utf8");
-    const session = normalizeTaskRunUserMessageIndexes(SessionSchema.parse(JSON.parse(raw)) as AgentSession);
+    const file = this.fileFor(id);
+    let session: AgentSession;
+    try {
+      session = parseSession(await readFile(file, "utf8"), id);
+    } catch (primaryError) {
+      const recovered = await this.readBackup(id, primaryError);
+      session = recovered.session;
+      await this.enqueueWrite(id, async () => {
+        try {
+          parseSession(await readFile(file, "utf8"), id);
+        } catch {
+          await this.writeDurableAtomic(file, recovered.raw);
+        }
+      });
+    }
+    normalizeTaskRunUserMessageIndexes(session);
     return this.rehydrateAttachments(session);
   }
 
   async delete(id: string) {
-    await unlink(this.fileFor(id));
-    await rm(this.attachmentsDir(id), { recursive: true, force: true });
+    const file = this.fileFor(id);
+    await this.enqueueWrite(id, async () => {
+      await rm(file, { force: true });
+      await rm(this.backupFileFor(id), { force: true });
+      await rm(this.attachmentsDir(id), { recursive: true, force: true });
+    });
   }
 
   private attachmentsDir(sessionId: string) {
@@ -641,6 +676,7 @@ export class SessionStore {
 
   private async readSessionForList(entry: string): Promise<AgentSession | undefined> {
     const filePath = path.join(this.root, entry);
+    const sessionId = entry.slice(0, -".json".length);
     try {
       const info = await stat(filePath);
       if (!info.isFile()) {
@@ -653,13 +689,88 @@ export class SessionStore {
         return undefined;
       }
       const raw = await readFile(filePath, "utf8");
-      return normalizeTaskRunUserMessageIndexes(SessionSchema.parse(JSON.parse(raw)) as AgentSession);
+      return normalizeTaskRunUserMessageIndexes(parseSession(raw, sessionId));
     } catch (error) {
-      // A single unreadable file must not drop the rest of the list, but swallowing it silently
-      // is what let a schema drift hide sessions with no signal. Log which file and why.
+      try {
+        const recovered = await this.readBackup(sessionId, error, MAX_SESSION_LIST_FILE_BYTES);
+        return normalizeTaskRunUserMessageIndexes(recovered.session);
+      } catch {
+        // A single unreadable file must not drop the rest of the list, but swallowing it silently
+        // is what let a schema drift hide sessions with no signal. Log which file and why.
+      }
       console.warn(`[SessionStore] Hiding "${entry}" from the session list: ${describeSessionLoadError(error)}`);
       return undefined;
     }
+  }
+
+  private async readBackup(
+    sessionId: string,
+    primaryError: unknown,
+    maximumBytes?: number
+  ): Promise<{ raw: string; session: AgentSession }> {
+    const backup = this.backupFileFor(sessionId);
+    if (maximumBytes !== undefined) {
+      const info = await stat(backup);
+      if (!info.isFile() || info.size > maximumBytes) {
+        throw primaryError;
+      }
+    }
+    const raw = await readFile(backup, "utf8");
+    const session = parseSession(raw, sessionId);
+    console.warn(
+      `[SessionStore] Recovered "${sessionId}" from its previous valid backup after the primary session failed: ${describeSessionLoadError(primaryError)}`
+    );
+    return { raw, session };
+  }
+
+  private enqueueWrite(sessionId: string, operation: () => Promise<void>) {
+    const previous = this.pendingWrites.get(sessionId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(operation);
+    this.pendingWrites.set(sessionId, next);
+    const cleanUp = () => {
+      if (this.pendingWrites.get(sessionId) === next) {
+        this.pendingWrites.delete(sessionId);
+      }
+    };
+    next.then(cleanUp, cleanUp);
+    return next;
+  }
+
+  private async writeDurableAtomic(file: string, contents: string) {
+    const tmp = `${file}.${process.pid}.${(this.saveCounter += 1)}.tmp`;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(tmp, "w", 0o600);
+      await handle.writeFile(contents, "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await rename(tmp, file);
+      await chmod(file, 0o600);
+      await this.syncRootDirectory();
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      await rm(tmp, { force: true });
+      throw error;
+    }
+  }
+
+  private async syncRootDirectory() {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(this.root, "r");
+      await handle.sync();
+    } catch (error) {
+      if (!hasErrorCode(error, "EINVAL", "ENOTSUP", "EISDIR", "EPERM", "EACCES")) {
+        throw error;
+      }
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
+  private backupFileFor(id: string) {
+    return `${this.fileFor(id)}.bak`;
   }
 
   private fileFor(id: string) {
@@ -668,6 +779,22 @@ export class SessionStore {
     }
     return path.join(this.root, `${id}.json`);
   }
+}
+
+function parseSession(raw: string, expectedId: string) {
+  const session = SessionSchema.parse(JSON.parse(raw)) as AgentSession;
+  if (session.id !== expectedId) {
+    throw new Error(`Session id mismatch: expected "${expectedId}", found "${session.id}".`);
+  }
+  return session;
+}
+
+function hasErrorCode(error: unknown, ...codes: string[]) {
+  return Boolean(error && typeof error === "object" && "code" in error && codes.includes(String(error.code)));
+}
+
+function isFileMissing(error: unknown) {
+  return hasErrorCode(error, "ENOENT");
 }
 
 function describeSessionLoadError(error: unknown): string {
