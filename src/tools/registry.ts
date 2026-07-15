@@ -721,8 +721,8 @@ export function createToolRegistry(context: ToolContext) {
             instruction: z.string().trim().min(1),
             mode: z.enum(["visible", "background"]).optional(),
             tabId: z.string().trim().min(1).optional(),
-            maxSteps: z.number().int().min(1).max(200).optional(),
-            timeoutMs: z.number().int().min(5_000).max(14_400_000).optional(),
+            maxSteps: optionalModelInteger(1, 200),
+            timeoutMs: optionalModelInteger(5_000, 14_400_000),
             allowedDomains: z.array(z.string().trim().min(1)).optional(),
             allowJavaScript: z.boolean().optional(),
             allowSensitiveActions: z.boolean().optional()
@@ -1081,6 +1081,20 @@ export function createToolRegistry(context: ToolContext) {
       }
     }
   };
+}
+
+function optionalModelInteger(minimum: number, maximum: number) {
+  return z.preprocess((value) => {
+    if (typeof value !== "string") {
+      return value;
+    }
+    const trimmed = value.trim();
+    if (!/^-?\d+$/.test(trimmed)) {
+      return value;
+    }
+    const parsed = Number(trimmed);
+    return Number.isSafeInteger(parsed) ? parsed : value;
+  }, z.number().int().min(minimum).max(maximum).optional());
 }
 
 function objectSchema(properties: Record<string, unknown>) {

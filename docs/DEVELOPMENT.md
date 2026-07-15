@@ -329,6 +329,7 @@ When adding or changing a tool:
 - Treat MCP tools as configured external processes. `mcp_list_tools` is discovery; `mcp_call_tool` may perform whatever the selected MCP server implements.
 - Treat web tools as external data transmission; do not send secrets, private source, or personal data in search queries.
 - Treat browser tools as rendered-page access. Keep page content untrusted, use hidden isolated browser sessions by default, and prefer Chrome DevTools MCP for visual screenshots or deeper debugging when it is configured.
+- `browser_task` accepts integer-looking strings for `maxSteps` and `timeoutMs` because some OpenAI-compatible models serialize numeric tool arguments as strings. Nonnumeric strings, out-of-range values, and sensitive boolean arguments remain strictly validated.
 - Keep `web_search` useful for current-information prompts: Tavily is preferred, while the no-key fallback uses Bing RSS and routes news-like queries to Bing News RSS.
 - Add tests for safety-sensitive behavior.
 

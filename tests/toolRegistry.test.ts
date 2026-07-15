@@ -176,6 +176,39 @@ describe("createToolRegistry", () => {
     expect(result.timeoutMs).toBe(600_000);
   });
 
+  it("accepts integer budget strings emitted by OpenAI-compatible providers", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://integrate.api.nvidia.com/v1", model: "deepseek-ai/deepseek-v4-flash" }
+    });
+
+    const result = JSON.parse(
+      await registry.execute("browser_task", {
+        instruction: "complete a multi-step form",
+        maxSteps: "150",
+        timeoutMs: "120000"
+      })
+    ) as Record<string, unknown>;
+
+    expect(result.maxSteps).toBe(150);
+    expect(result.timeoutMs).toBe(600_000);
+  });
+
+  it("still rejects nonnumeric browser_task budget strings", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://integrate.api.nvidia.com/v1", model: "deepseek-ai/deepseek-v4-flash" }
+    });
+
+    await expect(registry.execute("browser_task", { instruction: "complete a form", maxSteps: "many" })).resolves.toMatch(
+      /Expected number, received string/
+    );
+  });
+
   it("leaves JavaScript execution off unless allowJavaScript is explicitly set", async () => {
     const registry = createToolRegistry({
       workspaceRoot: process.cwd(),
