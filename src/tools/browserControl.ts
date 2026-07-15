@@ -13,12 +13,25 @@ export type BrowserState = {
   activeMode: BrowserMode;
   visible: BrowserTargetState;
   background: BrowserTargetState;
+  collaboration?: BrowserCollaborationState;
+};
+
+export type BrowserCollaborationState = {
+  mode: "browse" | "element" | "region";
+  pendingCount: number;
+  activeAnnotationId?: string;
+  handoff?: {
+    id: number;
+    prompt: string;
+    screenshotPaths: string[];
+  };
 };
 
 export type BrowserTabState = {
   id: string;
   url: string;
   title: string;
+  faviconUrl?: string;
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -26,6 +39,7 @@ export type BrowserTabState = {
   lastSnapshotAt?: string;
   lastScreenshotAt?: string;
   lastScreenshotPath?: string;
+  owner?: "user" | "agent";
 };
 
 export type BrowserTargetState = BrowserTabState & {

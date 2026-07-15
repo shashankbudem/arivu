@@ -605,6 +605,7 @@ type DesktopState = {
     mcpServers: McpServersConfig;
     workspacePolicies: WorkspaceCapabilityPolicies;
     workspacePolicyProfiles: WorkspacePolicyProfiles;
+    disabledTools: string[];
   };
   sessionId?: string;
   messages: ChatMessage[];
@@ -618,6 +619,7 @@ type BrowserTargetState = {
   id: string;
   url: string;
   title: string;
+  faviconUrl?: string;
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -625,6 +627,7 @@ type BrowserTargetState = {
   lastSnapshotAt?: string;
   lastScreenshotAt?: string;
   lastScreenshotPath?: string;
+  owner?: "user" | "agent";
 };
 
 type BrowserTabState = BrowserTargetState;
@@ -641,6 +644,16 @@ type BrowserState = {
   activeMode: BrowserMode;
   visible: BrowserModeTargetState;
   background: BrowserModeTargetState;
+  collaboration?: {
+    mode: "browse" | "element" | "region";
+    pendingCount: number;
+    activeAnnotationId?: string;
+    handoff?: {
+      id: number;
+      prompt: string;
+      screenshotPaths: string[];
+    };
+  };
 };
 
 type SessionSummary = {
@@ -769,6 +782,7 @@ type ConfigPatch = {
   workspacePolicies?: WorkspaceCapabilityPolicies;
   workspacePolicyProfiles?: WorkspacePolicyProfiles;
   browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
+  disabledTools?: string[];
 };
 
 type WorkspaceScaffoldOptions = {
@@ -816,6 +830,7 @@ type ToolSummary = {
   status: ToolStatus;
   statusLabel: string;
   scopeLabels: string[];
+  disabled: boolean;
 };
 
 type ToolListResult = {

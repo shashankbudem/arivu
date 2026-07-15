@@ -12,3 +12,8 @@ coverage/
 .DS_Store
 *.log
 .env
+output/playwright/
+*.scenario.local.json
+__pycache__/
+*.py[cod]
+.venv-browser-bench/

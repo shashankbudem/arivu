@@ -81,6 +81,19 @@ Basic one-shot model check:
 arivu --trust readonly "Reply with exactly OK."
 ```
 
+Per-model context catalog check:
+
+```bash
+arivu models sync --dry-run --max-probes 1
+arivu models status
+arivu models probe-context <model-id>
+arivu models schedule
+```
+
+The dry run lists and probes through the configured provider without writing catalog files. A normal
+sync writes `model-catalog.json` and its append-only event log under the Arivu app-data directory.
+Unit tests use injected fetchers and temporary stores; they never call a real provider.
+
 For NVIDIA-hosted very large models, do not assume `/models` availability means interactive speed is acceptable. On June 20, 2026, `deepseek-ai/deepseek-v4-pro` was available but timed out on tiny chat probes, and `nvidia/nemotron-3-ultra-550b-a55b` varied from about 15s TTFT to a 180s timeout. Re-benchmark before making either one the default desktop chat model.
 
 Tool-calling check:
@@ -216,7 +229,7 @@ npm run desktop:build
 ARIVU_BROWSER_SMOKE=1 ./node_modules/.bin/electron dist-desktop/main/main.js
 ```
 
-Browser smoke mode opens the visible browser window, creates two visible tabs, verifies that a page-created `window.open()` popup becomes a maximized Arivu-managed window and agent-addressable tab without reporting a popup blocker, makes that popup close itself and confirms its tab is pruned, captures tab screenshots, and checks that both white fixture pages remain mostly light after switching back from the popup. This catches stale popup state plus blank, clipped, or black compositor surfaces before the smoke can pass. It prints tab ids, page screenshot paths, and a separate shell-only screenshot path, then exits.
+Browser smoke mode opens the visible browser window and exercises the native browser release path end to end. It verifies normal tabs, popup adoption and self-close cleanup, nonblank tab screenshots, shell tab cycling, scaled 4K device emulation, region annotation handoff to the Arivu composer, visible/background tab transfer, the categorized load-error page, and the expanded Settings surface. It prints tab ids plus page, shell, and review screenshot paths, then exits nonzero on any failed assertion.
 
 Desktop workflows to check manually after UI changes:
 
@@ -236,6 +249,11 @@ Desktop workflows to check manually after UI changes:
 - Header actions are icon-only and expose hover/focus tooltips.
 - The Browser header action opens or hides the separate maximized browser window. Verify explicit visible URL opens in that window, default agent browser tools remain hidden/background, and the main workspace layout does not gain an embedded browser column.
 - In the visible browser window, verify the tab strip can create a new tab, select between tabs, close a tab, keep each tab's URL/title/history separate, navigate with the address bar/back/forward/reload controls, and convert non-URL address text into a Google search.
+- Open Review, select an element and a region, add comments and design adjustments, hold the original, discard one annotation, and send the remaining evidence to Arivu. Confirm the composer receives the notes and rounded image attachments without losing their aspect ratios.
+- In Review, send a visible page to the background agent, then adopt it back into a visible tab. Confirm `browser_state` lists the transferred tab and the agent can target every visible tab by `tabId`.
+- Enable Device mode and select 4K. Confirm the page is scaled to fit the maximized window and the shell reports the preview percentage.
+- Open Browser Settings and verify download settings, privacy controls, password/autofill entries, Chrome password CSV or Arivu JSON import, and unpacked extension load/remove/options flows. Confirm saved password values are absent from the profile JSON on disk.
+- Switch macOS appearance between light and dark, then complete tab selection, address navigation, Review selection, and Settings navigation using only the keyboard. Confirm focus remains visible and no toolbar text overlaps at the minimum browser size.
 - For browser tool QA, verify `browser_state` reports the active visible tab and visible tab list, `browser_select_tab` switches tabs by `tabId`, `browser_open` with `mode: "visible"` opens the active visible tab, `browser_open` with `newTab: true` creates a visible tab, `tabId` targets a specific visible tab, and `browser_screenshot` produces a fresh Activity screenshot preview for the intended tab.
 - Verify browser opens, clicks, coordinate clicks, and typing do not show approval dialogs by default, while the Activity rail still records browser-control activity. Then set the current workspace browser-control policy override to `Require approval` or `Block` in Settings and confirm the override is honored.
 - `Refresh state` reloads workspace, config, and active session state.

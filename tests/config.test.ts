@@ -76,6 +76,14 @@ describe("config", () => {
     });
   });
 
+  it("defaults disabledTools to an empty list and persists a saved list", async () => {
+    await expect(loadConfig()).resolves.toMatchObject({ disabledTools: [] });
+
+    await saveConfig({ disabledTools: ["run", "write_file"] });
+
+    await expect(loadConfig()).resolves.toMatchObject({ disabledTools: ["run", "write_file"] });
+  });
+
   it("keeps saved config when env vars are unset", async () => {
     await saveConfig({
       apiKey: "saved-key",
@@ -122,7 +130,8 @@ describe("config", () => {
       trustMode: "ask",
       mcpServers: {},
       workspacePolicies: {},
-      workspacePolicyProfiles: {}
+      workspacePolicyProfiles: {},
+      disabledTools: []
     };
 
     expect(resolveModelListEndpoint(config, { providerId: "browser" })).toEqual({

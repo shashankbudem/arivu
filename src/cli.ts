@@ -5,9 +5,11 @@ import { Agent } from "./agent/Agent.js";
 import { COMPACT_RECENT_MESSAGE_COUNT, compactSessionMessages } from "./agent/contextCompaction.js";
 import type { AgentSession } from "./agent/types.js";
 import { OpenAICompatibleChatClient } from "./agent/OpenAICompatibleChatClient.js";
+import { fileURLToPath } from "node:url";
 import {
   loadConfig,
   redactConfigForDisplay,
+  resolveModelListEndpoint,
   saveConfig,
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot,
@@ -15,6 +17,12 @@ import {
   type ConfigKey
 } from "./config.js";
 import { runDoctor, type DoctorReport, type DoctorStatus } from "./diagnostics/doctor.js";
+import { ModelCatalogStore } from "./models/ModelCatalogStore.js";
+import { resolveContextWindowTokens } from "./models/contextResolver.js";
+import type { ModelCatalog } from "./models/modelCatalogSchema.js";
+import { recordContextFromRuntime, runModelCatalogSync, type SyncSummary } from "./models/syncModelCatalog.js";
+import { probeContextViaMaxTokens, probeContextViaOversizedInput } from "./models/probe.js";
+import { installLaunchAgent, launchAgentInstalled, launchAgentPath, uninstallLaunchAgent } from "./models/schedule.js";
 import { ApprovalManager } from "./permissions/ApprovalManager.js";
 import { SessionStore } from "./sessions/SessionStore.js";
 import {
@@ -196,6 +204,109 @@ program
     printDoctorReport(report);
   });
 
+const models = program.command("models").description("Inspect and maintain the provider model catalog.");
+
+models
+  .command("sync")
+  .description("Record each model's status and context length, and detect added/removed models.")
+  .option("--json", "print the raw JSON summary")
+  .option("--dry-run", "compute the diff without writing the catalog")
+  .option("--force-active", "include the active model (normally only swept on Mondays)")
+  .option("--reprobe", "re-probe context length even for models that already have one")
+  .option("--max-probes <count>", "cap context probes for this run", (value) => Number.parseInt(value, 10))
+  .option("--rpm <count>", "requests per minute", (value) => Number.parseInt(value, 10))
+  .option("--provider <id>", "provider id to sync (defaults to the active provider)")
+  .action(async (options: ModelsSyncOptions) => {
+    const config = await loadConfig();
+    const summary = await runModelCatalogSync(config, {
+      dryRun: options.dryRun,
+      forceActive: options.forceActive,
+      reprobe: options.reprobe,
+      maxProbes: options.maxProbes,
+      rpm: options.rpm,
+      providerId: options.provider
+    });
+    if (options.json) {
+      console.log(JSON.stringify(summary, null, 2));
+      return;
+    }
+    printSyncSummary(summary);
+  });
+
+models
+  .command("status")
+  .description("Show the stored catalog: status and context length per model.")
+  .option("--json", "print the raw catalog")
+  .option("--all", "include models the provider has removed (tombstones)")
+  .action(async (options: { json?: boolean; all?: boolean }) => {
+    const catalog = await new ModelCatalogStore().load();
+    if (options.json) {
+      console.log(JSON.stringify(catalog, null, 2));
+      return;
+    }
+    printCatalog(catalog, Boolean(options.all));
+  });
+
+models
+  .command("probe-context <model>")
+  .description("Resolve one model's context length, optionally with the slow oversized-input probe.")
+  .option("--deep", "use the reliable oversized-input probe (multi-MB upload)")
+  .action(async (model: string, options: { deep?: boolean }) => {
+    const config = await loadConfig();
+    const { baseUrl, apiKey } = resolveModelListEndpoint(config, { providerId: config.activeProviderId });
+    if (!options.deep) {
+      console.log(chalk.dim("Tip: --deep uses an oversized input; it is slower but works on models that ignore max_tokens."));
+    }
+    const result = options.deep
+      ? await probeContextViaOversizedInput({ baseUrl, apiKey, model }, fetch)
+      : await probeContextViaMaxTokens({ baseUrl, apiKey, model }, fetch);
+    if (result.tokens) {
+      console.log(`${chalk.bold(model)}: ${result.tokens.toLocaleString()} tokens (${result.source})`);
+      return;
+    }
+    console.log(`${chalk.bold(model)}: ${chalk.yellow("unresolved")} — ${result.error ?? "no limit reported"}`);
+    process.exitCode = 1;
+  });
+
+models
+  .command("schedule")
+  .description("Install, remove, or inspect the daily 7AM catalog sync (macOS launchd).")
+  .option("--install", "write the LaunchAgent plist")
+  .option("--uninstall", "remove the LaunchAgent plist")
+  .action(async (options: { install?: boolean; uninstall?: boolean }) => {
+    if (options.install && options.uninstall) {
+      throw new Error("Choose either --install or --uninstall.");
+    }
+    if (options.install) {
+      const cliPath = fileURLToPath(import.meta.url);
+      const result = await installLaunchAgent({ cliPath });
+      console.log(`Wrote ${result.plistPath}`);
+      console.log(`  node: ${result.nodePath}`);
+      console.log(`  cli:  ${result.cliPath}`);
+      console.log(`  log:  ${result.logFile}`);
+      console.log(`\nActivate it with:\n  ${chalk.cyan(result.bootstrapCommand)}`);
+      return;
+    }
+    if (options.uninstall) {
+      const result = await uninstallLaunchAgent();
+      console.log(`Removed ${result.plistPath}`);
+      console.log(`\nDeactivate it with:\n  ${chalk.cyan(result.bootoutCommand)}`);
+      return;
+    }
+    const installed = await launchAgentInstalled();
+    console.log(installed ? `Installed: ${launchAgentPath()}` : "Not installed. Run: arivu models schedule --install");
+  });
+
+type ModelsSyncOptions = {
+  json?: boolean;
+  dryRun?: boolean;
+  forceActive?: boolean;
+  reprobe?: boolean;
+  maxProbes?: number;
+  rpm?: number;
+  provider?: string;
+};
+
 type RootOptions = {
   model?: string;
   baseUrl?: string;
@@ -243,6 +354,7 @@ async function runOneShot(task: string, config: AppConfig) {
     undefined,
     scopePolicyRules
   );
+  const catalogStore = new ModelCatalogStore();
   const agent = new Agent({
     client,
     approvals,
@@ -252,7 +364,9 @@ async function runOneShot(task: string, config: AppConfig) {
     tavilyApiKey: config.tavilyApiKey,
     mcpServers: config.mcpServers,
     scopePolicyRules,
-    contextWindowTokens: config.contextWindowTokens
+    // Per-model window from the catalog, capped by any hand-entered provider value.
+    contextWindowTokens: resolveContextWindowTokens(config, { model: config.model, baseUrl: config.baseUrl }, await catalogStore.load()),
+    onContextWindowObserved: (tokens) => recordContextFromRuntime(catalogStore, { baseUrl: config.baseUrl, model: config.model }, tokens)
   });
   const store = new SessionStore();
 
@@ -310,6 +424,76 @@ function sessionFiltersFromCliOptions(options: SessionsOptions): SessionListFilt
     pinned: options.pinned ? "pinned" : options.unpinned ? "unpinned" : "all",
     project: options.project ? "project" : options.standalone ? "standalone" : "all"
   };
+}
+
+function printSyncSummary(summary: SyncSummary) {
+  console.log(chalk.bold(`arivu models sync${summary.dryRun ? chalk.yellow(" (dry run)") : ""}`));
+  console.log(`  endpoint      ${summary.baseUrl}`);
+  console.log(`  listed        ${summary.listed} models`);
+  console.log(`  active model  ${summary.includedActiveModel ? `included (${summary.activeReason})` : "skipped (checked on Mondays)"}`);
+  if (summary.added.length) {
+    console.log(chalk.green(`  added         ${summary.added.length}`));
+    for (const model of summary.added.slice(0, 20)) {
+      console.log(chalk.green(`    + ${model}`));
+    }
+  }
+  if (summary.removed.length) {
+    console.log(chalk.red(`  removed       ${summary.removed.length}`));
+    for (const model of summary.removed.slice(0, 20)) {
+      console.log(chalk.red(`    - ${model}`));
+    }
+  }
+  const counts = Object.entries(summary.statusCounts).filter(([, count]) => count > 0);
+  if (counts.length) {
+    console.log(`  status        ${counts.map(([status, count]) => `${status}=${count}`).join("  ")}`);
+  }
+  if (summary.contextResolved.length) {
+    console.log(`  context       resolved ${summary.contextResolved.length}`);
+    for (const entry of summary.contextResolved.slice(0, 20)) {
+      console.log(`    ${entry.model}: ${entry.tokens.toLocaleString()} tokens`);
+    }
+  }
+  if (summary.contextUnresolved) {
+    console.log(chalk.dim(`  context       unresolved ${summary.contextUnresolved} (provider reported no limit)`));
+  }
+}
+
+function printCatalog(catalog: ModelCatalog, includeRemoved: boolean) {
+  const providers = Object.values(catalog.providers);
+  if (providers.length === 0) {
+    console.log("No catalog yet. Run: arivu models sync");
+    return;
+  }
+  for (const provider of providers) {
+    console.log(chalk.bold(provider.baseUrl));
+    console.log(
+      chalk.dim(`  last sync: ${provider.lastFullSyncAt ?? "never"}   last active sweep: ${provider.lastActiveSweepAt ?? "never"}`)
+    );
+    const entries = Object.values(provider.models)
+      .filter((model) => includeRemoved || !model.removedAt)
+      .sort((left, right) => (right.context?.tokens ?? 0) - (left.context?.tokens ?? 0) || left.id.localeCompare(right.id));
+    for (const model of entries) {
+      const context = model.context ? `${model.context.tokens.toLocaleString().padStart(9)} tokens` : `${"unknown".padStart(9)}       `;
+      // Pad before colouring: ANSI escapes count toward String.padEnd's length but not visible width.
+      const label = (model.removedAt ? "removed" : model.status).padEnd(13);
+      const status = model.removedAt ? chalk.red(label) : colorStatus(model.status, label);
+      console.log(`  ${context}  ${status}  ${model.id}`);
+    }
+    console.log(chalk.dim(`  ${entries.length} models`));
+  }
+}
+
+function colorStatus(status: string, label = status) {
+  if (status === "available") {
+    return chalk.green(label);
+  }
+  if (status === "not_entitled") {
+    return chalk.dim(label);
+  }
+  if (status === "error") {
+    return chalk.red(label);
+  }
+  return chalk.yellow(label);
 }
 
 function printDoctorReport(report: DoctorReport) {

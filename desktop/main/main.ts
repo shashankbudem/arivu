@@ -72,6 +72,7 @@ import {
 import type {
   AgentLoopState,
   AgentRunEvent,
+  AgentRunOptions,
   AgentSession,
   AgentTaskRun,
   AgentTaskRunApprovalEvent,
@@ -100,6 +101,9 @@ import {
   type LlmProviderProfile
 } from "../../src/config.js";
 import { resolveBrowserTaskModel } from "../../src/agent/browserTaskModel.js";
+import { ModelCatalogStore } from "../../src/models/ModelCatalogStore.js";
+import { resolveContextWindowTokens } from "../../src/models/contextResolver.js";
+import { recordContextFromRuntime } from "../../src/models/syncModelCatalog.js";
 import { runDoctor, type DoctorReport } from "../../src/diagnostics/doctor.js";
 import { ApprovalManager } from "../../src/permissions/ApprovalManager.js";
 import { describeCapabilityPolicies, evaluateCapabilityPolicy } from "../../src/permissions/capabilityPolicy.js";
@@ -142,6 +146,7 @@ type PublicConfig = {
   mcpServers: AppConfig["mcpServers"];
   workspacePolicies: AppConfig["workspacePolicies"];
   workspacePolicyProfiles: AppConfig["workspacePolicyProfiles"];
+  disabledTools: string[];
 };
 
 type DesktopState = {
@@ -167,6 +172,8 @@ type ToolSummary = {
   status: ToolStatus;
   statusLabel: string;
   scopeLabels: string[];
+  /** User-toggled off in the tools panel; the tool is withheld from the model until re-enabled. */
+  disabled: boolean;
 };
 
 type WorkspacePolicyBundleResult = {
@@ -316,6 +323,8 @@ type ConfigPatch = {
   workspacePolicyProfiles?: AppConfig["workspacePolicyProfiles"];
   /** Settings-managed browser_task model override; null clears it back to "follow the chat model". */
   browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
+  /** Full replacement list of tool names withheld from the agent; [] re-enables everything. */
+  disabledTools?: string[];
 };
 
 type PublicLlmProviderProfile = Omit<LlmProviderProfile, "apiKey"> & {
@@ -379,6 +388,9 @@ const WORKSPACE_POLICY_BUNDLE_MAX_BYTES = 64 * 1024;
 let mainWindow: BrowserWindow | undefined;
 const pendingApprovals = new Map<string, (approved: boolean) => void>();
 const browserController = new DesktopBrowserController();
+// Read-only here: the scheduled `arivu models sync` CLI is the only writer, except for
+// recordContextFromRuntime, which latches a window the provider itself just reported.
+const modelCatalogStore = new ModelCatalogStore();
 
 // In-memory ring buffer of recent model calls for the API request log panel. Bounded and never
 // persisted; entries are already redacted (no API key) and truncated by the client.
@@ -745,6 +757,11 @@ class DesktopController {
       undefined,
       workspaceScopeRulesForRoot(config, policyWorkspace.root)
     );
+    const contextWindowTokens = resolveContextWindowTokens(
+      config,
+      { model: config.model, baseUrl: config.baseUrl },
+      await modelCatalogStore.load()
+    );
     const agent = new Agent({
       client: new OpenAICompatibleChatClient({ ...config, onRequestLog: recordApiRequestLogEntry, captureRequestBodies: true }),
       approvals,
@@ -754,7 +771,9 @@ class DesktopController {
       baseUrl: config.baseUrl,
       tavilyApiKey: config.tavilyApiKey,
       mcpServers: config.mcpServers,
-      contextWindowTokens: config.contextWindowTokens,
+      contextWindowTokens,
+      onContextWindowObserved: (tokens) =>
+        recordContextFromRuntime(modelCatalogStore, { baseUrl: config.baseUrl, model: config.model }, tokens),
       session
     });
 
@@ -1267,6 +1286,9 @@ class DesktopController {
     if (patch.browserTaskModel !== undefined) {
       next.browserTaskModel = mergeBrowserTaskModelPatch(saved.browserTaskModel, patch.browserTaskModel);
     }
+    if (patch.disabledTools !== undefined) {
+      next.disabledTools = normalizeDisabledTools(patch.disabledTools);
+    }
     if (activeProviderId && next.providers?.some((provider) => provider.id === activeProviderId)) {
       next.providers = updateProviderRuntime(next.providers, activeProviderId, patch);
       if (patch.activeProviderId !== undefined || patch.providers) {
@@ -1347,11 +1369,13 @@ class DesktopController {
       browser: browserController
     });
 
+    const disabledTools = new Set(config.disabledTools ?? []);
     return {
       tools: registry.schemas.map((schema) => ({
         name: schema.name,
         description: schema.description,
         parameters: toolParameterNames(schema),
+        disabled: disabledTools.has(schema.name),
         ...toolStatus(schema.name, config, policyOverrides, scopePolicyRules)
       }))
     };
@@ -1700,6 +1724,10 @@ class DesktopController {
       browserTaskModel,
       directEditReview: executionCwd === undefined,
       contextWindowTokens: config.contextWindowTokens,
+      // Free, always-fresh coverage of the active model: the scheduled sync only sweeps it on
+      // Mondays, but a live overflow tells us the real window at zero cost.
+      onContextWindowObserved: (tokens) =>
+        recordContextFromRuntime(modelCatalogStore, { baseUrl: config.baseUrl, model: config.model }, tokens),
       // Checkpoint direct workspace edits so they can be undone; worktree runs already isolate changes.
       checkpoint,
       session
@@ -1708,6 +1736,7 @@ class DesktopController {
     const abortController = new AbortController();
     this.runAbortControllers.set(session.id, abortController);
     const onUsage = (usage: ChatUsage) => this.recordTaskRunUsage(session, taskRunId, usage);
+    const disabledToolNames = createDisabledToolsReader(config.disabledTools ?? []);
     try {
       this.markTaskRun(session, taskRunId, "running");
       const result = loopEnabled
@@ -1720,12 +1749,14 @@ class DesktopController {
             executionCwd: executionCwd ?? session.cwd,
             eventTarget,
             signal: abortController.signal,
-            onUsage
+            onUsage,
+            disabledToolNames
           })
         : await agent.run(content, {
             skillNames,
             promptAlreadyInSession: true,
             allowedToolNames: planModeEnabled ? PLAN_MODE_TOOL_NAMES : undefined,
+            disabledToolNames,
             onEvent: this.agentEventRecorder(session, taskRunId, eventTarget, executionCwd ?? session.cwd),
             signal: abortController.signal,
             onUsage
@@ -1985,7 +2016,8 @@ class DesktopController {
     executionCwd,
     eventTarget,
     signal,
-    onUsage
+    onUsage,
+    disabledToolNames
   }: {
     agent: Agent;
     session: AgentSession;
@@ -1996,6 +2028,7 @@ class DesktopController {
     eventTarget?: WebContents;
     signal?: AbortSignal;
     onUsage?: (usage: ChatUsage) => void | Promise<void>;
+    disabledToolNames?: AgentRunOptions["disabledToolNames"];
   }): Promise<{ output: string; session: AgentSession }> {
     let output = "";
     let currentSession = session;
@@ -2025,11 +2058,12 @@ class DesktopController {
           ? await agent.run(content, {
               skillNames,
               promptAlreadyInSession: true,
+              disabledToolNames,
               onEvent,
               signal,
               onUsage
             })
-          : await agent.continue({ onEvent, signal, onUsage });
+          : await agent.continue({ disabledToolNames, onEvent, signal, onUsage });
 
       currentSession = result.session;
       const decision = stripAgentLoopDecision(currentSession) ?? "done";
@@ -2201,10 +2235,16 @@ class DesktopController {
     const config = await loadConfig();
     const sessionModel = session?.model;
     const shouldUseSessionModel = Boolean(sessionModel && !isAutoModel(sessionModel));
+    const model = shouldUseSessionModel ? (sessionModel ?? config.model) : config.model;
+    const baseUrl = shouldUseSessionModel ? (session?.baseUrl ?? config.baseUrl) : config.baseUrl;
     return {
       ...config,
-      model: shouldUseSessionModel ? (sessionModel ?? config.model) : config.model,
-      baseUrl: shouldUseSessionModel ? (session?.baseUrl ?? config.baseUrl) : config.baseUrl,
+      model,
+      baseUrl,
+      // Resolve the window for THIS model, not the active provider's. Config's contextWindowTokens is
+      // provider-scoped, so a session pinned to a different model previously inherited the active
+      // provider's window — wrong in both directions. Both Agent construction sites read this field.
+      contextWindowTokens: resolveContextWindowTokens(config, { model, baseUrl }, await modelCatalogStore.load()),
       trustMode: session?.trustMode ?? config.trustMode
     };
   }
@@ -2610,7 +2650,8 @@ function toPublicConfig(config: AppConfig): PublicConfig {
     tavilyApiKeyPresent: Boolean(config.tavilyApiKey),
     mcpServers: redactMcpServers(config.mcpServers),
     workspacePolicies: config.workspacePolicies,
-    workspacePolicyProfiles: config.workspacePolicyProfiles
+    workspacePolicyProfiles: config.workspacePolicyProfiles,
+    disabledTools: config.disabledTools ?? []
   };
 }
 
@@ -2660,6 +2701,27 @@ function sanitizeSettingsInt(value: number | undefined, min: number, max: number
     return undefined;
   }
   return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function normalizeDisabledTools(names: string[]): string[] {
+  return [...new Set(names.map((name) => name.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Reads the user's disabled-tools list fresh from the saved config so panel toggles flipped while
+ * an agent run is in flight apply at its next model step. A failed read keeps the last known list
+ * rather than failing open — a tool the user switched off must not silently come back.
+ */
+function createDisabledToolsReader(initial: string[]): () => Promise<string[]> {
+  let lastKnown = initial;
+  return async () => {
+    try {
+      lastKnown = (await loadConfig({ includeEnv: false })).disabledTools ?? [];
+    } catch {
+      // Keep lastKnown.
+    }
+    return lastKnown;
+  };
 }
 
 async function readWorkspacePolicyBundleFromRoot(workspaceRoot: string): Promise<WorkspacePolicyBundleResult> {
@@ -2778,7 +2840,7 @@ function mimeTypeForPath(filePath: string): string | undefined {
 }
 
 function isAllowedBrowserScreenshotPath(filePath: string) {
-  if (!path.basename(filePath).startsWith("arivu-browser-")) {
+  if (!path.basename(filePath).startsWith("arivu-browser-") && !path.basename(filePath).startsWith("annotation-")) {
     return false;
   }
   if (!mimeTypeForPath(filePath)) {
@@ -2786,7 +2848,9 @@ function isAllowedBrowserScreenshotPath(filePath: string) {
   }
 
   return (
-    isInsideDirectory(path.join(appDataDir(), "browser-screenshots"), filePath) || path.dirname(filePath) === path.resolve(os.tmpdir())
+    isInsideDirectory(path.join(appDataDir(), "browser-screenshots"), filePath) ||
+    isInsideDirectory(path.join(appDataDir(), "browser-annotations"), filePath) ||
+    path.dirname(filePath) === path.resolve(os.tmpdir())
   );
 }
 
@@ -3380,6 +3444,79 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
     browserShellScreenshotPath = path.join(os.tmpdir(), "arivu-browser-smoke-shell.png");
     await writeFile(browserShellScreenshotPath, image.toPNG());
   }
+  if (!browserWindow || browserWindow.isDestroyed()) {
+    throw new Error("browser smoke: browser shell window was not available for command testing");
+  }
+  console.log("browser smoke: cycling tabs through the shell command bridge");
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://cycle-tab?direction=-1"', true);
+  if (!(await waitForBrowserActiveTab(firstTabId, 2_000))) {
+    throw new Error("browser smoke: reverse tab cycling did not select the first tab");
+  }
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://cycle-tab?direction=1"', true);
+  if (!(await waitForBrowserActiveTab(secondTabId, 2_000))) {
+    throw new Error("browser smoke: forward tab cycling did not restore the second tab");
+  }
+  console.log("browser smoke: verifying scaled device preview");
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://device-preset?preset=4k"', true);
+  const deviceScale = await waitForBrowserShellText(browserWindow, "#device-scale", "% preview", 3_000);
+  if (!deviceScale) {
+    throw new Error("browser smoke: oversized device preview was not scaled into the browser window");
+  }
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://toggle-device"', true);
+  console.log("browser smoke: verifying review panel and annotation handoff");
+  await browserWindow.webContents.executeJavaScript('document.getElementById("review")?.click()', true);
+  const reviewVisible = await browserWindow.webContents.executeJavaScript(
+    'document.getElementById("reviewbar")?.hidden === false && document.body.innerText.includes("Design adjustments")',
+    true
+  );
+  if (!reviewVisible) {
+    throw new Error("browser smoke: browser review panel did not open");
+  }
+  const activeContents = browserController.getVisibleTabWebContents(secondTabId);
+  await activeContents.executeJavaScript(
+    `console.info(${JSON.stringify("__ARIVU_BROWSER_ANNOTATION__")} + JSON.stringify({kind:"region",label:"Smoke region",rect:{x:20,y:20,width:160,height:90}}))`,
+    true
+  );
+  const annotationId = await waitForBrowserAnnotation(3_000);
+  if (!annotationId) {
+    throw new Error("browser smoke: region annotation did not reach browser collaboration state");
+  }
+  await browserWindow.webContents.executeJavaScript(
+    `location.href=${JSON.stringify(`arivu-browser://annotation-send?id=${encodeURIComponent(annotationId)}&comment=${encodeURIComponent("Smoke review note")}`)}`,
+    true
+  );
+  if (!(await waitForBrowserHandoff(3_000))) {
+    throw new Error("browser smoke: annotations were not handed to the Arivu composer");
+  }
+  const reviewImage = await browserWindow.webContents.capturePage();
+  const browserReviewScreenshotPath = path.join(os.tmpdir(), "arivu-browser-smoke-review.png");
+  await writeFile(browserReviewScreenshotPath, reviewImage.toPNG());
+  console.log("browser smoke: verifying visible/background tab transfer");
+  await browserController.open({ url: firstUrl, mode: "background" });
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://adopt-agent-tab"', true);
+  const adoptedTabId = await waitForNewBrowserActiveTab(secondTabId, 3_000);
+  if (!adoptedTabId || !(await waitForBrowserSnapshotText(adoptedTabId, "Arivu browser smoke tab one", 3_000))) {
+    throw new Error("browser smoke: background agent page was not adopted into a visible tab");
+  }
+  console.log("browser smoke: verifying the categorized load-error surface");
+  await browserController
+    .open({ url: "http://127.0.0.1:65534/arivu-browser-smoke-error", mode: "visible", newTab: true })
+    .catch(() => undefined);
+  const errorTabId = browserController.getState().visible.activeTabId;
+  if (!errorTabId || !(await waitForBrowserSnapshotText(errorTabId, "This site can't be reached", 4_000))) {
+    throw new Error("browser smoke: load failures did not render the retry surface");
+  }
+  console.log("browser smoke: verifying browser settings navigation");
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://open-settings"', true);
+  const settingsTabId = await waitForNewBrowserActiveTab(errorTabId, 2_000);
+  if (
+    !settingsTabId ||
+    !(await waitForBrowserSnapshotText(settingsTabId, "Privacy and browser data", 3_000)) ||
+    !(await waitForBrowserSnapshotText(settingsTabId, "Password manager", 3_000)) ||
+    !(await waitForBrowserSnapshotText(settingsTabId, "Extensions", 3_000))
+  ) {
+    throw new Error("browser smoke: browser settings did not open as an addressable tab");
+  }
   console.log(
     JSON.stringify(
       {
@@ -3394,9 +3531,17 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
         selectedTabId: selectedSecond.tabId,
         popupAccepted,
         popupTabId: popupTab.id,
+        errorTabId,
+        loadErrorSurface: true,
+        settingsTabId,
+        settingsSurface: true,
+        deviceScale,
+        annotationHandoff: true,
+        adoptedTabId,
         firstScreenshotPath: firstScreenshot.screenshotPath,
         secondScreenshotPath: secondScreenshot.screenshotPath,
-        browserShellScreenshotPath
+        browserShellScreenshotPath,
+        browserReviewScreenshotPath
       },
       null,
       2
@@ -3453,6 +3598,72 @@ async function waitForBrowserTabToClose(tabId: string, timeoutMs: number) {
     if (!browserController.getState().visible.tabs?.some((tab) => tab.id === tabId)) {
       return true;
     }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+async function waitForBrowserActiveTab(tabId: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (browserController.getState().visible.activeTabId === tabId) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+async function waitForBrowserSnapshotText(tabId: string, text: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = await browserController.snapshot({ mode: "visible", tabId }).catch(() => undefined);
+    if (snapshot && JSON.stringify(snapshot).includes(text)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  return false;
+}
+
+async function waitForNewBrowserActiveTab(previousTabId: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const activeTabId = browserController.getState().visible.activeTabId;
+    if (activeTabId && activeTabId !== previousTabId) {
+      return activeTabId;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return undefined;
+}
+
+async function waitForBrowserShellText(window: BrowserWindow, selector: string, text: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await window.webContents
+      .executeJavaScript(`document.querySelector(${JSON.stringify(selector)})?.textContent ?? ""`, true)
+      .catch(() => "");
+    if (typeof value === "string" && value.includes(text)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return undefined;
+}
+
+async function waitForBrowserAnnotation(timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const annotationId = browserController.getState().collaboration?.activeAnnotationId;
+    if (annotationId) return annotationId;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return undefined;
+}
+
+async function waitForBrowserHandoff(timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (browserController.getState().collaboration?.handoff) return true;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return false;

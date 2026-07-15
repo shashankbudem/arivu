@@ -521,8 +521,8 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
     id: "tools",
     command: "tools",
     title: "Tools list",
-    description: "Open the available tools list with statuses and parameters.",
-    keywords: ["list", "available", "registry"]
+    description: "Open the tools list to review statuses and switch tools on or off.",
+    keywords: ["list", "available", "registry", "enable", "disable", "toggle"]
   },
   {
     id: "skills",
@@ -655,6 +655,7 @@ export function App() {
   const activeSessionIdRef = useRef<string | undefined>(undefined);
   const activeSubmissionTokenRef = useRef<string | null>(null);
   const composerDragDepthRef = useRef(0);
+  const browserHandoffIdRef = useRef(0);
   const pullRequestWatchInFlightRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -1292,6 +1293,30 @@ export function App() {
     }
   }
 
+  async function toggleToolDisabled(name: string, disabled: boolean) {
+    // Optimistic flip so the switch responds instantly; a failed save reloads the real state.
+    setAvailableTools((current) => current.map((tool) => (tool.name === name ? { ...tool, disabled } : tool)));
+    // The saved list is the source of truth: it can hold names of tools that are not currently
+    // registered (for example MCP tools with no server configured), and those must survive toggles.
+    const nextDisabled = new Set(state?.config.disabledTools ?? []);
+    if (disabled) {
+      nextDisabled.add(name);
+    } else {
+      nextDisabled.delete(name);
+    }
+    try {
+      const next = await window.arivu.saveConfig({ disabledTools: [...nextDisabled] });
+      // Only adopt the config slice: a toggle mid-run must not replace the streaming messages
+      // with the main process's snapshot of them.
+      setState((current) => (current ? { ...current, config: next.config } : next));
+      setError(null);
+      setStatus(disabled ? `Tool ${name} turned off — applies from the agent's next step` : `Tool ${name} turned back on`);
+    } catch (err) {
+      setError(formatError(err));
+      await loadTools();
+    }
+  }
+
   async function loadSkills(): Promise<SkillSummary[] | null> {
     try {
       const result = await window.arivu.listSkills();
@@ -1316,6 +1341,43 @@ export function App() {
   function applyBrowserState(next: BrowserState) {
     setBrowserState(next);
     setState((current) => (current ? { ...current, browser: next } : current));
+    const handoff = next.collaboration?.handoff;
+    if (handoff && handoff.id > browserHandoffIdRef.current) {
+      browserHandoffIdRef.current = handoff.id;
+      setPrompt((current) => [current.trim(), handoff.prompt].filter(Boolean).join("\n\n"));
+      void attachBrowserHandoffScreenshots(handoff.screenshotPaths);
+      setStatus(
+        handoff.screenshotPaths.length > 0 ? "Browser notes and captures added to the composer" : "Browser notes added to the composer"
+      );
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+    }
+  }
+
+  async function attachBrowserHandoffScreenshots(paths: string[]) {
+    const available = paths.slice(0, MAX_IMAGE_ATTACHMENTS);
+    const images = await Promise.all(
+      available.map(async (filePath): Promise<ImageAttachment | null> => {
+        try {
+          const image = await window.arivu.readLocalImage(filePath);
+          return {
+            id: randomId(),
+            name: filePath.split(/[\\/]/).pop() || "browser-capture.png",
+            mimeType: image.mimeType,
+            size: image.size,
+            dataUrl: image.dataUrl,
+            detail: "auto"
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
+    setImageAttachments((current) =>
+      mergeImageAttachments(
+        current,
+        images.filter((image): image is ImageAttachment => Boolean(image))
+      )
+    );
   }
 
   async function setBrowserPaneOpen(open: boolean) {
@@ -3152,7 +3214,9 @@ export function App() {
                   ) : null}
                   {imageAttachments.length > 0 ? <ImageAttachmentStrip images={imageAttachments} onRemove={removeImageAttachment} /> : null}
                   {fileAttachments.length > 0 ? <FileAttachmentStrip files={fileAttachments} onRemove={removeFileAttachment} /> : null}
-                  {toolsPopoverOpen ? <ToolPanel tools={availableTools} /> : null}
+                  {toolsPopoverOpen ? (
+                    <ToolPanel tools={availableTools} onToggleTool={(name, disabled) => void toggleToolDisabled(name, disabled)} />
+                  ) : null}
                   {skillsPopoverOpen ? (
                     <SkillPanel
                       skills={availableSkills}
@@ -3175,7 +3239,6 @@ export function App() {
                             setSkillsPopoverOpen(false);
                             setComposerOptionsOpen((current) => !current);
                           }}
-                          disabled={busy}
                           aria-expanded={composerOptionsOpen}
                           aria-label="Prompt options"
                           title="Prompt options"
@@ -4071,22 +4134,34 @@ function CommandOutputPanel({ output, onClose }: { output: CommandOutput; onClos
   );
 }
 
-function ToolPanel({ tools }: { tools: ToolSummary[] }) {
+function ToolPanel({ tools, onToggleTool }: { tools: ToolSummary[]; onToggleTool: (name: string, disabled: boolean) => void }) {
+  const offCount = tools.filter((tool) => tool.disabled).length;
   return (
     <div className="composer-tools-region tool-popover" role="dialog" aria-label="Available tools">
       <div className="tool-popover-heading">
         <strong>Available tools</strong>
-        <span>{tools.length}</span>
+        <span>{offCount > 0 ? `${tools.length - offCount} of ${tools.length} on` : tools.length}</span>
       </div>
       <div className="tool-list">
         {tools.length === 0 ? (
           <div className="tool-empty">No tools loaded.</div>
         ) : (
           tools.map((tool) => (
-            <article key={tool.name} className="tool-row">
+            <article key={tool.name} className={tool.disabled ? "tool-row tool-row-off" : "tool-row"}>
               <div className="tool-row-top">
                 <code>{tool.name}</code>
-                <span className={`tool-status ${tool.status}`}>{tool.statusLabel}</span>
+                <span className={`tool-status ${tool.disabled ? "blocked" : tool.status}`}>{tool.disabled ? "Off" : tool.statusLabel}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={!tool.disabled}
+                  aria-label={tool.disabled ? `Turn ${tool.name} on` : `Turn ${tool.name} off`}
+                  title={tool.disabled ? `Turn ${tool.name} on` : `Turn ${tool.name} off`}
+                  className={tool.disabled ? "tool-toggle" : "tool-toggle on"}
+                  onClick={() => onToggleTool(tool.name, !tool.disabled)}
+                >
+                  <span className="tool-toggle-knob" aria-hidden="true" />
+                </button>
               </div>
               <p>{tool.description}</p>
               {tool.scopeLabels.length > 0 ? (
@@ -4101,6 +4176,7 @@ function ToolPanel({ tools }: { tools: ToolSummary[] }) {
           ))
         )}
       </div>
+      <div className="tool-popover-footnote">Switches save instantly and apply from the agent's next step, even mid-run.</div>
     </div>
   );
 }

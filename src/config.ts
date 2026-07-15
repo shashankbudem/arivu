@@ -79,6 +79,7 @@ const ConfigSchema = z.object({
   activeProviderId: z.string().optional(),
   providers: z.array(LlmProviderSchema).default([]),
   browserTaskModel: BrowserTaskModelSchema.optional(),
+  disabledTools: z.array(z.string()).default([]),
   trustMode: TrustModeSchema.default("ask"),
   mcpServers: z.record(McpServerSchema).default({}),
   workspacePolicies: z.record(WorkspaceCapabilityPolicySchema).default({}),
@@ -273,7 +274,12 @@ export function applyProviderCapabilityObservation(config: AppConfig, observatio
   };
 }
 
-function normalizeCapabilityBaseUrl(baseUrl: string) {
+/**
+ * Canonical key for "the same provider endpoint": trim, drop trailing slashes, lowercase. Shared by
+ * the capability-observation matcher and the model catalog, which keys per-(endpoint, model) facts
+ * so they survive a provider row being renamed, recreated, or given a fresh id.
+ */
+export function normalizeCapabilityBaseUrl(baseUrl: string) {
   return baseUrl.trim().replace(/\/+$/, "").toLowerCase();
 }
 

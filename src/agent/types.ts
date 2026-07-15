@@ -99,6 +99,11 @@ export type AgentRunOptions = {
   skillNames?: string[];
   promptAlreadyInSession?: boolean;
   allowedToolNames?: string[];
+  /**
+   * Tool names withheld from the model. When given as a function it is re-evaluated before every
+   * model step, so user toggles apply mid-run — from the next step, not just the next prompt.
+   */
+  disabledToolNames?: string[] | (() => string[] | Promise<string[]>);
   /** Aborts the run between steps, cancels the in-flight model request, and terminates running commands. */
   signal?: AbortSignal;
   /** Receives per-run token usage as reported by the provider. */

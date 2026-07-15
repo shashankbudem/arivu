@@ -179,6 +179,65 @@ describe("agent", () => {
     expect(toolNames).not.toContain("mcp_call_tool");
   });
 
+  it("withholds user-disabled tools from the model", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "Answered without the disabled tools."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted", async () => true),
+      cwd: tempDir
+    });
+
+    await agent.run("do something", { disabledToolNames: ["write_file", "run", "web_search"] });
+
+    const toolNames = client.requests[0]?.tools.map((tool) => tool.name) ?? [];
+    expect(toolNames).toContain("read");
+    expect(toolNames).toContain("apply_patch");
+    expect(toolNames).not.toContain("write_file");
+    expect(toolNames).not.toContain("run");
+    expect(toolNames).not.toContain("web_search");
+  });
+
+  it("re-reads disabled tools before every step so mid-run toggles apply at the next model request", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read", arguments: { path: "README.md" } }]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "Finished."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir
+    });
+
+    // Simulates the user flipping the "read" toggle off while step one is executing: every request
+    // after the first is built with the tool withheld.
+    const result = await agent.run("summarize", {
+      disabledToolNames: () => (client.requests.length === 0 ? [] : ["read"])
+    });
+
+    expect(result.output).toBe("Finished.");
+    expect(client.requests[0]?.tools.map((tool) => tool.name)).toContain("read");
+    expect(client.requests[1]?.tools.map((tool) => tool.name)).not.toContain("read");
+    expect(result.session.messages.some((message) => message.role === "tool")).toBe(true);
+  });
+
   it("answers from existing web results instead of offering repeated web searches", async () => {
     vi.stubGlobal(
       "fetch",
@@ -917,6 +976,66 @@ describe("agent", () => {
 
     const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
     expect(requestText).not.toContain("Context compacted locally");
+  });
+
+  it("budgets a large window at 90% instead of compacting prematurely", async () => {
+    const session = createTestSession();
+    // ~50k estimated tokens: far above the old 48k default, far below 90% of a 512k window.
+    session.messages.push({ role: "assistant", content: "y".repeat(200_000) });
+    const client = new ScriptedClient([{ message: { role: "assistant", content: "Handled." } }]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session,
+      contextWindowTokens: 524_288
+    });
+
+    await agent.run("continue");
+
+    const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(requestText).not.toContain("Context compacted locally");
+    expect(requestText).toContain("y".repeat(20_000));
+  });
+
+  it("reserves reply headroom on a tiny context window instead of claiming almost all of it", async () => {
+    const session = createTestSession();
+    // 3,200 estimated tokens. The old Math.max(4_000, ...) floor gave a 4,096-token model a 4,000
+    // budget (97.6% of its window), so this was NOT compacted and left ~96 tokens to answer with.
+    session.messages.push({ role: "assistant", content: "y".repeat(12_800) });
+    const client = new ScriptedClient([{ message: { role: "assistant", content: "Handled." } }]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session,
+      contextWindowTokens: 4_096
+    });
+
+    await agent.run("continue");
+
+    const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(requestText).toContain("Context compacted locally");
+  });
+
+  it("reports the real context window when the provider rejects an oversized request", async () => {
+    const observed: number[] = [];
+    const client = new ContextLengthRetryClient();
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session: createTestSession(),
+      onContextWindowObserved: (tokens) => {
+        observed.push(tokens);
+      }
+    });
+
+    await agent.run("continue");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The rejection names the model's real window; learning it here costs no extra API call.
+    expect(observed).toEqual([196_608]);
   });
 
   it("retries context-length failures with aggressive request compaction", async () => {
