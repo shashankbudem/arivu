@@ -72,6 +72,7 @@ import {
 import type {
   AgentLoopState,
   AgentRunEvent,
+  AgentRunOptions,
   AgentSession,
   AgentTaskRun,
   AgentTaskRunApprovalEvent,
@@ -142,6 +143,7 @@ type PublicConfig = {
   mcpServers: AppConfig["mcpServers"];
   workspacePolicies: AppConfig["workspacePolicies"];
   workspacePolicyProfiles: AppConfig["workspacePolicyProfiles"];
+  disabledTools: string[];
 };
 
 type DesktopState = {
@@ -167,6 +169,8 @@ type ToolSummary = {
   status: ToolStatus;
   statusLabel: string;
   scopeLabels: string[];
+  /** User-toggled off in the tools panel; the tool is withheld from the model until re-enabled. */
+  disabled: boolean;
 };
 
 type WorkspacePolicyBundleResult = {
@@ -316,6 +320,8 @@ type ConfigPatch = {
   workspacePolicyProfiles?: AppConfig["workspacePolicyProfiles"];
   /** Settings-managed browser_task model override; null clears it back to "follow the chat model". */
   browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
+  /** Full replacement list of tool names withheld from the agent; [] re-enables everything. */
+  disabledTools?: string[];
 };
 
 type PublicLlmProviderProfile = Omit<LlmProviderProfile, "apiKey"> & {
@@ -1267,6 +1273,9 @@ class DesktopController {
     if (patch.browserTaskModel !== undefined) {
       next.browserTaskModel = mergeBrowserTaskModelPatch(saved.browserTaskModel, patch.browserTaskModel);
     }
+    if (patch.disabledTools !== undefined) {
+      next.disabledTools = normalizeDisabledTools(patch.disabledTools);
+    }
     if (activeProviderId && next.providers?.some((provider) => provider.id === activeProviderId)) {
       next.providers = updateProviderRuntime(next.providers, activeProviderId, patch);
       if (patch.activeProviderId !== undefined || patch.providers) {
@@ -1347,11 +1356,13 @@ class DesktopController {
       browser: browserController
     });
 
+    const disabledTools = new Set(config.disabledTools ?? []);
     return {
       tools: registry.schemas.map((schema) => ({
         name: schema.name,
         description: schema.description,
         parameters: toolParameterNames(schema),
+        disabled: disabledTools.has(schema.name),
         ...toolStatus(schema.name, config, policyOverrides, scopePolicyRules)
       }))
     };
@@ -1708,6 +1719,7 @@ class DesktopController {
     const abortController = new AbortController();
     this.runAbortControllers.set(session.id, abortController);
     const onUsage = (usage: ChatUsage) => this.recordTaskRunUsage(session, taskRunId, usage);
+    const disabledToolNames = createDisabledToolsReader(config.disabledTools ?? []);
     try {
       this.markTaskRun(session, taskRunId, "running");
       const result = loopEnabled
@@ -1720,12 +1732,14 @@ class DesktopController {
             executionCwd: executionCwd ?? session.cwd,
             eventTarget,
             signal: abortController.signal,
-            onUsage
+            onUsage,
+            disabledToolNames
           })
         : await agent.run(content, {
             skillNames,
             promptAlreadyInSession: true,
             allowedToolNames: planModeEnabled ? PLAN_MODE_TOOL_NAMES : undefined,
+            disabledToolNames,
             onEvent: this.agentEventRecorder(session, taskRunId, eventTarget, executionCwd ?? session.cwd),
             signal: abortController.signal,
             onUsage
@@ -1985,7 +1999,8 @@ class DesktopController {
     executionCwd,
     eventTarget,
     signal,
-    onUsage
+    onUsage,
+    disabledToolNames
   }: {
     agent: Agent;
     session: AgentSession;
@@ -1996,6 +2011,7 @@ class DesktopController {
     eventTarget?: WebContents;
     signal?: AbortSignal;
     onUsage?: (usage: ChatUsage) => void | Promise<void>;
+    disabledToolNames?: AgentRunOptions["disabledToolNames"];
   }): Promise<{ output: string; session: AgentSession }> {
     let output = "";
     let currentSession = session;
@@ -2025,11 +2041,12 @@ class DesktopController {
           ? await agent.run(content, {
               skillNames,
               promptAlreadyInSession: true,
+              disabledToolNames,
               onEvent,
               signal,
               onUsage
             })
-          : await agent.continue({ onEvent, signal, onUsage });
+          : await agent.continue({ disabledToolNames, onEvent, signal, onUsage });
 
       currentSession = result.session;
       const decision = stripAgentLoopDecision(currentSession) ?? "done";
@@ -2610,7 +2627,8 @@ function toPublicConfig(config: AppConfig): PublicConfig {
     tavilyApiKeyPresent: Boolean(config.tavilyApiKey),
     mcpServers: redactMcpServers(config.mcpServers),
     workspacePolicies: config.workspacePolicies,
-    workspacePolicyProfiles: config.workspacePolicyProfiles
+    workspacePolicyProfiles: config.workspacePolicyProfiles,
+    disabledTools: config.disabledTools ?? []
   };
 }
 
@@ -2660,6 +2678,27 @@ function sanitizeSettingsInt(value: number | undefined, min: number, max: number
     return undefined;
   }
   return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function normalizeDisabledTools(names: string[]): string[] {
+  return [...new Set(names.map((name) => name.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Reads the user's disabled-tools list fresh from the saved config so panel toggles flipped while
+ * an agent run is in flight apply at its next model step. A failed read keeps the last known list
+ * rather than failing open — a tool the user switched off must not silently come back.
+ */
+function createDisabledToolsReader(initial: string[]): () => Promise<string[]> {
+  let lastKnown = initial;
+  return async () => {
+    try {
+      lastKnown = (await loadConfig({ includeEnv: false })).disabledTools ?? [];
+    } catch {
+      // Keep lastKnown.
+    }
+    return lastKnown;
+  };
 }
 
 async function readWorkspacePolicyBundleFromRoot(workspaceRoot: string): Promise<WorkspacePolicyBundleResult> {
@@ -3380,6 +3419,32 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
     browserShellScreenshotPath = path.join(os.tmpdir(), "arivu-browser-smoke-shell.png");
     await writeFile(browserShellScreenshotPath, image.toPNG());
   }
+  if (!browserWindow || browserWindow.isDestroyed()) {
+    throw new Error("browser smoke: browser shell window was not available for command testing");
+  }
+  console.log("browser smoke: cycling tabs through the shell command bridge");
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://cycle-tab?direction=-1"', true);
+  if (!(await waitForBrowserActiveTab(firstTabId, 2_000))) {
+    throw new Error("browser smoke: reverse tab cycling did not select the first tab");
+  }
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://cycle-tab?direction=1"', true);
+  if (!(await waitForBrowserActiveTab(secondTabId, 2_000))) {
+    throw new Error("browser smoke: forward tab cycling did not restore the second tab");
+  }
+  console.log("browser smoke: verifying the categorized load-error surface");
+  await browserController
+    .open({ url: "http://127.0.0.1:1/arivu-browser-smoke-error", mode: "visible", newTab: true })
+    .catch(() => undefined);
+  const errorTabId = browserController.getState().visible.activeTabId;
+  if (!errorTabId || !(await waitForBrowserSnapshotText(errorTabId, "This site can't be reached", 4_000))) {
+    throw new Error("browser smoke: load failures did not render the retry surface");
+  }
+  console.log("browser smoke: verifying browser settings navigation");
+  await browserWindow.webContents.executeJavaScript('location.href="arivu-browser://open-settings"', true);
+  const settingsTabId = await waitForNewBrowserActiveTab(errorTabId, 2_000);
+  if (!settingsTabId || !(await waitForBrowserSnapshotText(settingsTabId, "Privacy and browser data", 3_000))) {
+    throw new Error("browser smoke: browser settings did not open as an addressable tab");
+  }
   console.log(
     JSON.stringify(
       {
@@ -3394,6 +3459,10 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
         selectedTabId: selectedSecond.tabId,
         popupAccepted,
         popupTabId: popupTab.id,
+        errorTabId,
+        loadErrorSurface: true,
+        settingsTabId,
+        settingsSurface: true,
         firstScreenshotPath: firstScreenshot.screenshotPath,
         secondScreenshotPath: secondScreenshot.screenshotPath,
         browserShellScreenshotPath
@@ -3456,6 +3525,41 @@ async function waitForBrowserTabToClose(tabId: string, timeoutMs: number) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return false;
+}
+
+async function waitForBrowserActiveTab(tabId: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (browserController.getState().visible.activeTabId === tabId) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+async function waitForBrowserSnapshotText(tabId: string, text: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = await browserController.snapshot({ mode: "visible", tabId }).catch(() => undefined);
+    if (snapshot && JSON.stringify(snapshot).includes(text)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  return false;
+}
+
+async function waitForNewBrowserActiveTab(previousTabId: string, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const activeTabId = browserController.getState().visible.activeTabId;
+    if (activeTabId && activeTabId !== previousTabId) {
+      return activeTabId;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return undefined;
 }
 
 async function waitForDesktopSmokeContent(window: BrowserWindow) {

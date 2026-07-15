@@ -605,6 +605,7 @@ type DesktopState = {
     mcpServers: McpServersConfig;
     workspacePolicies: WorkspaceCapabilityPolicies;
     workspacePolicyProfiles: WorkspacePolicyProfiles;
+    disabledTools: string[];
   };
   sessionId?: string;
   messages: ChatMessage[];
@@ -618,6 +619,7 @@ type BrowserTargetState = {
   id: string;
   url: string;
   title: string;
+  faviconUrl?: string;
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -769,6 +771,7 @@ type ConfigPatch = {
   workspacePolicies?: WorkspaceCapabilityPolicies;
   workspacePolicyProfiles?: WorkspacePolicyProfiles;
   browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
+  disabledTools?: string[];
 };
 
 type WorkspaceScaffoldOptions = {
@@ -816,6 +819,7 @@ type ToolSummary = {
   status: ToolStatus;
   statusLabel: string;
   scopeLabels: string[];
+  disabled: boolean;
 };
 
 type ToolListResult = {

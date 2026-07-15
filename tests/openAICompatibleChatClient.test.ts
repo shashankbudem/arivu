@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  OpenAICompatibleChatClient,
-  retryAfterFromHeaders,
-  type ApiRequestLogEntry
-} from "../src/agent/OpenAICompatibleChatClient.js";
+import { OpenAICompatibleChatClient, retryAfterFromHeaders, type ApiRequestLogEntry } from "../src/agent/OpenAICompatibleChatClient.js";
 import type { ChatRequest } from "../src/agent/types.js";
 
 describe("OpenAICompatibleChatClient", () => {

@@ -179,6 +179,65 @@ describe("agent", () => {
     expect(toolNames).not.toContain("mcp_call_tool");
   });
 
+  it("withholds user-disabled tools from the model", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "Answered without the disabled tools."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted", async () => true),
+      cwd: tempDir
+    });
+
+    await agent.run("do something", { disabledToolNames: ["write_file", "run", "web_search"] });
+
+    const toolNames = client.requests[0]?.tools.map((tool) => tool.name) ?? [];
+    expect(toolNames).toContain("read");
+    expect(toolNames).toContain("apply_patch");
+    expect(toolNames).not.toContain("write_file");
+    expect(toolNames).not.toContain("run");
+    expect(toolNames).not.toContain("web_search");
+  });
+
+  it("re-reads disabled tools before every step so mid-run toggles apply at the next model request", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read", arguments: { path: "README.md" } }]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "Finished."
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir
+    });
+
+    // Simulates the user flipping the "read" toggle off while step one is executing: every request
+    // after the first is built with the tool withheld.
+    const result = await agent.run("summarize", {
+      disabledToolNames: () => (client.requests.length === 0 ? [] : ["read"])
+    });
+
+    expect(result.output).toBe("Finished.");
+    expect(client.requests[0]?.tools.map((tool) => tool.name)).toContain("read");
+    expect(client.requests[1]?.tools.map((tool) => tool.name)).not.toContain("read");
+    expect(result.session.messages.some((message) => message.role === "tool")).toBe(true);
+  });
+
   it("answers from existing web results instead of offering repeated web searches", async () => {
     vi.stubGlobal(
       "fetch",

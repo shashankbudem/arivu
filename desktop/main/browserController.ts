@@ -1,6 +1,24 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { BrowserView, BrowserWindow, nativeImage, type WebContents, type WebFrameMain, type WebPreferences } from "electron";
+import {
+  BrowserView,
+  BrowserWindow,
+  Menu,
+  app,
+  clipboard,
+  dialog,
+  nativeImage,
+  shell,
+  type WebContents,
+  type ContextMenuParams,
+  type WebFrameMain,
+  type Input,
+  type MessageBoxOptions,
+  type MenuItemConstructorOptions,
+  type Session,
+  type WebPreferences
+} from "electron";
 import { appDataDir } from "../../src/config.js";
 import {
   normalizeBrowserMode,
@@ -15,6 +33,7 @@ import {
   type BrowserToolResult
 } from "../../src/tools/browserControl.js";
 import { runBrowserTask } from "./browserTaskSupervisor.js";
+import { codexBrowserShellHtml } from "./codexBrowserShell.js";
 import {
   boundIndexedContent,
   clickElementByIndex,
@@ -29,6 +48,9 @@ type BrowserStateListener = (state: BrowserState) => void;
 
 type BrowserTargetRecord = Omit<BrowserTargetState, "activeTabId" | "tabs"> & {
   logs: BrowserConsoleEntry[];
+  faviconUrl?: string;
+  failedUrl?: string;
+  recoveryTitle?: string;
   lastScreenshotSize?: BrowserImageSize;
   lastViewport?: BrowserViewport;
 };
@@ -70,19 +92,51 @@ type BrowserFrameInspection =
       error: string;
     });
 
+type BrowserDownloadRecord = {
+  id: string;
+  filename: string;
+  url: string;
+  state: "progressing" | "completed" | "cancelled" | "interrupted";
+  receivedBytes: number;
+  totalBytes: number;
+  savePath?: string;
+};
+
+type BrowserSessionSnapshot = {
+  version: 1;
+  tabs: string[];
+  activeIndex: number;
+  history?: BrowserHistoryRecord[];
+  permissions?: Record<string, "allow" | "block">;
+  settings?: {
+    askDownloadLocation?: boolean;
+    downloadDirectory?: string;
+  };
+};
+
+type BrowserHistoryRecord = {
+  url: string;
+  title: string;
+  visitedAt: string;
+};
+
 const MAX_CONSOLE_LOGS = 300;
 // Budget for the serialized element list in snapshot/screenshot results. Without it a busy
 // page (e.g. ServiceNow) can push a single tool result past the request auto-compaction
 // threshold, which strips native tool protocol and derails tool calling on the next turn.
 const MAX_VISUAL_ELEMENTS_JSON_CHARS = 48_000;
 const DEFAULT_BACKGROUND_BOUNDS = { width: 1280, height: 800 };
-const VISIBLE_CHROME_HEIGHT = 96;
+const DEFAULT_VISIBLE_CHROME_HEIGHT = 80;
+const VISIBLE_CHROME_HEIGHT = DEFAULT_VISIBLE_CHROME_HEIGHT;
 const VISIBLE_START_PAGE_TITLE = "Arivu Browser";
 const VISIBLE_START_PAGE_PREFIX = "data:text/html;charset=utf-8,";
 const VISIBLE_START_PAGE_MARKER = "arivu-browser-start";
+const VISIBLE_LOAD_ERROR_PAGE_MARKER = "arivu-browser-load-error";
+const VISIBLE_SETTINGS_PAGE_MARKER = "arivu-browser-settings";
 const VISIBLE_SHELL_PAGE_MARKER = "arivu-browser-shell";
 const VISIBLE_SHELL_COMMAND_PROTOCOL = "arivu-browser:";
 const BROWSER_PARTITION = "persist:arivu-browser";
+const BROWSER_SESSION_FILE = "browser-session.json";
 
 export class DesktopBrowserController implements BrowserToolController {
   private hostWindow: BrowserWindow | undefined;
@@ -93,6 +147,24 @@ export class DesktopBrowserController implements BrowserToolController {
   private defaultMode: BrowserMode = "background";
   private activeMode: BrowserMode = "background";
   private activeVisibleTabId: string | undefined;
+  private visibleChromeHeight = DEFAULT_VISIBLE_CHROME_HEIGHT;
+  private readonly recentlyClosedVisibleTabs: Array<{ url: string; title: string }> = [];
+  private findOpen = false;
+  private findQuery = "";
+  private findMatches = 0;
+  private findActiveMatch = 0;
+  private deviceViewport = { enabled: false, preset: "responsive", width: 390, height: 844 };
+  private shellNotice: { id: number; message: string; error?: boolean } | undefined;
+  private nextShellNoticeId = 1;
+  private readonly configuredBrowserSessions = new WeakSet<Session>();
+  private readonly browserDownloads: BrowserDownloadRecord[] = [];
+  private readonly browserHistory: BrowserHistoryRecord[] = [];
+  private readonly browserPermissions = new Map<string, "allow" | "block">();
+  private askDownloadLocation = false;
+  private downloadDirectory: string | undefined;
+  private didAttemptVisibleSessionRestore = false;
+  private restoringVisibleSession = false;
+  private visibleSessionWriteTimer: ReturnType<typeof setTimeout> | undefined;
   private nextVisibleTabNumber = 1;
   private readonly listeners = new Set<BrowserStateListener>();
   private readonly visibleTabs = new Map<string, BrowserTabRecord>();
@@ -110,6 +182,7 @@ export class DesktopBrowserController implements BrowserToolController {
     if (this.hostWindow !== window) {
       return;
     }
+    this.persistVisibleSessionNow();
     this.destroyVisibleWindow();
     this.hostWindow = undefined;
   }
@@ -134,6 +207,7 @@ export class DesktopBrowserController implements BrowserToolController {
     if (open) {
       this.rememberMode("visible");
       const window = this.ensureVisibleWindow();
+      this.restoreVisibleSessionOnce();
       this.ensureVisibleTab();
       const waitingForShell = this.ensureVisibleShellPage(window.webContents);
       if (waitingForShell) {
@@ -191,8 +265,16 @@ export class DesktopBrowserController implements BrowserToolController {
   reload(mode?: BrowserMode, tabId?: string) {
     const target = this.targetForMode(mode);
     this.rememberMode(target);
-    const { contents } = this.browserContextForMode(target, tabId);
-    contents.reload();
+    const { contents, target: record } = this.browserContextForMode(target, tabId);
+    if (record.failedUrl) {
+      const failedUrl = record.failedUrl;
+      record.failedUrl = undefined;
+      record.lastError = undefined;
+      record.recoveryTitle = undefined;
+      void contents.loadURL(failedUrl).catch(() => undefined);
+    } else {
+      contents.reload();
+    }
     return this.getState();
   }
 
@@ -211,6 +293,7 @@ export class DesktopBrowserController implements BrowserToolController {
     this.paneOpen = true;
     const window = this.ensureVisibleWindow();
     this.ensureVisibleShellPage(window.webContents);
+    this.restoreVisibleSessionOnce();
     this.showVisibleWindow(window);
     this.createVisibleTab({ url, activate: true });
     this.emitState();
@@ -251,6 +334,7 @@ export class DesktopBrowserController implements BrowserToolController {
       this.paneOpen = true;
       const window = this.ensureVisibleWindow();
       this.ensureVisibleShellPage(window.webContents);
+      this.restoreVisibleSessionOnce();
       this.showVisibleWindow(window);
       if (args.newTab || (!selectedTabId && !this.activeVisibleTab())) {
         selectedTabId = this.createVisibleTab({ activate: true, deferLoad: true }).id;
@@ -258,6 +342,8 @@ export class DesktopBrowserController implements BrowserToolController {
     }
     const { contents, target } = this.browserContextForMode(mode, selectedTabId);
     target.lastError = undefined;
+    target.failedUrl = undefined;
+    target.recoveryTitle = undefined;
     await contents.loadURL(url);
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
@@ -800,9 +886,15 @@ export class DesktopBrowserController implements BrowserToolController {
       void this.handleVisibleShellCommand(url);
     });
     contents.on("did-finish-load", () => this.renderVisibleShellState());
+    contents.on("before-input-event", (event, input) => {
+      if (this.handleBrowserKeyboardInput(input)) {
+        event.preventDefault();
+      }
+    });
   }
 
   private configureWebContents(mode: BrowserMode, target: BrowserTargetRecord, contents: WebContents) {
+    this.configureBrowserSession(contents.session);
     contents.setWindowOpenHandler(({ url }) => {
       if (mode !== "visible") {
         return { action: "deny" };
@@ -833,7 +925,12 @@ export class DesktopBrowserController implements BrowserToolController {
       }
     });
     contents.on("will-navigate", (event, url) => {
-      if (isVisibleStartPageUrl(url)) {
+      if (mode === "visible" && isVisibleSettingsPageUrl(contents.getURL()) && isVisibleSettingsCommandUrl(url)) {
+        event.preventDefault();
+        void this.handleVisibleShellCommand(url);
+        return;
+      }
+      if (isVisibleStartPageUrl(url) || isVisibleLoadErrorPageUrl(url) || isVisibleSettingsPageUrl(url)) {
         return;
       }
       try {
@@ -850,9 +947,17 @@ export class DesktopBrowserController implements BrowserToolController {
     });
     contents.on("did-stop-loading", () => {
       this.updateTargetFromContents(mode, contents, target);
+      if (mode === "visible") {
+        this.recordBrowserHistory(target, contents);
+      }
       this.emitState();
     });
     contents.on("did-navigate", () => {
+      if (!isVisibleLoadErrorPageUrl(contents.getURL())) {
+        target.failedUrl = undefined;
+        target.lastError = undefined;
+        target.recoveryTitle = undefined;
+      }
       this.updateTargetFromContents(mode, contents, target);
       this.emitState();
     });
@@ -864,14 +969,58 @@ export class DesktopBrowserController implements BrowserToolController {
       this.updateTargetFromContents(mode, contents, target);
       this.emitState();
     });
+    contents.on("page-favicon-updated", (_event, favicons) => {
+      target.faviconUrl = favicons.find((url) => /^https?:|^data:/i.test(url));
+      this.emitState();
+    });
+    contents.on("found-in-page", (_event, result) => {
+      this.findMatches = Math.max(0, result.matches);
+      this.findActiveMatch = Math.max(0, result.activeMatchOrdinal);
+      this.emitState();
+    });
+    contents.on("before-input-event", (event, input) => {
+      if (this.handleBrowserKeyboardInput(input, target.id)) {
+        event.preventDefault();
+      }
+    });
+    contents.on("context-menu", (_event, params) => this.showPageContextMenu(contents, target, params));
     contents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl) => {
       if (errorCode === -3) {
         return;
       }
       target.lastError = `${errorDescription} (${errorCode})`;
+      target.failedUrl = validatedUrl || target.url;
+      target.recoveryTitle = "This site can't be reached";
       target.url = validatedUrl || contents.getURL();
       target.loading = false;
       this.emitState();
+      if (mode === "visible" && target.failedUrl && !isVisibleLoadErrorPageUrl(contents.getURL())) {
+        void contents.loadURL(visibleLoadErrorPageUrl(target.failedUrl, errorCode, errorDescription)).catch(() => undefined);
+      }
+    });
+    contents.on("render-process-gone", (_event, details) => {
+      if (details.reason === "clean-exit" || (mode === "visible" && !this.visibleTabs.has(target.id))) {
+        return;
+      }
+      const failedUrl = target.failedUrl ?? target.url;
+      target.failedUrl = failedUrl;
+      target.recoveryTitle = "This tab crashed";
+      target.lastError = `The page renderer stopped (${details.reason}).`;
+      target.loading = false;
+      this.emitState();
+      if (mode === "visible") {
+        void contents.loadURL(visibleCrashRecoveryPageUrl(failedUrl, details.reason)).catch(() => undefined);
+      }
+    });
+    contents.on("unresponsive", () => {
+      target.lastError = "This page is not responding. You can wait or reload it.";
+      this.notifyBrowserShell(target.lastError, true);
+    });
+    contents.on("responsive", () => {
+      if (target.lastError?.includes("not responding")) {
+        target.lastError = undefined;
+        this.notifyBrowserShell("The page is responding again.");
+      }
     });
     contents.on("console-message", (details) => {
       const level = normalizeConsoleLevel(details.level);
@@ -890,8 +1039,17 @@ export class DesktopBrowserController implements BrowserToolController {
 
   private updateTargetFromContents(mode: BrowserMode, contents: WebContents, target: BrowserTargetRecord) {
     const url = contents.getURL();
-    target.url = mode === "visible" && isVisibleStartPageUrl(url) ? "" : url;
-    target.title = mode === "visible" && isVisibleStartPageUrl(url) ? VISIBLE_START_PAGE_TITLE : contents.getTitle();
+    const startPage = mode === "visible" && isVisibleStartPageUrl(url);
+    const loadErrorPage = mode === "visible" && isVisibleLoadErrorPageUrl(url);
+    const settingsPage = mode === "visible" && isVisibleSettingsPageUrl(url);
+    target.url = startPage ? "" : settingsPage ? "arivu://settings" : loadErrorPage ? (target.failedUrl ?? "") : url;
+    target.title = startPage
+      ? VISIBLE_START_PAGE_TITLE
+      : settingsPage
+        ? "Browser settings"
+        : loadErrorPage
+          ? (target.recoveryTitle ?? "This site can't be reached")
+          : contents.getTitle();
     target.loading = contents.isLoading();
     target.canGoBack = contents.navigationHistory.canGoBack();
     target.canGoForward = contents.navigationHistory.canGoForward();
@@ -1030,6 +1188,8 @@ export class DesktopBrowserController implements BrowserToolController {
     }
     this.activeVisibleTabId = tabId;
     this.rememberMode("visible");
+    this.findMatches = 0;
+    this.findActiveMatch = 0;
     this.updateTargetFromContents("visible", target.contents, target);
     this.attachActiveVisibleView();
     return target;
@@ -1041,6 +1201,12 @@ export class DesktopBrowserController implements BrowserToolController {
       throw new Error(`Unknown visible browser tab: ${tabId}`);
     }
     const window = this.visibleWindow;
+    if (target.url && !isVisibleStartPageUrl(target.contents.getURL())) {
+      this.recentlyClosedVisibleTabs.push({ url: target.url, title: target.title });
+      if (this.recentlyClosedVisibleTabs.length > 20) {
+        this.recentlyClosedVisibleTabs.splice(0, this.recentlyClosedVisibleTabs.length - 20);
+      }
+    }
     if (target.view && window && !window.isDestroyed()) {
       try {
         window.removeBrowserView(target.view);
@@ -1067,6 +1233,7 @@ export class DesktopBrowserController implements BrowserToolController {
       return;
     }
     this.attachActiveVisibleView();
+    this.emitState();
   }
 
   private forgetVisiblePopupTab(tabId: string) {
@@ -1105,6 +1272,122 @@ export class DesktopBrowserController implements BrowserToolController {
     this.visibleTabs.clear();
     this.visibleTabOrder.splice(0);
     this.activeVisibleTabId = undefined;
+  }
+
+  private restoreVisibleSessionOnce() {
+    if (this.didAttemptVisibleSessionRestore || !this.browserSessionPersistenceEnabled()) {
+      return;
+    }
+    this.didAttemptVisibleSessionRestore = true;
+    let snapshot: BrowserSessionSnapshot;
+    try {
+      snapshot = JSON.parse(readFileSync(this.browserSessionPath(), "utf8")) as BrowserSessionSnapshot;
+    } catch {
+      return;
+    }
+    if (snapshot.version !== 1 || !Array.isArray(snapshot.tabs)) {
+      return;
+    }
+    if (Array.isArray(snapshot.history)) {
+      this.browserHistory.push(
+        ...snapshot.history.slice(-500).filter((entry) => {
+          return (
+            Boolean(entry) &&
+            typeof entry.url === "string" &&
+            typeof entry.title === "string" &&
+            typeof entry.visitedAt === "string" &&
+            isRestorableBrowserUrl(entry.url)
+          );
+        })
+      );
+    }
+    if (snapshot.permissions && typeof snapshot.permissions === "object") {
+      for (const [key, decision] of Object.entries(snapshot.permissions)) {
+        if (key.includes("|") && (decision === "allow" || decision === "block")) {
+          this.browserPermissions.set(key, decision);
+        }
+      }
+    }
+    this.askDownloadLocation = snapshot.settings?.askDownloadLocation === true;
+    this.downloadDirectory =
+      typeof snapshot.settings?.downloadDirectory === "string" && path.isAbsolute(snapshot.settings.downloadDirectory)
+        ? snapshot.settings.downloadDirectory
+        : undefined;
+    const urls = snapshot.tabs.slice(0, 20).filter((url): url is string => typeof url === "string" && isRestorableBrowserUrl(url));
+    if (urls.length === 0) {
+      return;
+    }
+    this.restoringVisibleSession = true;
+    try {
+      const restored = urls.map((url) => this.createVisibleTab({ url: url || undefined, activate: false }));
+      const activeIndex = clampNumber(Number(snapshot.activeIndex) || 0, 0, restored.length - 1);
+      this.activeVisibleTabId = restored[activeIndex]?.id ?? restored[0]?.id;
+      this.attachActiveVisibleView();
+      this.emitState();
+    } finally {
+      this.restoringVisibleSession = false;
+    }
+  }
+
+  private scheduleVisibleSessionWrite() {
+    if (!this.didAttemptVisibleSessionRestore || this.restoringVisibleSession || !this.browserSessionPersistenceEnabled()) {
+      return;
+    }
+    if (this.visibleSessionWriteTimer) {
+      clearTimeout(this.visibleSessionWriteTimer);
+    }
+    this.visibleSessionWriteTimer = setTimeout(() => {
+      this.visibleSessionWriteTimer = undefined;
+      this.persistVisibleSessionNow();
+    }, 300);
+  }
+
+  private persistVisibleSessionNow() {
+    if (!this.didAttemptVisibleSessionRestore || !this.browserSessionPersistenceEnabled()) {
+      return;
+    }
+    if (this.visibleSessionWriteTimer) {
+      clearTimeout(this.visibleSessionWriteTimer);
+      this.visibleSessionWriteTimer = undefined;
+    }
+    const persistedTabs = this.visibleTabOrder.flatMap((id) => {
+      const target = this.visibleTabs.get(id);
+      if (!target || target.popupWindow) {
+        return [];
+      }
+      const url = target.failedUrl ?? target.url;
+      return isRestorableBrowserUrl(url) ? [{ id, url }] : [];
+    });
+    const tabs = persistedTabs.map((tab) => tab.url);
+    const activeIndex = Math.max(
+      0,
+      persistedTabs.findIndex((tab) => tab.id === this.activeVisibleTabId)
+    );
+    const snapshot: BrowserSessionSnapshot = {
+      version: 1,
+      tabs,
+      activeIndex,
+      history: this.browserHistory.slice(-500),
+      permissions: Object.fromEntries(this.browserPermissions),
+      settings: {
+        askDownloadLocation: this.askDownloadLocation,
+        ...(this.downloadDirectory ? { downloadDirectory: this.downloadDirectory } : {})
+      }
+    };
+    try {
+      mkdirSync(appDataDir(), { recursive: true });
+      writeFileSync(this.browserSessionPath(), JSON.stringify(snapshot), "utf8");
+    } catch {
+      // Session restoration is best-effort and must not block browser navigation.
+    }
+  }
+
+  private browserSessionPath() {
+    return path.join(appDataDir(), BROWSER_SESSION_FILE);
+  }
+
+  private browserSessionPersistenceEnabled() {
+    return process.env.ARIVU_BROWSER_SMOKE !== "1" && process.env.ARIVU_DESKTOP_SMOKE !== "1";
   }
 
   private attachActiveVisibleView() {
@@ -1149,10 +1432,12 @@ export class DesktopBrowserController implements BrowserToolController {
     }
     const [width, height] = window.getContentSize();
     active.view.setBounds({
-      x: 0,
-      y: VISIBLE_CHROME_HEIGHT,
-      width: Math.max(0, width),
-      height: Math.max(0, height - VISIBLE_CHROME_HEIGHT)
+      x: this.deviceViewport.enabled ? Math.max(0, Math.floor((width - Math.min(width, this.deviceViewport.width)) / 2)) : 0,
+      y: this.visibleChromeHeight,
+      width: this.deviceViewport.enabled ? Math.max(0, Math.min(width, this.deviceViewport.width)) : Math.max(0, width),
+      height: this.deviceViewport.enabled
+        ? Math.max(0, Math.min(height - this.visibleChromeHeight, this.deviceViewport.height))
+        : Math.max(0, height - this.visibleChromeHeight)
     });
   }
 
@@ -1220,12 +1505,789 @@ export class DesktopBrowserController implements BrowserToolController {
         case "stop":
           this.stop("visible", command.params.get("id") || undefined);
           break;
+        case "hard-reload":
+          this.activeVisibleTab()?.contents.reloadIgnoringCache();
+          break;
+        case "layout": {
+          this.visibleChromeHeight = clampNumber(Number(command.params.get("height")) || DEFAULT_VISIBLE_CHROME_HEIGHT, 72, 190);
+          this.updateVisibleViewLayout();
+          break;
+        }
+        case "reorder-tab": {
+          const tabId = command.params.get("id");
+          const beforeId = command.params.get("before");
+          if (tabId && beforeId) {
+            this.reorderVisibleTab(tabId, beforeId);
+          }
+          break;
+        }
+        case "tabs-menu":
+          this.showVisibleTabsMenu();
+          break;
+        case "cycle-tab":
+          this.cycleVisibleTab(command.params.get("direction") === "-1" ? -1 : 1);
+          break;
+        case "duplicate-tab": {
+          const active = this.activeVisibleTab();
+          if (active?.url) {
+            this.createVisibleTab({ url: active.url, activate: true });
+          }
+          break;
+        }
+        case "reopen-tab": {
+          const closed = this.recentlyClosedVisibleTabs.pop();
+          if (closed) {
+            this.createVisibleTab({ url: closed.url, activate: true });
+          }
+          break;
+        }
+        case "open-external": {
+          const url = this.activeVisibleTab()?.url;
+          if (url) {
+            await shell.openExternal(url);
+          }
+          break;
+        }
+        case "capture-screenshot":
+          await this.captureVisibleViewportToClipboard();
+          break;
+        case "open-find":
+          this.findOpen = true;
+          this.emitState();
+          break;
+        case "close-find":
+          this.closeFindInPage();
+          break;
+        case "find":
+          this.findInPage(command.params.get("query") ?? "", command.params.get("forward") !== "false");
+          break;
+        case "zoom-in":
+          this.stepPageZoom(1);
+          break;
+        case "zoom-out":
+          this.stepPageZoom(-1);
+          break;
+        case "reset-zoom":
+          this.setPageZoom(1);
+          break;
+        case "print":
+          this.activeVisibleTab()?.contents.print({ printBackground: true });
+          break;
+        case "toggle-device":
+          this.deviceViewport = { ...this.deviceViewport, enabled: !this.deviceViewport.enabled };
+          this.updateVisibleViewLayout();
+          this.emitState();
+          break;
+        case "device-preset":
+          this.applyDevicePreset(command.params.get("preset") ?? "responsive");
+          break;
+        case "device-size":
+          this.applyDeviceSize(Number(command.params.get("width")), Number(command.params.get("height")));
+          break;
+        case "rotate-device":
+          this.deviceViewport = { ...this.deviceViewport, width: this.deviceViewport.height, height: this.deviceViewport.width };
+          this.updateVisibleViewLayout();
+          this.emitState();
+          break;
+        case "options":
+          this.showBrowserOptionsMenu();
+          break;
+        case "downloads":
+          this.showDownloadsMenu();
+          break;
+        case "site-info":
+          this.showSiteInformationMenu();
+          break;
+        case "open-settings":
+          this.openBrowserSettings();
+          break;
+        case "set-ask-download":
+          this.askDownloadLocation = command.params.get("value") === "true";
+          this.persistVisibleSessionNow();
+          this.refreshBrowserSettingsTabs();
+          break;
+        case "choose-download-directory":
+          await this.chooseDownloadDirectory();
+          break;
+        case "settings-clear-cookies":
+          await this.clearBrowserCookies();
+          break;
+        case "settings-clear-cache":
+          await this.clearBrowserCache();
+          break;
+        case "settings-clear-history":
+          this.browserHistory.splice(0);
+          this.persistVisibleSessionNow();
+          this.notifyBrowserShell("Browser history cleared.");
+          this.refreshBrowserSettingsTabs();
+          break;
+        case "settings-reset-permissions":
+          this.browserPermissions.clear();
+          this.persistVisibleSessionNow();
+          this.notifyBrowserShell("Saved site permissions reset.");
+          this.refreshBrowserSettingsTabs();
+          break;
       }
     } catch (error) {
       const active = this.activeVisibleTab() ?? this.targets.visible;
       active.lastError = error instanceof Error ? error.message : String(error);
       this.emitState();
     }
+  }
+
+  private reorderVisibleTab(tabId: string, beforeId: string) {
+    const from = this.visibleTabOrder.indexOf(tabId);
+    const before = this.visibleTabOrder.indexOf(beforeId);
+    if (from < 0 || before < 0 || from === before) {
+      return;
+    }
+    this.visibleTabOrder.splice(from, 1);
+    const nextBefore = this.visibleTabOrder.indexOf(beforeId);
+    this.visibleTabOrder.splice(nextBefore, 0, tabId);
+    this.emitState();
+  }
+
+  private cycleVisibleTab(direction: -1 | 1) {
+    if (this.visibleTabOrder.length < 2) {
+      return;
+    }
+    const activeIndex = Math.max(0, this.visibleTabOrder.indexOf(this.activeVisibleTabId ?? ""));
+    const nextIndex = (activeIndex + direction + this.visibleTabOrder.length) % this.visibleTabOrder.length;
+    this.selectVisibleTabById(this.visibleTabOrder[nextIndex]);
+    this.emitState();
+  }
+
+  private showVisibleTabsMenu() {
+    const window = this.visibleWindow;
+    if (!window || window.isDestroyed()) {
+      return;
+    }
+    const template: MenuItemConstructorOptions[] = this.visibleTabOrder.flatMap((id, index) => {
+      const tab = this.visibleTabs.get(id);
+      if (!tab) {
+        return [];
+      }
+      return [
+        {
+          label: tab.title || tab.url || `Tab ${index + 1}`,
+          type: "radio" as const,
+          checked: id === this.activeVisibleTabId,
+          click: () => {
+            this.selectVisibleTabById(id);
+            this.emitState();
+          }
+        }
+      ];
+    });
+    if (template.length > 0) {
+      template.push({ type: "separator" });
+    }
+    template.push(
+      { label: "New tab", accelerator: "CmdOrCtrl+T", click: () => this.createVisibleTab({ activate: true }) },
+      {
+        label: "Reopen closed tab",
+        enabled: this.recentlyClosedVisibleTabs.length > 0,
+        click: () => {
+          const closed = this.recentlyClosedVisibleTabs.pop();
+          if (closed) this.createVisibleTab({ url: closed.url, activate: true });
+        }
+      }
+    );
+    Menu.buildFromTemplate(template).popup({ window });
+  }
+
+  private handleBrowserKeyboardInput(input: Input, tabId?: string): boolean {
+    if (input.type !== "keyDown") {
+      return false;
+    }
+    if (tabId && tabId !== this.activeVisibleTabId) {
+      return false;
+    }
+    const key = input.key.toLowerCase();
+    const command = input.meta || input.control;
+    if (input.control && key === "tab") {
+      this.cycleVisibleTab(input.shift ? -1 : 1);
+      return true;
+    }
+    if (command && key === "l") {
+      this.focusVisibleAddressBar();
+      return true;
+    }
+    if (command && key === "t") {
+      this.createVisibleTab({ activate: true });
+      return true;
+    }
+    if (command && key === "w") {
+      if (this.activeVisibleTabId) {
+        this.closeVisibleTabById(this.activeVisibleTabId);
+      }
+      return true;
+    }
+    if (command && key === "f") {
+      this.findOpen = true;
+      this.emitState();
+      this.focusVisibleFindInput();
+      return true;
+    }
+    if (command && key === "r") {
+      if (input.shift) {
+        this.activeVisibleTab()?.contents.reloadIgnoringCache();
+      } else {
+        this.reload("visible", this.activeVisibleTabId);
+      }
+      return true;
+    }
+    if (command && (key === "+" || key === "=")) {
+      this.stepPageZoom(1);
+      return true;
+    }
+    if (command && key === "-") {
+      this.stepPageZoom(-1);
+      return true;
+    }
+    if (command && key === "0") {
+      this.setPageZoom(1);
+      return true;
+    }
+    if ((command && key === "[") || (input.alt && key === "left")) {
+      this.goBack("visible", this.activeVisibleTabId);
+      return true;
+    }
+    if ((command && key === "]") || (input.alt && key === "right")) {
+      this.goForward("visible", this.activeVisibleTabId);
+      return true;
+    }
+    if (key === "f12") {
+      this.activeVisibleTab()?.contents.openDevTools({ mode: "detach" });
+      return true;
+    }
+    if (key === "escape" && this.findOpen) {
+      this.closeFindInPage();
+      return true;
+    }
+    return false;
+  }
+
+  private focusVisibleAddressBar() {
+    const contents = this.visibleWindow?.webContents;
+    if (!contents || contents.isDestroyed()) {
+      return;
+    }
+    contents.focus();
+    void contents.executeJavaScript('document.getElementById("address")?.focus(); document.getElementById("address")?.select();', true);
+  }
+
+  private focusVisibleFindInput() {
+    const contents = this.visibleWindow?.webContents;
+    if (!contents || contents.isDestroyed()) {
+      return;
+    }
+    contents.focus();
+    void contents.executeJavaScript('requestAnimationFrame(() => document.getElementById("find-input")?.focus())', true);
+  }
+
+  private findInPage(query: string, forward: boolean) {
+    const contents = this.activeVisibleTab()?.contents;
+    this.findOpen = true;
+    this.findQuery = query;
+    if (!contents || contents.isDestroyed() || !query) {
+      contents?.stopFindInPage("clearSelection");
+      this.findMatches = 0;
+      this.findActiveMatch = 0;
+      this.emitState();
+      return;
+    }
+    contents.findInPage(query, { forward, findNext: true });
+    this.emitState();
+  }
+
+  private closeFindInPage() {
+    this.findOpen = false;
+    this.findMatches = 0;
+    this.findActiveMatch = 0;
+    this.activeVisibleTab()?.contents.stopFindInPage("keepSelection");
+    this.emitState();
+  }
+
+  private stepPageZoom(direction: -1 | 1) {
+    const current = this.activeVisibleTab()?.contents.getZoomFactor() ?? 1;
+    const levels = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+    const next =
+      direction > 0
+        ? (levels.find((level) => level > current + 0.001) ?? levels.at(-1) ?? 3)
+        : ([...levels].reverse().find((level) => level < current - 0.001) ?? levels[0]);
+    this.setPageZoom(next);
+  }
+
+  private setPageZoom(factor: number) {
+    const contents = this.activeVisibleTab()?.contents;
+    if (!contents || contents.isDestroyed()) {
+      return;
+    }
+    contents.setZoomFactor(clampNumber(factor, 0.5, 3));
+    this.emitState();
+  }
+
+  private applyDevicePreset(preset: string) {
+    const presets: Record<string, { width: number; height: number }> = {
+      "mobile-s": { width: 320, height: 568 },
+      "mobile-m": { width: 375, height: 667 },
+      "mobile-l": { width: 430, height: 932 },
+      tablet: { width: 768, height: 1024 },
+      laptop: { width: 1440, height: 900 },
+      desktop: { width: 1920, height: 1080 },
+      "4k": { width: 3840, height: 2160 }
+    };
+    const selected = presets[preset];
+    this.deviceViewport = {
+      ...this.deviceViewport,
+      enabled: true,
+      preset,
+      ...(selected ?? {})
+    };
+    this.updateVisibleViewLayout();
+    this.emitState();
+  }
+
+  private applyDeviceSize(width: number, height: number) {
+    this.deviceViewport = {
+      enabled: true,
+      preset: "responsive",
+      width: clampNumber(Math.trunc(width || this.deviceViewport.width), 240, 4096),
+      height: clampNumber(Math.trunc(height || this.deviceViewport.height), 160, 4096)
+    };
+    this.updateVisibleViewLayout();
+    this.emitState();
+  }
+
+  private async captureVisibleViewportToClipboard() {
+    const active = this.activeVisibleTab();
+    if (!active || active.contents.isDestroyed()) {
+      return;
+    }
+    const image = await active.contents.capturePage();
+    if (image.isEmpty()) {
+      this.notifyBrowserShell("The browser viewport could not be captured.", true);
+      return;
+    }
+    clipboard.writeImage(image);
+    this.notifyBrowserShell("Browser screenshot copied to the clipboard.");
+  }
+
+  private async captureFullPageToClipboard() {
+    const active = this.activeVisibleTab();
+    if (!active || active.contents.isDestroyed()) {
+      return;
+    }
+    const image = await capturePageWithDebugger(active.contents, true);
+    if (!image || image.isEmpty()) {
+      this.notifyBrowserShell("The full page could not be captured.", true);
+      return;
+    }
+    clipboard.writeImage(image);
+    this.notifyBrowserShell("Full-page screenshot copied to the clipboard.");
+  }
+
+  private recordBrowserHistory(target: BrowserTargetRecord, contents: WebContents) {
+    const url = target.failedUrl ?? target.url;
+    if (!url || !isRestorableBrowserUrl(url) || isVisibleStartPageUrl(contents.getURL()) || isVisibleLoadErrorPageUrl(contents.getURL())) {
+      return;
+    }
+    const previous = this.browserHistory.at(-1);
+    if (previous?.url === url && previous.title === target.title) {
+      return;
+    }
+    this.browserHistory.push({ url, title: target.title || url, visitedAt: new Date().toISOString() });
+    if (this.browserHistory.length > 500) {
+      this.browserHistory.splice(0, this.browserHistory.length - 500);
+    }
+  }
+
+  private showBrowserHistoryMenu() {
+    const recent = this.browserHistory.slice(-20).reverse();
+    const template: MenuItemConstructorOptions[] = [
+      { label: "History", enabled: false },
+      ...(recent.length > 0
+        ? [
+            { type: "separator" as const },
+            ...recent.map((entry) => ({
+              label: entry.title || entry.url,
+              sublabel: entry.url,
+              click: () => this.createVisibleTab({ url: entry.url, activate: true })
+            }))
+          ]
+        : [{ label: "No browsing history", enabled: false }]),
+      { type: "separator" },
+      {
+        label: "Delete browsing history",
+        enabled: this.browserHistory.length > 0,
+        click: () => {
+          this.browserHistory.splice(0);
+          this.persistVisibleSessionNow();
+          this.notifyBrowserShell("Browser history cleared.");
+        }
+      }
+    ];
+    Menu.buildFromTemplate(template).popup({ window: this.visibleWindow });
+  }
+
+  private showBrowserOptionsMenu() {
+    const active = this.activeVisibleTab();
+    if (!active) {
+      return;
+    }
+    const zoom = Math.round(active.contents.getZoomFactor() * 100);
+    const template: MenuItemConstructorOptions[] = [
+      {
+        label: "Take a screenshot",
+        submenu: [
+          {
+            label: "Visible viewport",
+            accelerator: "CommandOrControl+Shift+S",
+            click: () => void this.captureVisibleViewportToClipboard()
+          },
+          { label: "Full page", click: () => void this.captureFullPageToClipboard() }
+        ]
+      },
+      {
+        label: "Find in page",
+        accelerator: "CommandOrControl+F",
+        click: () => {
+          this.findOpen = true;
+          this.emitState();
+          this.focusVisibleFindInput();
+        }
+      },
+      { label: "Print…", accelerator: "CommandOrControl+P", click: () => active.contents.print({ printBackground: true }) },
+      { label: "History", click: () => this.showBrowserHistoryMenu() },
+      { label: "Browser settings", click: () => this.openBrowserSettings() },
+      { type: "separator" },
+      {
+        label: `Zoom (${zoom}%)`,
+        submenu: [
+          { label: "Zoom in", accelerator: "CommandOrControl+=", click: () => this.stepPageZoom(1) },
+          { label: "Zoom out", accelerator: "CommandOrControl+-", click: () => this.stepPageZoom(-1) },
+          { label: "Reset", accelerator: "CommandOrControl+0", enabled: zoom !== 100, click: () => this.setPageZoom(1) }
+        ]
+      },
+      {
+        label: this.deviceViewport.enabled ? "Hide device toolbar" : "Show device toolbar",
+        click: () => {
+          this.deviceViewport = { ...this.deviceViewport, enabled: !this.deviceViewport.enabled };
+          this.updateVisibleViewLayout();
+          this.emitState();
+        }
+      },
+      { type: "separator" },
+      { label: "Duplicate tab", click: () => active.url && this.createVisibleTab({ url: active.url, activate: true }) },
+      {
+        label: "Reopen closed tab",
+        enabled: this.recentlyClosedVisibleTabs.length > 0,
+        accelerator: "CommandOrControl+Shift+T",
+        click: () => {
+          const closed = this.recentlyClosedVisibleTabs.pop();
+          if (closed) this.createVisibleTab({ url: closed.url, activate: true });
+        }
+      },
+      { label: "Open in external browser", enabled: Boolean(active.url), click: () => active.url && void shell.openExternal(active.url) },
+      { type: "separator" },
+      {
+        label: "Clear browsing data",
+        submenu: [
+          { label: "Clear cookies", click: () => void this.clearBrowserCookies() },
+          { label: "Clear cache", click: () => void this.clearBrowserCache() }
+        ]
+      },
+      { label: "Inspect", accelerator: "F12", click: () => active.contents.openDevTools({ mode: "detach" }) }
+    ];
+    Menu.buildFromTemplate(template).popup({ window: this.visibleWindow });
+  }
+
+  private openBrowserSettings() {
+    const existing = [...this.visibleTabs.values()].find((tab) => isVisibleSettingsPageUrl(tab.contents.getURL()));
+    if (existing) {
+      this.selectVisibleTabById(existing.id);
+      this.emitState();
+      return;
+    }
+    const target = this.createVisibleTab({ activate: true, deferLoad: true });
+    target.title = "Browser settings";
+    void target.contents.loadURL(visibleSettingsPageUrl(this.browserSettingsPageState())).catch((error: unknown) => {
+      target.lastError = error instanceof Error ? error.message : String(error);
+      this.emitState();
+    });
+  }
+
+  private refreshBrowserSettingsTabs() {
+    const url = visibleSettingsPageUrl(this.browserSettingsPageState());
+    for (const target of this.visibleTabs.values()) {
+      if (isVisibleSettingsPageUrl(target.contents.getURL())) {
+        void target.contents.loadURL(url).catch(() => undefined);
+      }
+    }
+  }
+
+  private browserSettingsPageState() {
+    return {
+      askDownloadLocation: this.askDownloadLocation,
+      downloadDirectory: this.downloadDirectory ?? app.getPath("downloads"),
+      historyCount: this.browserHistory.length,
+      permissionCount: this.browserPermissions.size
+    };
+  }
+
+  private async chooseDownloadDirectory() {
+    const window = this.visibleWindow;
+    const options = {
+      title: "Choose browser download location",
+      defaultPath: this.downloadDirectory ?? app.getPath("downloads"),
+      properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory">
+    };
+    const result = window && !window.isDestroyed() ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+    if (result.canceled || !result.filePaths[0]) {
+      return;
+    }
+    this.downloadDirectory = result.filePaths[0];
+    this.persistVisibleSessionNow();
+    this.refreshBrowserSettingsTabs();
+    this.notifyBrowserShell("Browser download location updated.");
+  }
+
+  private showDownloadsMenu() {
+    const recent = this.browserDownloads.slice(-8).reverse();
+    const items: MenuItemConstructorOptions[] = recent.map((download) => {
+      const progress =
+        download.state === "progressing" && download.totalBytes > 0
+          ? ` — ${Math.round((download.receivedBytes / download.totalBytes) * 100)}%`
+          : download.state === "completed"
+            ? ""
+            : ` — ${download.state}`;
+      return {
+        label: `${download.filename}${progress}`,
+        enabled: download.state === "completed" && Boolean(download.savePath),
+        click: () => download.savePath && shell.showItemInFolder(download.savePath)
+      };
+    });
+    Menu.buildFromTemplate([
+      { label: "Downloads", enabled: false },
+      ...(items.length > 0 ? [{ type: "separator" as const }, ...items] : [{ label: "No downloads yet", enabled: false }]),
+      { type: "separator" },
+      { label: "Open Downloads folder", click: () => void shell.openPath(app.getPath("downloads")) },
+      {
+        label: "Delete download history",
+        enabled: this.browserDownloads.length > 0,
+        click: () => {
+          this.browserDownloads.splice(0);
+          this.notifyBrowserShell("Browser download history cleared.");
+        }
+      }
+    ]).popup({ window: this.visibleWindow });
+  }
+
+  private configureBrowserSession(browserSession: Session) {
+    if (this.configuredBrowserSessions.has(browserSession)) {
+      return;
+    }
+    this.configuredBrowserSessions.add(browserSession);
+    browserSession.on("will-download", (_event, item) => {
+      const downloadDirectory = this.downloadDirectory ?? app.getPath("downloads");
+      const defaultPath = path.join(downloadDirectory, item.getFilename());
+      if (this.askDownloadLocation) {
+        item.setSaveDialogOptions({ title: "Save download", defaultPath });
+      } else if (this.downloadDirectory) {
+        mkdirSync(downloadDirectory, { recursive: true });
+        item.setSavePath(availableDownloadPath(downloadDirectory, item.getFilename()));
+      }
+      const record: BrowserDownloadRecord = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        filename: item.getFilename(),
+        url: item.getURL(),
+        state: "progressing",
+        receivedBytes: item.getReceivedBytes(),
+        totalBytes: item.getTotalBytes()
+      };
+      this.browserDownloads.push(record);
+      if (this.browserDownloads.length > 50) {
+        this.browserDownloads.splice(0, this.browserDownloads.length - 50);
+      }
+      item.on("updated", (_itemEvent, state) => {
+        record.receivedBytes = item.getReceivedBytes();
+        record.totalBytes = item.getTotalBytes();
+        if (state === "interrupted") {
+          record.state = "interrupted";
+        }
+        this.emitState();
+      });
+      item.once("done", (_itemEvent, state) => {
+        record.receivedBytes = item.getReceivedBytes();
+        record.totalBytes = item.getTotalBytes();
+        record.savePath = item.getSavePath() || undefined;
+        record.state = state === "completed" ? "completed" : state === "cancelled" ? "cancelled" : "interrupted";
+        this.notifyBrowserShell(
+          state === "completed" ? `${record.filename} downloaded.` : `${record.filename} download ${record.state}.`,
+          state !== "completed"
+        );
+      });
+      this.emitState();
+    });
+    browserSession.setPermissionRequestHandler((requestingContents, permission, callback, details) => {
+      const requestUrl = details.requestingUrl || requestingContents.getURL();
+      let host = requestUrl;
+      let origin = requestUrl;
+      try {
+        const parsed = new URL(requestUrl);
+        host = parsed.hostname;
+        origin = parsed.origin;
+      } catch {
+        // Keep the raw URL when it cannot be parsed.
+      }
+      const permissionKey = browserPermissionKey(origin, permission);
+      const savedDecision = this.browserPermissions.get(permissionKey);
+      if (savedDecision) {
+        callback(savedDecision === "allow");
+        return;
+      }
+      const permissionDialog: MessageBoxOptions = {
+        type: "question",
+        buttons: ["Allow", "Block"],
+        defaultId: 1,
+        cancelId: 1,
+        title: "Site permission",
+        message: `${host || "This site"} wants permission to use ${humanizePermission(permission)}.`,
+        detail: "This permission applies to the isolated Arivu browser profile."
+      };
+      const response = this.visibleWindow
+        ? dialog.showMessageBox(this.visibleWindow, permissionDialog)
+        : dialog.showMessageBox(permissionDialog);
+      void response.then(
+        (result) => {
+          const allowed = result.response === 0;
+          this.browserPermissions.set(permissionKey, allowed ? "allow" : "block");
+          this.persistVisibleSessionNow();
+          callback(allowed);
+        },
+        () => callback(false)
+      );
+    });
+    browserSession.setPermissionCheckHandler((_contents, permission, requestingOrigin) => {
+      return this.browserPermissions.get(browserPermissionKey(requestingOrigin, permission)) !== "block";
+    });
+  }
+
+  private showSiteInformationMenu() {
+    const active = this.activeVisibleTab();
+    if (!active?.url) {
+      return;
+    }
+    let parsed: URL | undefined;
+    try {
+      parsed = new URL(active.url);
+    } catch {
+      // The menu still offers a copy action for unusual URLs.
+    }
+    const secure = parsed?.protocol === "https:" || parsed?.protocol === "file:";
+    const origin = parsed?.origin && parsed.origin !== "null" ? parsed.origin : undefined;
+    const permissionEntries: Array<{ permission: string; label: string }> = [
+      { permission: "media", label: "Camera and microphone" },
+      { permission: "geolocation", label: "Location" },
+      { permission: "notifications", label: "Notifications" },
+      { permission: "clipboard-read", label: "Clipboard" },
+      { permission: "fullscreen", label: "Fullscreen" }
+    ];
+    const permissionMenu: MenuItemConstructorOptions[] = permissionEntries.map(({ permission, label }) => {
+      const key = browserPermissionKey(origin ?? active.url, permission);
+      const decision = this.browserPermissions.get(key);
+      const setDecision = (next: "allow" | "block" | undefined) => {
+        if (next) {
+          this.browserPermissions.set(key, next);
+        } else {
+          this.browserPermissions.delete(key);
+        }
+        this.persistVisibleSessionNow();
+        this.notifyBrowserShell(`${label} permission set to ${next ?? "ask"}.`);
+      };
+      return {
+        label,
+        submenu: [
+          { label: "Ask", type: "radio", checked: !decision, click: () => setDecision(undefined) },
+          { label: "Allow", type: "radio", checked: decision === "allow", click: () => setDecision("allow") },
+          { label: "Block", type: "radio", checked: decision === "block", click: () => setDecision("block") }
+        ]
+      };
+    });
+    Menu.buildFromTemplate([
+      { label: secure ? "Connection is secure" : "Connection is not secure", enabled: false },
+      { label: parsed?.hostname || active.url, enabled: false },
+      { type: "separator" },
+      { label: "Copy page address", click: () => clipboard.writeText(active.url) },
+      { label: "Site permissions", enabled: Boolean(origin), submenu: permissionMenu },
+      {
+        label: "Clear site data",
+        enabled: Boolean(parsed?.origin && parsed.origin !== "null"),
+        click: () => void this.clearSiteData(parsed?.origin)
+      },
+      { label: "Inspect", click: () => active.contents.openDevTools({ mode: "detach" }) }
+    ]).popup({ window: this.visibleWindow });
+  }
+
+  private showPageContextMenu(contents: WebContents, target: BrowserTargetRecord, params: ContextMenuParams) {
+    const template: MenuItemConstructorOptions[] = [];
+    if (params.isEditable) {
+      template.push(
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" }
+      );
+    } else if (params.selectionText) {
+      template.push({ role: "copy" });
+    }
+    if (params.linkURL) {
+      if (template.length) template.push({ type: "separator" });
+      template.push(
+        { label: "Open link in new tab", click: () => this.createVisibleTab({ url: params.linkURL, activate: true }) },
+        { label: "Open in external browser", click: () => void shell.openExternal(params.linkURL) },
+        { label: "Copy link address", click: () => clipboard.writeText(params.linkURL) }
+      );
+    }
+    if (template.length) template.push({ type: "separator" });
+    template.push(
+      { label: "Back", enabled: target.canGoBack, click: () => this.goBack("visible", target.id) },
+      { label: "Forward", enabled: target.canGoForward, click: () => this.goForward("visible", target.id) },
+      { label: "Reload", click: () => contents.reload() },
+      { type: "separator" },
+      { label: "Inspect", click: () => contents.inspectElement(params.x, params.y) }
+    );
+    Menu.buildFromTemplate(template).popup({ window: this.visibleWindow });
+  }
+
+  private async clearBrowserCookies() {
+    const active = this.activeVisibleTab();
+    if (!active) return;
+    await active.contents.session.clearStorageData({ storages: ["cookies"] });
+    this.notifyBrowserShell("Browser cookies cleared.");
+  }
+
+  private async clearBrowserCache() {
+    const active = this.activeVisibleTab();
+    if (!active) return;
+    await active.contents.session.clearCache();
+    this.notifyBrowserShell("Browser cache cleared.");
+  }
+
+  private async clearSiteData(origin: string | undefined) {
+    const active = this.activeVisibleTab();
+    if (!active || !origin) return;
+    await active.contents.session.clearStorageData({ origin });
+    this.notifyBrowserShell("Site data cleared.");
+  }
+
+  private notifyBrowserShell(message: string, error = false) {
+    this.shellNotice = { id: this.nextShellNoticeId++, message, error: error || undefined };
+    this.emitState();
   }
 
   private renderVisibleShellState() {
@@ -1237,7 +2299,20 @@ export class DesktopBrowserController implements BrowserToolController {
     if (!contents.getURL() || contents.isDestroyed()) {
       return;
     }
-    const state = this.publicVisibleTarget();
+    const state = {
+      ...this.publicVisibleTarget(),
+      chrome: {
+        zoomPercent: Math.round(((this.activeVisibleTab()?.contents.getZoomFactor() ?? 1) * 100) / 5) * 5,
+        findOpen: this.findOpen,
+        findQuery: this.findQuery,
+        findMatches: this.findMatches,
+        findActiveMatch: this.findActiveMatch,
+        device: this.deviceViewport,
+        notice: this.shellNotice,
+        downloadCount: this.browserDownloads.length,
+        activeDownloadCount: this.browserDownloads.filter((download) => download.state === "progressing").length
+      }
+    };
     const script = `window.__ARIVU_BROWSER_APPLY_STATE__?.(${JSON.stringify(state)});`;
     void contents.executeJavaScript(script, true).catch(() => undefined);
   }
@@ -1265,6 +2340,7 @@ export class DesktopBrowserController implements BrowserToolController {
   private emitState() {
     const state = this.getState();
     this.renderVisibleShellState();
+    this.scheduleVisibleSessionWrite();
     for (const listener of this.listeners) {
       listener(state);
     }
@@ -1302,7 +2378,25 @@ function parseVisibleShellCommand(url: string) {
   }
 }
 
+function isVisibleSettingsCommandUrl(url: string) {
+  const command = parseVisibleShellCommand(url);
+  return Boolean(
+    command &&
+    [
+      "set-ask-download",
+      "choose-download-directory",
+      "settings-clear-cookies",
+      "settings-clear-cache",
+      "settings-clear-history",
+      "settings-reset-permissions"
+    ].includes(command.action)
+  );
+}
+
 function visibleShellPageHtml() {
+  if (process.env.ARIVU_LEGACY_BROWSER_SHELL !== "1") {
+    return codexBrowserShellHtml({ defaultChromeHeight: DEFAULT_VISIBLE_CHROME_HEIGHT });
+  }
   return `<!doctype html>
 <html lang="en" data-${VISIBLE_SHELL_PAGE_MARKER}>
 <head>
@@ -1666,6 +2760,75 @@ function isVisibleStartPageUrl(url: string) {
   return url === visibleStartPageUrl();
 }
 
+function visibleSettingsPageUrl(state: {
+  askDownloadLocation: boolean;
+  downloadDirectory: string;
+  historyCount: number;
+  permissionCount: number;
+}) {
+  const html = `<!doctype html><html lang="en" data-${VISIBLE_SETTINGS_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>Browser settings</title><style>:root{color-scheme:dark;--bg:#171717;--panel:#202020;--line:#343434;--text:#f2f2f2;--muted:#a3a3a3;--accent:#5b9cf5}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,sans-serif}main{width:min(820px,calc(100vw - 40px));margin:0 auto;padding:40px 0 80px}header{position:sticky;top:0;padding:0 0 20px;background:linear-gradient(var(--bg) 78%,transparent);z-index:2}h1{font-size:26px;margin:0 0 18px}#search{width:100%;height:38px;border:1px solid var(--line);border-radius:10px;background:#222;color:var(--text);padding:0 12px;outline:0}#search:focus{border-color:#555}section{display:grid;gap:14px}article{padding:18px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}article[hidden]{display:none}h2{font-size:16px;margin:0 0 6px}p{margin:0;color:var(--muted)}.row{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.stack{min-width:0}.path{margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:12px ui-monospace,SFMono-Regular,monospace;color:#bbb}button{flex:0 0 auto;border:1px solid var(--line);border-radius:8px;background:#292929;color:var(--text);padding:7px 10px;cursor:pointer}button:hover{background:#333}.switch{display:flex;align-items:center;gap:9px;color:var(--muted)}input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}.count{color:#ddd;font-weight:600}.danger{color:#ffaaa4}</style></head><body><main><header><h1>Browser settings</h1><input id="search" type="search" placeholder="Search settings" aria-label="Search browser settings"></header><section id="sections"><article data-search="downloads location save ask"><h2>Downloads</h2><p>Control where files downloaded by the isolated Arivu browser are saved.</p><div class="row"><div class="stack"><strong>Download location</strong><div class="path">${escapeHtml(state.downloadDirectory)}</div></div><button data-command="choose-download-directory">Change…</button></div><div class="row"><span>Ask where to save each file</span><label class="switch"><input id="ask-download" type="checkbox" ${state.askDownloadLocation ? "checked" : ""}>Ask</label></div></article><article data-search="privacy cookies cache history clear browsing data"><h2>Privacy and browser data</h2><p>History entries: <span class="count">${state.historyCount}</span></p><div class="row"><span>Cookies and site storage</span><button data-command="settings-clear-cookies">Clear cookies</button></div><div class="row"><span>Cached files</span><button data-command="settings-clear-cache">Clear cache</button></div><div class="row"><span>Browsing history</span><button class="danger" data-command="settings-clear-history">Delete history</button></div></article><article data-search="permissions camera microphone location notifications clipboard fullscreen"><h2>Site permissions</h2><p>Saved permission decisions: <span class="count">${state.permissionCount}</span>. Per-site Allow, Block, and Ask controls are also available from the site-information button.</p><div class="row"><span>Reset all saved permission decisions</span><button data-command="settings-reset-permissions">Reset permissions</button></div></article><article data-search="developer devtools inspect cdp debugging"><h2>Developer tools</h2><p>Use F12 or Browser options → Inspect to open Chromium DevTools for the active page. Arivu browser tasks use a separate, isolated browser profile.</p></article><article data-search="keyboard shortcuts tabs navigation zoom find"><h2>Keyboard shortcuts</h2><p>⌘/Ctrl+L address · ⌘/Ctrl+T new tab · ⌘/Ctrl+W close tab · Ctrl+Tab cycle tabs · ⌘/Ctrl+F find · ⌘/Ctrl+R reload · ⌘/Ctrl +/− zoom</p></article></section></main><script>const command=(name,params={})=>{const url=new URL("arivu-browser://"+name);for(const[key,value]of Object.entries(params))url.searchParams.set(key,String(value));location.href=url.href};document.querySelectorAll("[data-command]").forEach(button=>button.addEventListener("click",()=>command(button.dataset.command)));document.getElementById("ask-download").addEventListener("change",event=>command("set-ask-download",{value:event.target.checked}));document.getElementById("search").addEventListener("input",event=>{const query=event.target.value.trim().toLowerCase();document.querySelectorAll("article").forEach(article=>article.hidden=Boolean(query)&&!article.dataset.search.includes(query)&&!article.innerText.toLowerCase().includes(query))});</script></body></html>`;
+  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
+}
+
+function isVisibleSettingsPageUrl(url: string) {
+  if (!url.startsWith(VISIBLE_START_PAGE_PREFIX)) {
+    return false;
+  }
+  try {
+    return decodeURIComponent(url).includes(`data-${VISIBLE_SETTINGS_PAGE_MARKER}`);
+  } catch {
+    return false;
+  }
+}
+
+function visibleLoadErrorPageUrl(failedUrl: string, errorCode: number, errorDescription: string) {
+  let host = failedUrl;
+  try {
+    host = new URL(failedUrl).hostname || failedUrl;
+  } catch {
+    // Keep the raw URL in the fallback page.
+  }
+  const summary =
+    errorCode === -105
+      ? `${host}'s server IP address could not be found`
+      : errorCode === -106
+        ? `${host} could not be loaded because the computer is offline`
+        : errorCode === -102
+          ? `${host} refused to connect`
+          : errorCode === -118
+            ? `${host} took too long to respond`
+            : errorCode <= -200 && errorCode >= -299
+              ? `${host}'s certificate could not be verified`
+              : `${host} could not be loaded`;
+  const failedUrlJson = JSON.stringify(failedUrl).replace(/</g, "\\u003c");
+  const html = `<!doctype html><html data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>This site can't be reached</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#171717;color:#f1f1f1;font-family:Inter,system-ui,sans-serif}.card{width:min(560px,calc(100vw - 48px));padding:42px}.icon{width:42px;height:42px;border:2px solid #777;border-radius:50%;display:grid;place-items:center;color:#aaa;font-size:22px}h1{margin:24px 0 10px;font-size:26px}p{color:#aaa;line-height:1.55}.try{margin-top:24px;color:#ddd}.try+ul{padding-left:20px;color:#aaa;line-height:1.7}button{margin-top:20px;border:0;border-radius:9px;padding:9px 15px;background:#f1f1f1;color:#171717;font-weight:650;cursor:pointer}code{display:block;margin-top:18px;color:#777;font-size:11px}</style></head><body><main class="card"><div class="icon">!</div><h1>This site can't be reached</h1><p>${escapeHtml(summary)}</p><p class="try">Try:</p><ul><li>Checking the connection</li><li>Checking the proxy, firewall, and DNS configuration</li></ul><button id="retry" type="button">Reload</button><code>${escapeHtml(errorDescription)} (${errorCode})</code></main><script>document.getElementById("retry").addEventListener("click",()=>{location.href=${failedUrlJson}})</script></body></html>`;
+  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
+}
+
+function visibleCrashRecoveryPageUrl(failedUrl: string, reason: string) {
+  const retryTargetJson = JSON.stringify(failedUrl || visibleStartPageUrl()).replace(/</g, "\\u003c");
+  const html = `<!doctype html><html data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>This tab crashed</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#171717;color:#f1f1f1;font-family:Inter,system-ui,sans-serif}.card{width:min(560px,calc(100vw - 48px));padding:42px}.icon{width:42px;height:42px;border:2px solid #777;border-radius:50%;display:grid;place-items:center;color:#aaa;font-size:22px}h1{margin:24px 0 10px;font-size:26px}p{color:#aaa;line-height:1.55}button{margin-top:20px;border:0;border-radius:9px;padding:9px 15px;background:#f1f1f1;color:#171717;font-weight:650;cursor:pointer}code{display:block;margin-top:18px;color:#777;font-size:11px}</style></head><body><main class="card"><div class="icon">!</div><h1>This tab crashed</h1><p>The page renderer stopped unexpectedly. Reload the tab to continue where you left off.</p><button id="retry" type="button">Reload tab</button><code>${escapeHtml(reason)}</code></main><script>document.getElementById("retry").addEventListener("click",()=>{location.href=${retryTargetJson}})</script></body></html>`;
+  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
+}
+
+function isVisibleLoadErrorPageUrl(url: string) {
+  if (!url.startsWith(VISIBLE_START_PAGE_PREFIX)) {
+    return false;
+  }
+  try {
+    return decodeURIComponent(url).includes(`data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}`);
+  } catch {
+    return false;
+  }
+}
+
+function escapeHtml(value: string) {
+  return value.replace(
+    /[&<>"']/g,
+    (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character
+  );
+}
+
 function visibleStartPageHtml() {
   return `<!doctype html>
 <html lang="en" data-${VISIBLE_START_PAGE_MARKER}>
@@ -1867,6 +3030,7 @@ function publicTarget(target: BrowserTargetRecord): BrowserTargetState {
     mode: target.mode,
     url: target.url,
     title: target.title,
+    ...(target.faviconUrl ? { faviconUrl: target.faviconUrl } : {}),
     loading: target.loading,
     canGoBack: target.canGoBack,
     canGoForward: target.canGoForward,
@@ -1882,6 +3046,7 @@ function publicTab(target: BrowserTabRecord) {
     id: target.id,
     url: target.url,
     title: target.title,
+    ...(target.faviconUrl ? { faviconUrl: target.faviconUrl } : {}),
     loading: target.loading,
     canGoBack: target.canGoBack,
     canGoForward: target.canGoForward,
@@ -1890,6 +3055,23 @@ function publicTab(target: BrowserTabRecord) {
     ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
     ...(target.lastScreenshotPath ? { lastScreenshotPath: target.lastScreenshotPath } : {})
   };
+}
+
+function humanizePermission(permission: string): string {
+  return permission
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[-_]+/g, " ")
+    .toLowerCase();
+}
+
+function browserPermissionKey(origin: string, permission: string) {
+  let normalizedOrigin = origin;
+  try {
+    normalizedOrigin = new URL(origin).origin;
+  } catch {
+    // Preserve Chromium's requesting-origin value if it is not a standard URL.
+  }
+  return `${normalizedOrigin}|${permission}`;
 }
 
 function browserWebPreferences(mode: BrowserMode): WebPreferences {
@@ -1945,6 +3127,28 @@ function isNavigationAbortError(error: unknown) {
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function isRestorableBrowserUrl(value: string) {
+  if (value === "") {
+    return true;
+  }
+  try {
+    return ["http:", "https:", "file:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function availableDownloadPath(directory: string, filename: string) {
+  const safeFilename = path.basename(filename) || "download";
+  const extension = path.extname(safeFilename);
+  const stem = path.basename(safeFilename, extension);
+  let candidate = path.join(directory, safeFilename);
+  for (let suffix = 1; suffix < 10_000 && existsSync(candidate); suffix += 1) {
+    candidate = path.join(directory, `${stem} (${suffix})${extension}`);
+  }
+  return candidate;
 }
 
 function frameList(contents: WebContents) {
@@ -2030,7 +3234,7 @@ async function waitForLoadToStop(contents: WebContents) {
   });
 }
 
-async function capturePageWithDebugger(contents: WebContents) {
+async function capturePageWithDebugger(contents: WebContents, captureBeyondViewport = false) {
   const debuggerApi = contents.debugger;
   const wasAttached = debuggerApi.isAttached();
   try {
@@ -2040,7 +3244,7 @@ async function capturePageWithDebugger(contents: WebContents) {
     const result = (await debuggerApi.sendCommand("Page.captureScreenshot", {
       format: "png",
       fromSurface: true,
-      captureBeyondViewport: false
+      captureBeyondViewport
     })) as BrowserToolResult;
     const data = typeof result.data === "string" ? result.data : "";
     if (!data) {

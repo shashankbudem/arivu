@@ -19,6 +19,7 @@ export type BrowserTabState = {
   id: string;
   url: string;
   title: string;
+  faviconUrl?: string;
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;

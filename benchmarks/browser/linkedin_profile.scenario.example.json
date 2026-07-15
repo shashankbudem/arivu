@@ -1,0 +1,40 @@
+{
+  "name": "linkedin-profile-edit",
+  "profile_url": "https://www.linkedin.com/in/me/",
+  "sections": [
+    {
+      "name": "intro",
+      "opener": {
+        "role": "button",
+        "name": "Edit intro"
+      },
+      "save": {
+        "role": "button",
+        "name": "Save"
+      },
+      "fields": [
+        {
+          "name": "first_name",
+          "locator": {
+            "label": "First name"
+          },
+          "expected": "Benchmark"
+        },
+        {
+          "name": "last_name",
+          "locator": {
+            "label": "Last name"
+          },
+          "expected": "User"
+        },
+        {
+          "name": "headline",
+          "locator": {
+            "label": "Headline"
+          },
+          "expected": "Browser agent benchmark profile"
+        }
+      ]
+    }
+  ]
+}

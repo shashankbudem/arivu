@@ -228,8 +228,11 @@ export class Agent {
 
       const allowedToolNames = runOptions.allowedToolNames ? new Set(runOptions.allowedToolNames) : undefined;
       const toolSchemas = allowedToolNames ? tools.schemas.filter((tool) => allowedToolNames.has(tool.name)) : tools.schemas;
+      const initiallyDisabled = await resolveDisabledToolNames(runOptions.disabledToolNames);
       if (
         shouldRefreshBrowserEvidence(prompt, mode, this.session.messages) &&
+        !initiallyDisabled.has(BROWSER_STATE_TOOL) &&
+        !initiallyDisabled.has(BROWSER_SCREENSHOT_TOOL) &&
         hasTool(toolSchemas, BROWSER_STATE_TOOL) &&
         hasTool(toolSchemas, BROWSER_SCREENSHOT_TOOL)
       ) {
@@ -239,10 +242,15 @@ export class Agent {
       let mimicryRetries = 0;
       for (let step = 0; step < MAX_STEPS; step += 1) {
         throwIfAborted(runOptions.signal);
+        // Re-resolved every step so in-app tool toggles flipped mid-run take effect at the next
+        // model request instead of waiting for the next prompt.
+        const disabledToolNames = await resolveDisabledToolNames(runOptions.disabledToolNames);
         // After a web search we only withhold web_search itself (the transient instruction in
         // messagesForStep tells the model to answer from the results). Every other tool stays
         // available so a coding task that searched once can still read and edit files.
-        const availableTools = webSearchCalls > 0 ? toolSchemas.filter((tool) => tool.name !== WEB_SEARCH_TOOL) : toolSchemas;
+        const availableTools = toolSchemas.filter(
+          (tool) => !disabledToolNames.has(tool.name) && (webSearchCalls === 0 || tool.name !== WEB_SEARCH_TOOL)
+        );
         const response = await this.complete(
           {
             messages: messagesForStep(this.session.messages, webSearchCalls, [
@@ -749,6 +757,13 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function hasTool(tools: ChatRequest["tools"], name: string) {
   return tools.some((tool) => tool.name === name);
+}
+
+async function resolveDisabledToolNames(source: AgentRunOptions["disabledToolNames"]): Promise<Set<string>> {
+  if (!source) {
+    return new Set();
+  }
+  return new Set(typeof source === "function" ? await source() : source);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined) {
