@@ -663,7 +663,11 @@ describe("createToolRegistry", () => {
   it("truncates broad search output before returning it to the transcript", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-search-"));
     try {
-      await writeFile(path.join(tempDir, "matches.txt"), Array.from({ length: 5000 }, (_, index) => `needle ${index}`).join("\n"), "utf8");
+      await writeFile(
+        path.join(tempDir, "matches.txt"),
+        Array.from({ length: 5000 }, (_, index) => `needle ${index} ${"x".repeat(80)}`).join("\n"),
+        "utf8"
+      );
       const registry = createRegistry(tempDir);
 
       const result = await registry.execute("search", { query: "needle", path: ".", maxResults: 2000 });
