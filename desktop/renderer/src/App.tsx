@@ -3501,11 +3501,7 @@ export function App() {
         />
       ) : null}
       {apiLogOpen ? (
-        <ApiRequestLogPanel
-          entries={apiRequestLog}
-          onClear={() => void clearApiRequestLogEntries()}
-          onClose={() => setApiLogOpen(false)}
-        />
+        <ApiRequestLogPanel entries={apiRequestLog} onClear={() => void clearApiRequestLogEntries()} onClose={() => setApiLogOpen(false)} />
       ) : null}
       {state &&
       !onboardingDismissed &&
@@ -4355,15 +4351,7 @@ function ModelSwitcher({
   );
 }
 
-function ApiRequestLogPanel({
-  entries,
-  onClear,
-  onClose
-}: {
-  entries: ApiRequestLogEntry[];
-  onClear: () => void;
-  onClose: () => void;
-}) {
+function ApiRequestLogPanel({ entries, onClear, onClose }: { entries: ApiRequestLogEntry[]; onClear: () => void; onClose: () => void }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   return createPortal(
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
@@ -4432,7 +4420,10 @@ function ApiRequestLogPanel({
                           <summary>Request messages ({entry.requestMessages.length})</summary>
                           <pre>
                             {entry.requestMessages
-                              .map((message) => `[${message.role}]${message.toolCalls?.length ? ` calls: ${message.toolCalls.join(", ")}` : ""}\n${message.content}`)
+                              .map(
+                                (message) =>
+                                  `[${message.role}]${message.toolCalls?.length ? ` calls: ${message.toolCalls.join(", ")}` : ""}\n${message.content}`
+                              )
                               .join("\n\n")}
                           </pre>
                         </details>
