@@ -20,14 +20,48 @@ export function summarizePatch(diff: string): string {
   return patches.map((patch) => `${cleanPatchPath(patch.newPath)} (${patch.hunks.length} hunks)`).join(", ");
 }
 
-export async function applyUnifiedDiff(diff: string, resolvePath: (path: string) => string, beforeWrite: (path: string) => Promise<void>) {
+export function changedPathsFromDiff(diff: string): string[] {
+  return parseUnifiedDiff(diff).map((patch) => cleanPatchPath(patch.newPath));
+}
+
+export function unifiedDiffStats(diff: string) {
+  const patches = parseUnifiedDiff(diff);
+  const stats = {
+    changedPaths: patches.map((patch) => cleanPatchPath(patch.newPath)),
+    fileCount: patches.length,
+    hunkCount: 0,
+    additions: 0,
+    deletions: 0,
+    changedLines: 0
+  };
+  for (const patch of patches) {
+    stats.hunkCount += patch.hunks.length;
+    for (const hunk of patch.hunks) {
+      for (const line of hunk.lines) {
+        if (line.startsWith("+")) {
+          stats.additions += 1;
+        } else if (line.startsWith("-")) {
+          stats.deletions += 1;
+        }
+      }
+    }
+  }
+  stats.changedLines = stats.additions + stats.deletions;
+  return stats;
+}
+
+export async function applyUnifiedDiff(
+  diff: string,
+  resolvePath: (path: string) => string | Promise<string>,
+  beforeWrite: (path: string) => Promise<void>
+) {
   const patches = parseUnifiedDiff(diff);
   if (patches.length === 0) {
     throw new Error("Patch did not contain any file changes.");
   }
 
   for (const patch of patches) {
-    const target = resolvePath(cleanPatchPath(patch.newPath));
+    const target = await resolvePath(cleanPatchPath(patch.newPath));
     const exists = await existsFile(target);
     if (exists) {
       await beforeWrite(target);
@@ -83,7 +117,7 @@ export function parseUnifiedDiff(diff: string): FilePatch[] {
         if (hunkLine === "\\ No newline at end of file") {
           continue;
         }
-        if (/^[ +\-]/.test(hunkLine)) {
+        if (/^[ +-]/.test(hunkLine)) {
           hunk.lines.push(hunkLine);
           continue;
         }

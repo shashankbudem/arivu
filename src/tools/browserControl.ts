@@ -23,6 +23,8 @@ export type BrowserTabState = {
   canGoBack: boolean;
   canGoForward: boolean;
   lastError?: string;
+  lastSnapshotAt?: string;
+  lastScreenshotAt?: string;
   lastScreenshotPath?: string;
 };
 
@@ -43,15 +45,61 @@ export type BrowserConsoleEntry = {
 
 export type BrowserToolResult = Record<string, unknown>;
 
+export type BrowserTaskModelConfig = {
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+  providerId?: string;
+  providerName?: string;
+  maxSteps?: number;
+  stepDelayMs?: number;
+};
+
 export type BrowserToolController = {
   getState(): BrowserState;
+  selectTab(args: { tabId: string }): Promise<BrowserToolResult>;
   open(args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }): Promise<BrowserToolResult>;
   screenshot(args: { mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
   snapshot(args: { mode?: BrowserMode; tabId?: string; maxLength?: number }): Promise<BrowserToolResult>;
   console(args: { mode?: BrowserMode; tabId?: string; levels?: string[]; limit?: number }): Promise<BrowserToolResult>;
-  click(args: { target: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
-  clickAt(args: { x: number; y: number; mode?: BrowserMode; tabId?: string; coordinateSpace?: "css" | "image" }): Promise<BrowserToolResult>;
-  type(args: { target: string; text: string; mode?: BrowserMode; tabId?: string; submit?: boolean }): Promise<BrowserToolResult>;
+  click(args: { target?: string; index?: number; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
+  clickAt(args: {
+    x: number;
+    y: number;
+    mode?: BrowserMode;
+    tabId?: string;
+    coordinateSpace?: "css" | "image";
+  }): Promise<BrowserToolResult>;
+  type(args: {
+    target?: string;
+    index?: number;
+    text: string;
+    mode?: BrowserMode;
+    tabId?: string;
+    submit?: boolean;
+  }): Promise<BrowserToolResult>;
+  scroll(args: {
+    direction: "up" | "down" | "left" | "right";
+    pixels?: number;
+    numPages?: number;
+    index?: number;
+    mode?: BrowserMode;
+    tabId?: string;
+  }): Promise<BrowserToolResult>;
+  selectOption(args: { index: number; optionText: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
+  task(args: {
+    instruction: string;
+    mode?: BrowserMode;
+    tabId?: string;
+    maxSteps?: number;
+    timeoutMs?: number;
+    allowedDomains?: string[];
+    allowJavaScript?: boolean;
+    allowSensitiveActions?: boolean;
+    modelConfig: BrowserTaskModelConfig;
+    signal?: AbortSignal;
+    onProgress?: (progress: { stepIndex: number; summary: string }) => void;
+  }): Promise<BrowserToolResult>;
 };
 
 export function normalizeBrowserMode(value: unknown): BrowserMode | undefined {
@@ -78,9 +126,22 @@ export function normalizeBrowserUrl(input: string) {
     assertAllowedBrowserProtocol(parsed);
     return parsed.toString();
   }
+  if (!isLikelyBrowserHost(trimmed)) {
+    return googleBrowserSearchUrl(trimmed);
+  }
   const parsed = new URL(`https://${trimmed}`);
   assertAllowedBrowserProtocol(parsed);
   return parsed.toString();
+}
+
+function isLikelyBrowserHost(value: string) {
+  return /^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:\/.*)?$/i.test(value);
+}
+
+function googleBrowserSearchUrl(query: string) {
+  const url = new URL("https://www.google.com/search");
+  url.searchParams.set("q", query);
+  return url.toString();
 }
 
 export function isLocalBrowserUrl(rawUrl: string) {

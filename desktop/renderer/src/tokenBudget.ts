@@ -5,6 +5,7 @@ export type TokenTruncation = {
 };
 
 const TOKEN_PART_PATTERN = /\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu;
+// eslint-disable-next-line no-control-regex -- the full ASCII range, including control chars, is intentional here
 const ASCII_WORD_PATTERN = /^[\x00-\x7F]+$/;
 const WORD_PATTERN = /^[\p{L}\p{N}_]+$/u;
 

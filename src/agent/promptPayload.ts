@@ -20,6 +20,25 @@ export type PromptLoopOptions = {
   maxIterations: number;
 };
 
+export type PromptWorktreeOptions = {
+  enabled: boolean;
+  taskRunId?: string;
+  replayOfTaskRunId?: string;
+  plannedFromTaskRunId?: string;
+};
+
+export type PromptPlanOptions = {
+  enabled: boolean;
+};
+
+export function normalizePromptRetryFromUserMessageIndex(payload: PromptPayload): number | undefined {
+  if (!isRecord(payload) || payload.retryFromUserMessageIndex === undefined) {
+    return undefined;
+  }
+  const value = payload.retryFromUserMessageIndex;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
 export function normalizePromptPayload(payload: PromptPayload): ChatContent {
   if (typeof payload === "string") {
     return payload.trim();
@@ -88,6 +107,54 @@ export function normalizePromptLoopOptions(payload: PromptPayload): PromptLoopOp
     enabled,
     maxIterations: clampInteger(rawMaxIterations, 1, 10)
   };
+}
+
+export function normalizePromptPlanOptions(payload: PromptPayload): PromptPlanOptions {
+  if (!isRecord(payload)) {
+    return { enabled: false };
+  }
+
+  const plan = payload.plan;
+  if (plan === true) {
+    return { enabled: true };
+  }
+  if (!isRecord(plan)) {
+    return { enabled: false };
+  }
+
+  return { enabled: plan.enabled === true };
+}
+
+export function normalizePromptWorktreeOptions(payload: PromptPayload): PromptWorktreeOptions {
+  if (!isRecord(payload)) {
+    return { enabled: false };
+  }
+
+  const worktree = payload.worktree;
+  if (worktree === true) {
+    return { enabled: true };
+  }
+  if (!isRecord(worktree)) {
+    return { enabled: false };
+  }
+
+  const enabled = worktree.enabled === true;
+  if (!enabled) {
+    return { enabled: false };
+  }
+  const taskRunId = normalizeTaskRunId(worktree.taskRunId);
+  const replayOfTaskRunId = normalizeTaskRunId(worktree.replayOfTaskRunId);
+  const plannedFromTaskRunId = normalizeTaskRunId(worktree.plannedFromTaskRunId);
+  return {
+    enabled,
+    ...(taskRunId ? { taskRunId } : {}),
+    ...(replayOfTaskRunId ? { replayOfTaskRunId } : {}),
+    ...(plannedFromTaskRunId ? { plannedFromTaskRunId } : {})
+  };
+}
+
+function normalizeTaskRunId(value: unknown) {
+  return typeof value === "string" && /^[a-zA-Z0-9._:-]+$/.test(value.trim()) ? value.trim() : undefined;
 }
 
 function normalizeChatContent(content: unknown): ChatContent {

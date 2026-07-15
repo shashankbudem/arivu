@@ -61,16 +61,12 @@ describe("web search helpers", () => {
 
   it("searches with the expected RSS endpoint", async () => {
     const calls: string[] = [];
-    const results = await searchWeb(
-      "hello world",
-      1,
-      {
-        async fetcher(input) {
-          calls.push(input);
-          return new Response(RSS_FIXTURE, { status: 200 });
-        }
+    const results = await searchWeb("hello world", 1, {
+      async fetcher(input) {
+        calls.push(input);
+        return new Response(RSS_FIXTURE, { status: 200 });
       }
-    );
+    });
 
     expect(calls[0]).toContain("www.bing.com/search");
     expect(calls[0]).toContain("format=rss");
@@ -138,5 +134,16 @@ describe("web search helpers", () => {
         score: 0.92
       }
     ]);
+  });
+
+  it("bounds Tavily error bodies", async () => {
+    await expect(
+      searchWeb("hello world", 2, {
+        tavilyApiKey: "tvly-test",
+        async fetcher() {
+          return new Response("x".repeat(300_000), { status: 500 });
+        }
+      })
+    ).rejects.toThrow(/\[truncated\]/);
   });
 });

@@ -1,4 +1,5 @@
 import type { TrustMode } from "../permissions/types.js";
+import type { CommandExecutionProfile } from "../execution/profile.js";
 import type { ChatContent } from "./content.js";
 
 export type ChatRole = "system" | "user" | "assistant" | "tool";
@@ -30,6 +31,7 @@ export type ChatRequest = {
 
 export type ChatResponse = {
   message: ChatMessage;
+  usage?: ChatUsage;
 };
 
 export type ChatStreamEvent =
@@ -48,9 +50,19 @@ export type ChatStreamEvent =
 
 export type ChatStreamHandler = (event: ChatStreamEvent) => void | Promise<void>;
 
+export type ChatUsage = {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+};
+
+export type ChatCallOptions = {
+  signal?: AbortSignal;
+};
+
 export interface ChatClient {
-  complete(request: ChatRequest): Promise<ChatResponse>;
-  stream?(request: ChatRequest, onEvent?: ChatStreamHandler): Promise<ChatResponse>;
+  complete(request: ChatRequest, options?: ChatCallOptions): Promise<ChatResponse>;
+  stream?(request: ChatRequest, onEvent?: ChatStreamHandler, options?: ChatCallOptions): Promise<ChatResponse>;
 }
 
 export type AgentRunEvent =
@@ -75,15 +87,48 @@ export type AgentRunEvent =
       toolCallId: string;
       name: string;
       result: string;
+    }
+  | {
+      type: "browser_task_progress";
+      stepIndex: number;
+      summary: string;
     };
 
 export type AgentRunOptions = {
   onEvent?: (event: AgentRunEvent) => void | Promise<void>;
   skillNames?: string[];
   promptAlreadyInSession?: boolean;
+  allowedToolNames?: string[];
+  /** Aborts the run between steps, cancels the in-flight model request, and terminates running commands. */
+  signal?: AbortSignal;
+  /** Receives per-run token usage as reported by the provider. */
+  onUsage?: (usage: ChatUsage) => void | Promise<void>;
 };
 
+export class AgentRunAbortedError extends Error {
+  constructor(message = "Run stopped.") {
+    super(message);
+    this.name = "AgentRunAbortedError";
+  }
+}
+
 export type AgentLoopStatus = "running" | "stopping" | "completed" | "stopped" | "blocked" | "failed" | "max_iterations";
+export type AgentLoopDecision = "continue" | "done" | "blocked";
+export type AgentLoopIterationStatus = "running" | "continued" | "completed" | "stopped" | "blocked" | "failed" | "max_iterations";
+
+export type AgentLoopIteration = {
+  iteration: number;
+  status: AgentLoopIterationStatus;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  decision?: AgentLoopDecision;
+  assistantMessageIndex?: number;
+  outputPreview?: string;
+  toolCallCount?: number;
+  artifactCount?: number;
+  error?: string;
+};
 
 export type AgentLoopState = {
   status: AgentLoopStatus;
@@ -93,11 +138,472 @@ export type AgentLoopState = {
   startedAt: string;
   updatedAt: string;
   stopRequested?: boolean;
-  lastDecision?: "continue" | "done" | "blocked";
+  lastDecision?: AgentLoopDecision;
+  iterations?: AgentLoopIteration[];
+};
+
+export type AgentTaskRunStatus = "queued" | "running" | "completed" | "failed" | "stopped" | "blocked" | "max_iterations";
+
+export type AgentTaskRunCapability =
+  | "read_repo"
+  | "write_workspace"
+  | "run_command"
+  | "network_fetch"
+  | "browser_control"
+  | "mcp_call"
+  | "skill_context"
+  | "local_context"
+  | "unknown";
+
+export type AgentTaskRunToolStatus = "running" | "done" | "failed";
+
+export type AgentTaskRunToolCall = {
+  id: string;
+  toolCallId: string;
+  name: string;
+  arguments?: unknown;
+  capability: AgentTaskRunCapability;
+  status: AgentTaskRunToolStatus;
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+  resultPreview?: string;
+  artifactIds?: string[];
+};
+
+export type AgentTaskRunApprovalStatus = "allowed" | "requested" | "approved" | "denied" | "blocked";
+export type AgentTaskRunApprovalEffect = "allow" | "prompt" | "deny";
+export type AgentTaskRunApprovalOverride = "prompt" | "deny";
+export type AgentTaskRunApprovalScopeKind = "path" | "query" | "command" | "network" | "browser" | "mcp" | "unknown";
+export type AgentTaskRunApprovalScope = {
+  kind: AgentTaskRunApprovalScopeKind;
+  label: string;
+  value?: string;
+  detail?: string;
+};
+
+export type AgentTaskRunApprovalChangePreview = {
+  kind: "patch" | "file_change";
+  title: string;
+  summary?: string;
+  path?: string;
+  writeMode?: "create" | "replace";
+  diff?: string;
+  diffTruncated?: boolean;
+  content?: string;
+  contentTruncated?: boolean;
+  original?: string;
+  originalTruncated?: boolean;
+  changedPaths?: string[];
+  additions?: number;
+  deletions?: number;
+  lineCount?: number;
+  bytes?: number;
+};
+
+export type AgentTaskRunApproval = {
+  id: string;
+  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
+  capability: AgentTaskRunCapability;
+  status: AgentTaskRunApprovalStatus;
+  trustMode: TrustMode;
+  effect: AgentTaskRunApprovalEffect;
+  label: string;
+  reason: string;
+  risky: boolean;
+  override?: AgentTaskRunApprovalOverride;
+  scope?: AgentTaskRunApprovalScope;
+  changePreview?: AgentTaskRunApprovalChangePreview;
+  summary: string;
+  message?: string;
+  createdAt: string;
+  requestedAt?: string;
+  decidedAt?: string;
+  updatedAt?: string;
+};
+
+export type AgentTaskRunApprovalEvent = Omit<AgentTaskRunApproval, "createdAt" | "requestedAt" | "decidedAt" | "updatedAt"> & {
+  createdAt?: string;
+};
+
+/** Structured approval request handed to an interactive prompt so UIs can render from data, not parsed text. */
+export type ApprovalPromptRequest = {
+  actionType: AgentTaskRunApproval["actionType"];
+  capability: AgentTaskRunCapability;
+  summary: string;
+  label: string;
+  reason: string;
+  risky: boolean;
+  scope?: AgentTaskRunApprovalScope;
+  changePreview?: AgentTaskRunApprovalChangePreview;
+};
+
+export type AgentTaskRunReportStatus = "passed" | "failed" | "unknown";
+
+export type AgentTaskRunFailedTest = {
+  name: string;
+  classname?: string;
+  file?: string;
+  line?: number;
+  message?: string;
+  type?: "failure" | "error";
+};
+
+export type AgentTaskRunReportFinding = {
+  ruleId?: string;
+  level?: "error" | "warning" | "note" | "none";
+  message?: string;
+  path?: string;
+  line?: number;
+  column?: number;
+};
+
+export type AgentTaskRunDiagnosticSeverity = "error" | "warning" | "info" | "hint";
+
+export type AgentTaskRunDiagnostic = {
+  source: "typescript" | "eslint";
+  severity: AgentTaskRunDiagnosticSeverity;
+  message: string;
+  code?: string;
+  path?: string;
+  line?: number;
+  column?: number;
+};
+
+export type AgentTaskRunTestReport = {
+  kind: "junit" | "sarif";
+  path: string;
+  summary: string;
+  status: AgentTaskRunReportStatus;
+  tests?: number;
+  failures?: number;
+  errors?: number;
+  skipped?: number;
+  suites?: number;
+  durationSeconds?: number;
+  findings?: number;
+  errorFindings?: number;
+  warningFindings?: number;
+  noteFindings?: number;
+  rules?: number;
+  failedTests?: AgentTaskRunFailedTest[];
+  findingDetails?: AgentTaskRunReportFinding[];
+};
+
+export type AgentTaskRunArtifact = {
+  id: string;
+  kind: "browser_screenshot" | "browser_task_log" | "command_output" | "file_change" | "patch" | "tool_result";
+  title: string;
+  summary?: string;
+  path?: string;
+  width?: number;
+  height?: number;
+  writeMode?: "create" | "replace";
+  content?: string;
+  contentTruncated?: boolean;
+  lineCount?: number;
+  diff?: string;
+  diffTruncated?: boolean;
+  changedPaths?: string[];
+  additions?: number;
+  deletions?: number;
+  command?: string;
+  commandMode?: "shell" | "argv";
+  commandRisk?: "low" | "medium" | "high";
+  commandAnalysis?: string;
+  executionProfile?: CommandExecutionProfile;
+  executionIsolation?: string;
+  workingDirectory?: string;
+  timeoutMs?: number;
+  timedOut?: boolean;
+  signal?: string;
+  exitCode?: number;
+  durationMs?: number;
+  stdout?: string;
+  stderr?: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  reportPaths?: string[];
+  testReports?: AgentTaskRunTestReport[];
+  diagnostics?: AgentTaskRunDiagnostic[];
+  browserTask?: {
+    success: boolean;
+    model?: string;
+    providerId?: string;
+    providerName?: string;
+    endpoint?: string;
+    maxSteps?: number;
+    timeoutMs?: number;
+    stepDelayMs?: number;
+    stepCount: number;
+    stopReason?: string;
+    navigationCount?: number;
+    tokensUsed?: number;
+    proxyDiagnostics?: Array<{
+      attempt: number;
+      timestamp: string;
+      method: string;
+      path: string;
+      status: number;
+      latencyMs: number;
+      outcome: string;
+      message?: string;
+    }>;
+  };
+  toolCallId?: string;
+  createdAt: string;
+};
+
+export type AgentTaskRunWorktreeStatus = "creating" | "ready" | "failed" | "merged" | "discarded" | "cleaned";
+
+export type AgentTaskRunWorktreeDiff = {
+  hasChanges: boolean;
+  files: number;
+  insertions?: number;
+  deletions?: number;
+  changedPaths: string[];
+  updatedAt: string;
+};
+
+export type AgentTaskRunWorktreePatchPreview = {
+  text: string;
+  bytes: number;
+  lineCount: number;
+  truncated: boolean;
+  updatedAt: string;
+};
+
+export type AgentTaskRunWorktreePullRequestFeedbackItem = {
+  kind: "comment" | "review" | "thread";
+  author?: string;
+  state?: string;
+  body?: string;
+  path?: string;
+  line?: number;
+  url?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type AgentTaskRunWorktreePullRequestFeedback = {
+  total: number;
+  comments: number;
+  reviews: number;
+  threads?: number;
+  unresolvedThreads?: number;
+  resolvedThreads?: number;
+  changesRequested: number;
+  approved: number;
+  commented: number;
+  summary: string;
+  threadFetchError?: string;
+  items: AgentTaskRunWorktreePullRequestFeedbackItem[];
+};
+
+export type AgentTaskRunWorktreePullRequestCheckItem = {
+  name: string;
+  bucket: "passed" | "failed" | "pending" | "skipped" | "cancelled" | "unknown";
+  status?: string;
+  conclusion?: string;
+  state?: string;
+  detailsUrl?: string;
+  logSource?: "github_actions" | "details_url";
+  logCommand?: string;
+  logArtifactId?: string;
+  logFetchedAt?: string;
+  logError?: string;
+  startedAt?: string;
+  completedAt?: string;
+};
+
+export type AgentTaskRunWorktreePullRequestReviewNotification = {
+  level: "info" | "success" | "warning";
+  summary: string;
+  detail?: string;
+  createdAt: string;
+};
+
+export type AgentTaskRunWorktreePullRequestReview = {
+  state?: string;
+  isDraft?: boolean;
+  reviewDecision?: string;
+  mergeStateStatus?: string;
+  checkSummary: string;
+  checks: {
+    total: number;
+    passed: number;
+    failed: number;
+    pending: number;
+    skipped: number;
+    cancelled: number;
+    unknown: number;
+  };
+  checkItems?: AgentTaskRunWorktreePullRequestCheckItem[];
+  notifications?: AgentTaskRunWorktreePullRequestReviewNotification[];
+  summary: string;
+  feedback?: AgentTaskRunWorktreePullRequestFeedback;
+  updatedAt: string;
+};
+
+export type AgentTaskRunWorktreePullRequest = {
+  title: string;
+  body: string;
+  branch: string;
+  baseBranch?: string;
+  baseRef?: string;
+  commit: string;
+  remoteName?: string;
+  remoteUrl?: string;
+  pushCommand?: string;
+  createCommand?: string;
+  preparedAt: string;
+  pushedAt?: string;
+  createdAt?: string;
+  url?: string;
+  review?: AgentTaskRunWorktreePullRequestReview;
+};
+
+export type AgentTaskRunWorktreeConflict = {
+  type: "sync";
+  message: string;
+  files: string[];
+  originalHead?: string;
+  taskHead?: string;
+  detectedAt: string;
+};
+
+export type AgentTaskRunWorktree = {
+  enabled: boolean;
+  status: AgentTaskRunWorktreeStatus;
+  originalRoot?: string;
+  path?: string;
+  branch?: string;
+  baseRef?: string;
+  plannedFromTaskRunId?: string;
+  continuedFromTaskRunId?: string;
+  replayOfTaskRunId?: string;
+  createdAt?: string;
+  diff?: AgentTaskRunWorktreeDiff;
+  patchPreview?: AgentTaskRunWorktreePatchPreview;
+  pullRequest?: AgentTaskRunWorktreePullRequest;
+  conflict?: AgentTaskRunWorktreeConflict;
+  mergeCommit?: string;
+  mergedAt?: string;
+  discardedAt?: string;
+  cleanedAt?: string;
+  error?: string;
+};
+
+export type AgentTaskRunPlanItemStatus = "pending" | "in_progress" | "completed";
+
+export type AgentTaskRunPlanItem = {
+  text: string;
+  status?: AgentTaskRunPlanItemStatus;
+};
+
+export type AgentTaskRunPlan = {
+  summary?: string;
+  items: AgentTaskRunPlanItem[];
+  sourceMessageIndex?: number;
+  updatedAt: string;
+};
+
+export type AgentTaskRunCompletionItemStatus = "completed" | "needs_followup" | "blocked";
+export type AgentTaskRunCompletionEvidenceKind = "file" | "command" | "report" | "check" | "note";
+
+export type AgentTaskRunCompletionEvidenceLabel = {
+  kind: AgentTaskRunCompletionEvidenceKind;
+  value: string;
+};
+
+export type AgentTaskRunCompletionItem = {
+  text: string;
+  status?: AgentTaskRunCompletionItemStatus;
+  evidence?: AgentTaskRunCompletionEvidenceLabel[];
+};
+
+export type AgentTaskRunCompletion = {
+  summary?: string;
+  items: AgentTaskRunCompletionItem[];
+  sourceMessageIndex?: number;
+  updatedAt: string;
+};
+
+export type AgentTaskRunPlanReviewStatus = "approved" | "revision_requested" | "cancelled";
+
+export type AgentTaskRunPlanReview = {
+  status: AgentTaskRunPlanReviewStatus;
+  updatedAt: string;
+};
+
+export type AgentTaskRunVerificationStatus = "passed" | "failed" | "unknown";
+
+export type AgentTaskRunVerification = {
+  status: AgentTaskRunVerificationStatus;
+  summary: string;
+  commandCount: number;
+  failedCommandCount: number;
+  timedOutCommandCount?: number;
+  parsedReportCount: number;
+  failedReportCount: number;
+  passedReportCount: number;
+  unknownReportCount: number;
+  updatedAt: string;
+};
+
+export type AgentTaskRunUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  requestCount: number;
+};
+
+export type AgentTaskRunCheckpoint = {
+  changedPaths: string[];
+  capturedAt: string;
+  revertedAt?: string;
+};
+
+export type AgentTaskRun = {
+  id: string;
+  userMessageIndex: number;
+  promptPreview: string;
+  status: AgentTaskRunStatus;
+  model?: string;
+  providerName?: string;
+  modelSelectionReason?: string;
+  usage?: AgentTaskRunUsage;
+  checkpoint?: AgentTaskRunCheckpoint;
+  loop?: {
+    enabled: boolean;
+    maxIterations: number;
+    status?: AgentLoopStatus;
+    iteration?: number;
+    lastDecision?: AgentLoopDecision;
+    iterations?: AgentLoopIteration[];
+  };
+  planMode?: {
+    enabled: boolean;
+  };
+  plan?: AgentTaskRunPlan;
+  completion?: AgentTaskRunCompletion;
+  planReview?: AgentTaskRunPlanReview;
+  worktree?: AgentTaskRunWorktree;
+  verification?: AgentTaskRunVerification;
+  capabilities: AgentTaskRunCapability[];
+  tools: AgentTaskRunToolCall[];
+  approvals: AgentTaskRunApproval[];
+  artifacts: AgentTaskRunArtifact[];
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  error?: string;
 };
 
 export type AgentSession = {
   id: string;
+  title?: string;
+  pinnedAt?: string;
   cwd: string;
   projectRoot?: string | null;
   trustMode: TrustMode;
@@ -109,6 +615,7 @@ export type AgentSession = {
   selectedProviderName?: string;
   modelSelectionReason?: string;
   agentLoop?: AgentLoopState;
+  taskRuns?: AgentTaskRun[];
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;

@@ -2,14 +2,30 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { Agent } from "./agent/Agent.js";
-import { chatContentToText } from "./agent/content.js";
+import { COMPACT_RECENT_MESSAGE_COUNT, compactSessionMessages } from "./agent/contextCompaction.js";
 import type { AgentSession } from "./agent/types.js";
 import { OpenAICompatibleChatClient } from "./agent/OpenAICompatibleChatClient.js";
-import { loadConfig, saveConfig, type AppConfig, type ConfigKey } from "./config.js";
+import {
+  loadConfig,
+  redactConfigForDisplay,
+  saveConfig,
+  workspacePolicyOverridesForRoot,
+  workspaceScopeRulesForRoot,
+  type AppConfig,
+  type ConfigKey
+} from "./config.js";
 import { runDoctor, type DoctorReport, type DoctorStatus } from "./diagnostics/doctor.js";
 import { ApprovalManager } from "./permissions/ApprovalManager.js";
 import { SessionStore } from "./sessions/SessionStore.js";
+import {
+  describeSessionListFilters,
+  filterSessions,
+  sessionDisplayTitle,
+  sessionWorkspacePath,
+  type SessionListFilters
+} from "./sessions/sessionList.js";
 import { TuiApp } from "./tui/TuiApp.js";
+import { detectWorkspace } from "./workspace.js";
 
 const program = new Command();
 
@@ -61,19 +77,72 @@ program
   .command("sessions")
   .description("List recent saved sessions.")
   .option("-l, --limit <count>", "maximum sessions to show", parseLimit, 20)
+  .option("-s, --search <text>", "filter by session id, title, message, model, provider, or workspace")
+  .option("-w, --workspace <text>", "filter by workspace path or folder name")
+  .option("--pinned", "show only pinned sessions")
+  .option("--unpinned", "show only unpinned sessions")
+  .option("--project", "show only project/workspace sessions")
+  .option("--standalone", "show only standalone chats")
   .action(async (options: SessionsOptions) => {
     const store = new SessionStore();
-    const sessions = await store.list();
+    const filters = sessionFiltersFromCliOptions(options);
+    const sessions = filterSessions(await store.list(), filters);
     const visible = sessions.slice(0, options.limit);
+    const filterDescription = describeSessionListFilters(filters);
     if (visible.length === 0) {
-      console.log(chalk.dim("No saved sessions."));
+      console.log(chalk.dim(filterDescription ? `No saved sessions match filters: ${filterDescription}.` : "No saved sessions."));
       return;
     }
 
+    if (filterDescription) {
+      console.log(chalk.dim(`Filters: ${filterDescription}`));
+    }
     console.log(["ID", "UPDATED", "WORKSPACE", "TITLE"].join("\t"));
     for (const session of visible) {
-      console.log([session.id, formatCliDate(session.updatedAt), session.projectRoot ?? session.cwd, sessionTitle(session)].join("\t"));
+      console.log([session.id, formatCliDate(session.updatedAt), sessionWorkspacePath(session), sessionDisplayTitle(session)].join("\t"));
     }
+  });
+
+program
+  .command("compact")
+  .description("Compact a saved session transcript locally.")
+  .argument("<session-id>", "session id")
+  .option("--recent <count>", "number of recent non-system messages to keep", String(COMPACT_RECENT_MESSAGE_COUNT))
+  .option("--entry-limit <chars>", "maximum characters per compacted summary entry")
+  .option("--dry-run", "show what would be compacted without saving")
+  .action(async (sessionId: string, options: CompactOptions) => {
+    const store = new SessionStore();
+    const session = await store.load(sessionId);
+    const now = new Date();
+    const recentMessageCount = parsePositiveInteger(options.recent, "Recent message count");
+    const entryCharacterLimit = options.entryLimit ? parsePositiveInteger(options.entryLimit, "Entry limit") : undefined;
+    const result = compactSessionMessages(session.messages, {
+      recentMessageCount,
+      entryCharacterLimit,
+      now
+    });
+
+    if (!result.compacted) {
+      console.log(
+        chalk.dim(
+          `Session ${session.id} is already compact enough. Non-system messages: ${result.remainingMessageCount}; recent window: ${recentMessageCount}.`
+        )
+      );
+      return;
+    }
+
+    if (!options.dryRun) {
+      await store.save({
+        ...session,
+        messages: result.messages,
+        updatedAt: now.toISOString()
+      });
+    }
+
+    console.log(chalk.green(`${options.dryRun ? "Would compact" : "Compacted"} session ${session.id}.`));
+    console.log(`Compacted messages: ${result.compactedMessageCount}`);
+    console.log(`Kept recent messages: ${result.remainingMessageCount}`);
+    console.log(`Total stored messages after compaction: ${result.messages.length}`);
   });
 
 program
@@ -85,14 +154,15 @@ program
   .action(async (action: string, key?: ConfigKey, value?: string) => {
     const config = await loadConfig({ includeEnv: false });
     if (action === "get") {
+      const displayConfig = redactConfigForDisplay(config);
       if (key) {
         if (!isConfigKey(key)) {
           throw new Error(`Unknown config key: ${key}`);
         }
-        console.log(JSON.stringify({ [key]: config[key] ?? null }, null, 2));
+        console.log(JSON.stringify({ [key]: displayConfig[key] ?? null }, null, 2));
         return;
       }
-      console.log(JSON.stringify(config, null, 2));
+      console.log(JSON.stringify(displayConfig, null, 2));
       return;
     }
 
@@ -134,6 +204,18 @@ type RootOptions = {
 
 type SessionsOptions = {
   limit: number;
+  search?: string;
+  workspace?: string;
+  pinned?: boolean;
+  unpinned?: boolean;
+  project?: boolean;
+  standalone?: boolean;
+};
+
+type CompactOptions = {
+  recent: string;
+  entryLimit?: string;
+  dryRun?: boolean;
 };
 
 type DoctorOptions = {
@@ -151,8 +233,16 @@ async function runTui(config: AppConfig, session?: AgentSession) {
 
 async function runOneShot(task: string, config: AppConfig) {
   const cwd = process.cwd();
+  const workspace = await detectWorkspace(cwd);
   const client = new OpenAICompatibleChatClient(config);
-  const approvals = new ApprovalManager(config.trustMode);
+  const scopePolicyRules = workspaceScopeRulesForRoot(config, workspace.root);
+  const approvals = new ApprovalManager(
+    config.trustMode,
+    undefined,
+    workspacePolicyOverridesForRoot(config, workspace.root),
+    undefined,
+    scopePolicyRules
+  );
   const agent = new Agent({
     client,
     approvals,
@@ -160,7 +250,9 @@ async function runOneShot(task: string, config: AppConfig) {
     model: config.model,
     baseUrl: config.baseUrl,
     tavilyApiKey: config.tavilyApiKey,
-    mcpServers: config.mcpServers
+    mcpServers: config.mcpServers,
+    scopePolicyRules,
+    contextWindowTokens: config.contextWindowTokens
   });
   const store = new SessionStore();
 
@@ -182,12 +274,7 @@ function isTrustMode(value: string): value is AppConfig["trustMode"] {
 }
 
 function isConfigKey(key: string): key is ConfigKey {
-  return ["apiKey", "tavilyApiKey", "baseUrl", "model", "trustMode"].includes(key);
-}
-
-function sessionTitle(session: AgentSession) {
-  const content = session.messages.find((message) => message.role === "user")?.content;
-  return content ? chatContentToText(content).trim().split(/\s+/).slice(0, 12).join(" ") || "Untitled session" : "Untitled session";
+  return ["apiKey", "tavilyApiKey", "baseUrl", "model", "toolCalling", "imageInput", "trustMode"].includes(key);
 }
 
 function formatCliDate(value: string) {
@@ -199,11 +286,30 @@ function formatCliDate(value: string) {
 }
 
 function parseLimit(value: string) {
+  return parsePositiveInteger(value, "Limit");
+}
+
+function parsePositiveInteger(value: string, label = "Value") {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error("Limit must be a positive integer.");
+    throw new Error(`${label} must be a positive integer.`);
   }
   return parsed;
+}
+
+function sessionFiltersFromCliOptions(options: SessionsOptions): SessionListFilters {
+  if (options.pinned && options.unpinned) {
+    throw new Error("Use only one of --pinned or --unpinned.");
+  }
+  if (options.project && options.standalone) {
+    throw new Error("Use only one of --project or --standalone.");
+  }
+  return {
+    search: options.search,
+    workspace: options.workspace,
+    pinned: options.pinned ? "pinned" : options.unpinned ? "unpinned" : "all",
+    project: options.project ? "project" : options.standalone ? "standalone" : "all"
+  };
 }
 
 function printDoctorReport(report: DoctorReport) {
@@ -215,9 +321,7 @@ function printDoctorReport(report: DoctorReport) {
     }
   }
   console.log(
-    chalk.dim(
-      `Summary: ${report.summary.pass} pass, ${report.summary.warn} warn, ${report.summary.fail} fail, ${report.summary.skip} skip`
-    )
+    chalk.dim(`Summary: ${report.summary.pass} pass, ${report.summary.warn} warn, ${report.summary.fail} fail, ${report.summary.skip} skip`)
   );
 }
 

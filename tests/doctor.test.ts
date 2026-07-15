@@ -57,5 +57,83 @@ describe("doctor diagnostics", () => {
     expect(report.checks.find((check) => check.id === "chat")?.status).toBe("pass");
     expect(report.checks.find((check) => check.id === "streaming")?.status).toBe("pass");
     expect(report.checks.find((check) => check.id === "tool-calling")?.status).toBe("warn");
+    expect(report.capabilityObservations).toMatchObject([
+      {
+        capability: "toolCalling",
+        value: "disabled",
+        source: "doctor",
+        checkId: "tool-calling",
+        status: "warn"
+      }
+    ]);
+  });
+
+  it("skips tool-calling probe when provider tool calling is disabled", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const report = await runDoctor(
+      {
+        apiKey: "test-key",
+        baseUrl: "https://api.example.test/v1",
+        model: "test-model",
+        trustMode: "ask",
+        toolCalling: "disabled"
+      },
+      {
+        async fetcher(input, init) {
+          const url = String(input);
+          if (url.endsWith("/models")) {
+            return Response.json({ data: [{ id: "test-model" }] });
+          }
+
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          bodies.push(body);
+          if (body.stream) {
+            return new Response("data: [DONE]\n\n", {
+              headers: {
+                "Content-Type": "text/event-stream"
+              }
+            });
+          }
+          return Response.json({
+            choices: [
+              {
+                message: {
+                  content: "OK"
+                }
+              }
+            ]
+          });
+        }
+      }
+    );
+
+    expect(report.checks.find((check) => check.id === "tool-calling")).toMatchObject({
+      status: "skip",
+      message: "Skipped because this provider is configured for plain chat."
+    });
+    expect(bodies.some((body) => Boolean(body.tools))).toBe(false);
+  });
+
+  it("bounds response bodies before including diagnostics", async () => {
+    const report = await runDoctor(
+      {
+        apiKey: "test-key",
+        baseUrl: "https://api.example.test/v1",
+        model: "test-model",
+        trustMode: "ask"
+      },
+      {
+        async fetcher(input) {
+          if (String(input).endsWith("/models")) {
+            return new Response("x".repeat(200_000), { status: 500 });
+          }
+          return Response.json({});
+        }
+      }
+    );
+
+    const detail = report.checks.find((check) => check.id === "models")?.detail ?? "";
+    expect(detail.length).toBeLessThan(600);
+    expect(detail).toContain("[truncated]");
   });
 });

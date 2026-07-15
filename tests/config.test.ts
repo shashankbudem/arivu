@@ -1,8 +1,25 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { appConfigDir, appDataDir, loadConfig, saveConfig } from "../src/config.js";
+import {
+  REDACTED_SECRET_VALUE,
+  applyProviderCapabilityObservation,
+  appConfigDir,
+  appDataDir,
+  configPath,
+  loadConfig,
+  mergeRedactedMcpServers,
+  normalizeWorkspacePolicyOverrides,
+  normalizeWorkspacePolicyProfiles,
+  redactConfigForDisplay,
+  resolveModelListEndpoint,
+  saveConfig,
+  updateWorkspacePolicy,
+  workspacePolicyOverridesForRoot,
+  workspaceScopeRulesForRoot
+} from "../src/config.js";
+import type { AppConfig } from "../src/config.js";
 
 let tempDir: string;
 
@@ -53,6 +70,8 @@ describe("config", () => {
     await expect(loadConfig()).resolves.toMatchObject({
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4.1",
+      toolCalling: "auto",
+      imageInput: "auto",
       trustMode: "ask"
     });
   });
@@ -71,6 +90,116 @@ describe("config", () => {
       model: "saved-model",
       trustMode: "trusted"
     });
+  });
+
+  it("uses the selected provider credentials when listing models", () => {
+    const config: AppConfig = {
+      baseUrl: "https://chat.example/v1",
+      model: "chat-model",
+      apiKey: "chat-secret",
+      toolCalling: "auto",
+      imageInput: "auto",
+      activeProviderId: "chat",
+      providers: [
+        {
+          id: "chat",
+          name: "Chat",
+          baseUrl: "https://chat.example/v1",
+          model: "chat-model",
+          toolCalling: "auto",
+          imageInput: "auto"
+        },
+        {
+          id: "browser",
+          name: "Browser",
+          baseUrl: "https://browser.example/v1",
+          model: "browser-model",
+          apiKey: "browser-secret",
+          toolCalling: "auto",
+          imageInput: "auto"
+        }
+      ],
+      trustMode: "ask",
+      mcpServers: {},
+      workspacePolicies: {},
+      workspacePolicyProfiles: {}
+    };
+
+    expect(resolveModelListEndpoint(config, { providerId: "browser" })).toEqual({
+      baseUrl: "https://browser.example/v1",
+      apiKey: "browser-secret"
+    });
+    expect(resolveModelListEndpoint(config, { providerId: "chat" })).toEqual({
+      baseUrl: "https://chat.example/v1",
+      apiKey: "chat-secret"
+    });
+    expect(resolveModelListEndpoint(config, { providerId: "new-provider", baseUrl: "https://new.example/v1" })).toEqual({
+      baseUrl: "https://new.example/v1",
+      apiKey: undefined
+    });
+    expect(resolveModelListEndpoint(config, { providerId: "current", baseUrl: "https://chat.example/v1" })).toEqual({
+      baseUrl: "https://chat.example/v1",
+      apiKey: "chat-secret"
+    });
+  });
+
+  it("saves config with owner-only file permissions", async () => {
+    await saveConfig({ apiKey: "saved-key" });
+
+    const mode = (await stat(configPath())).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it("redacts secrets for display and preserves masked MCP env values", () => {
+    const display = redactConfigForDisplay({
+      apiKey: "saved-key",
+      tavilyApiKey: "tavily-key",
+      providers: [
+        {
+          id: "openai",
+          name: "OpenAI",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-4.1",
+          toolCalling: "auto",
+          imageInput: "auto",
+          apiKey: "provider-key"
+        }
+      ],
+      mcpServers: {
+        docs: {
+          command: "server",
+          args: [],
+          env: { TOKEN: "mcp-token" },
+          disabled: false
+        }
+      }
+    });
+
+    expect(display.apiKey).toBe(REDACTED_SECRET_VALUE);
+    expect(display.tavilyApiKey).toBe(REDACTED_SECRET_VALUE);
+    expect(display.providers?.[0]?.apiKey).toBe(REDACTED_SECRET_VALUE);
+    expect(display.mcpServers?.docs?.env.TOKEN).toBe(REDACTED_SECRET_VALUE);
+
+    expect(
+      mergeRedactedMcpServers(
+        {
+          docs: {
+            command: "server",
+            args: [],
+            env: { TOKEN: REDACTED_SECRET_VALUE },
+            disabled: false
+          }
+        },
+        {
+          docs: {
+            command: "server",
+            args: [],
+            env: { TOKEN: "mcp-token" },
+            disabled: false
+          }
+        }
+      ).docs.env.TOKEN
+    ).toBe("mcp-token");
   });
 
   it("ignores empty env vars", async () => {
@@ -110,6 +239,212 @@ describe("config", () => {
   it("reuses standard Tavily API key env var", async () => {
     process.env.TAVILY_API_KEY = "tvly-standard";
     await expect(loadConfig()).resolves.toMatchObject({ tavilyApiKey: "tvly-standard" });
+  });
+
+  it("persists provider capability flags", async () => {
+    await writeFile(
+      configPath(),
+      `${JSON.stringify({
+        toolCalling: "disabled",
+        imageInput: "enabled",
+        providers: [
+          {
+            id: "plain",
+            name: "Plain Chat",
+            baseUrl: "https://api.example.test/v1",
+            model: "plain-model",
+            toolCalling: "disabled",
+            imageInput: "disabled"
+          },
+          {
+            id: "legacy-default",
+            name: "Legacy Default",
+            baseUrl: "https://legacy.example.test/v1",
+            model: "legacy-model"
+          }
+        ]
+      })}\n`
+    );
+
+    const loaded = await loadConfig({ includeEnv: false });
+
+    expect(loaded.toolCalling).toBe("disabled");
+    expect(loaded.imageInput).toBe("enabled");
+    expect(loaded.providers).toMatchObject([
+      { id: "plain", toolCalling: "disabled", imageInput: "disabled" },
+      { id: "legacy-default", toolCalling: "auto", imageInput: "auto" }
+    ]);
+  });
+
+  it("applies provider capability observations to auto-mode providers", async () => {
+    const config = await loadConfig({ includeEnv: false });
+    const next = applyProviderCapabilityObservation(
+      {
+        ...config,
+        activeProviderId: "plain",
+        providers: [
+          {
+            id: "plain",
+            name: "Plain Chat",
+            baseUrl: "https://api.example.test/v1/",
+            model: "plain-model",
+            toolCalling: "auto",
+            imageInput: "auto"
+          },
+          {
+            id: "strict",
+            name: "Strict Tools",
+            baseUrl: "https://strict.example.test/v1",
+            model: "strict-model",
+            toolCalling: "enabled",
+            imageInput: "auto"
+          }
+        ],
+        toolCalling: "auto"
+      },
+      {
+        providerId: "plain",
+        baseUrl: "https://api.example.test/v1",
+        capability: "toolCalling",
+        value: "disabled"
+      }
+    );
+
+    expect(next).not.toBe(config);
+    expect(next.toolCalling).toBe("disabled");
+    expect(next.providers).toMatchObject([
+      { id: "plain", toolCalling: "disabled" },
+      { id: "strict", toolCalling: "enabled" }
+    ]);
+
+    const unchanged = applyProviderCapabilityObservation(next, {
+      providerId: "strict",
+      baseUrl: "https://strict.example.test/v1",
+      capability: "toolCalling",
+      value: "disabled"
+    });
+    expect(unchanged).toBe(next);
+    expect(unchanged.providers.find((provider) => provider.id === "strict")?.toolCalling).toBe("enabled");
+  });
+
+  it("applies provider capability observations to top-level config without saved providers", async () => {
+    const config = await loadConfig({ includeEnv: false });
+    const next = applyProviderCapabilityObservation(
+      {
+        ...config,
+        baseUrl: "https://api.example.test/v1/",
+        imageInput: "auto",
+        providers: []
+      },
+      {
+        baseUrl: "https://api.example.test/v1",
+        capability: "imageInput",
+        value: "disabled"
+      }
+    );
+
+    expect(next.imageInput).toBe("disabled");
+  });
+
+  it("saves workspace capability policy overrides by absolute workspace root", async () => {
+    const workspaceRoot = path.join(tempDir, "repo");
+    await saveConfig({
+      workspacePolicies: updateWorkspacePolicy(
+        {},
+        workspaceRoot,
+        {
+          read_repo: "prompt",
+          write_workspace: "prompt",
+          browser_control: "deny"
+        },
+        {
+          blockedPathPrefixes: [".env", "secrets", ".env"],
+          allowedNetworkDomains: ["https://api.tavily.com/search", "BING.com"],
+          allowedMcpServers: ["github", "github", "chrome-devtools"],
+          allowedBrowserTargetClasses: ["public", "background", "public"]
+        }
+      )
+    });
+
+    const loaded = await loadConfig({ includeEnv: false });
+    expect(workspacePolicyOverridesForRoot(loaded, workspaceRoot)).toEqual({
+      read_repo: "prompt",
+      write_workspace: "prompt",
+      browser_control: "deny"
+    });
+    expect(workspaceScopeRulesForRoot(loaded, workspaceRoot)).toEqual({
+      blockedPathPrefixes: [".env", "secrets"],
+      allowedNetworkDomains: ["api.tavily.com", "bing.com"],
+      allowedMcpServers: ["chrome-devtools", "github"],
+      allowedBrowserTargetClasses: ["background", "public"]
+    });
+    expect(workspacePolicyOverridesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
+    expect(workspaceScopeRulesForRoot(loaded, path.join(tempDir, "other"))).toEqual({});
+  });
+
+  it("saves reusable workspace policy profiles", async () => {
+    await saveConfig({
+      workspacePolicyProfiles: normalizeWorkspacePolicyProfiles({
+        "  Sensitive   repo  ": {
+          overrides: {
+            read_repo: "prompt",
+            network_fetch: "deny"
+          },
+          scopeRules: {
+            blockedPathPrefixes: ["secrets", ".env", ".env"],
+            allowedBrowserTargetClasses: ["public", "background", "public"]
+          }
+        }
+      })
+    });
+
+    const loaded = await loadConfig({ includeEnv: false });
+    expect(loaded.workspacePolicyProfiles).toEqual({
+      "Sensitive repo": {
+        overrides: {
+          read_repo: "prompt",
+          network_fetch: "deny"
+        },
+        scopeRules: {
+          blockedPathPrefixes: [".env", "secrets"],
+          allowedBrowserTargetClasses: ["background", "public"]
+        }
+      }
+    });
+  });
+
+  it("normalizes workspace capability policy overrides", () => {
+    const workspaceRoot = path.join(tempDir, "repo");
+    const policies = updateWorkspacePolicy({}, workspaceRoot, {
+      write_workspace: "prompt",
+      browser_control: "deny",
+      read_repo: "deny"
+    } as ReturnType<typeof normalizeWorkspacePolicyOverrides>);
+
+    expect(Object.keys(policies[path.resolve(workspaceRoot)]?.overrides ?? {})).toEqual([
+      "write_workspace",
+      "browser_control",
+      "read_repo"
+    ]);
+    expect(
+      updateWorkspacePolicy(
+        policies,
+        workspaceRoot,
+        {},
+        {
+          blockedPathPrefixes: ["private", "private"],
+          allowedNetworkDomains: ["Example.com"],
+          allowedMcpServers: ["github", "github"],
+          allowedBrowserTargetClasses: ["visible", "public", "visible"]
+        }
+      )[path.resolve(workspaceRoot)]?.scopeRules
+    ).toEqual({
+      blockedPathPrefixes: ["private"],
+      allowedNetworkDomains: ["example.com"],
+      allowedMcpServers: ["github"],
+      allowedBrowserTargetClasses: ["public", "visible"]
+    });
+    expect(updateWorkspacePolicy(policies, workspaceRoot, {})).toEqual({});
   });
 
   it("migrates legacy config and data directories without overwriting Arivu files", async () => {

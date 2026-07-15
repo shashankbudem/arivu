@@ -78,6 +78,33 @@ describe("model router", () => {
     });
   });
 
+  it("avoids providers with image input disabled for image prompts", () => {
+    const content: ChatContent = [
+      { type: "text", text: "describe this image" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,abc" } }
+    ];
+    const selection = resolveModelForPrompt(config({ model: "auto" }), content, {
+      providers: [
+        {
+          id: "text-only",
+          name: "Text Only",
+          baseUrl: "https://api.example.test/v1",
+          model: "plain-vision-looking-name",
+          apiKey: "test-key",
+          imageInput: "disabled",
+          active: true,
+          models: ["plain-vision-looking-name"]
+        },
+        nvidiaProvider(["meta/llama-3.2-90b-vision-instruct"])
+      ]
+    });
+
+    expect(selection).toMatchObject({
+      providerName: "NVIDIA NIM",
+      model: "meta/llama-3.2-90b-vision-instruct"
+    });
+  });
+
   it("falls back to available model heuristics when preferred ids are unavailable", () => {
     const selection = resolveModelForPrompt(config({ model: "auto" }), "debug this stack trace", {
       providers: [nvidiaProvider(["custom-code-coder-32b", "plain-chat"])]
@@ -94,11 +121,15 @@ function config(patch: Partial<AppConfig> = {}): AppConfig {
   return {
     baseUrl: "https://integrate.api.nvidia.com/v1",
     model: "auto",
+    toolCalling: "auto",
+    imageInput: "auto",
     activeProviderId: "nvidia",
     providers: [],
     trustMode: "ask",
     mcpServers: {},
-    ...patch
+    workspacePolicies: {},
+    ...patch,
+    workspacePolicyProfiles: patch.workspacePolicyProfiles ?? {}
   };
 }
 

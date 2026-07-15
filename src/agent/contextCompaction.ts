@@ -1,15 +1,29 @@
-import { chatContentToText } from "./content.js";
+import { chatContentToText, type ChatContent, type ChatContentPart } from "./content.js";
 import type { ChatMessage } from "./types.js";
 
 export const COMPACT_RECENT_MESSAGE_COUNT = 8;
+export const AUTO_COMPACT_REQUEST_TOKEN_LIMIT = 48_000;
+export const AUTO_COMPACT_REQUEST_RECENT_MESSAGE_COUNT = 8;
+export const AUTO_COMPACT_REQUEST_ENTRY_CHARACTER_LIMIT = 700;
+export const AUTO_COMPACT_REQUEST_RECENT_CHARACTER_LIMIT = 6_000;
+export const AUTO_COMPACT_REQUEST_ACTIVE_USER_CHARACTER_LIMIT = 32_000;
 
 const COMPACTION_PREFIX = "Context compacted locally to reduce future model requests.";
+export const MODEL_SUMMARY_PREFIX = "Conversation summary (model-generated) to reduce context size.";
 const DEFAULT_ENTRY_LIMIT = 700;
 
 type CompactOptions = {
   recentMessageCount?: number;
   entryCharacterLimit?: number;
+  recentEntryCharacterLimit?: number;
+  activeUserMessageCharacterLimit?: number;
+  preserveLatestUserMessage?: boolean;
+  force?: boolean;
   now?: Date;
+};
+
+type ModelRequestCompactOptions = CompactOptions & {
+  tokenLimit?: number;
 };
 
 export type ContextCompactionResult = {
@@ -17,16 +31,21 @@ export type ContextCompactionResult = {
   compacted: boolean;
   compactedMessageCount: number;
   remainingMessageCount: number;
+  estimatedTokensBefore?: number;
+  estimatedTokensAfter?: number;
 };
 
 export function compactSessionMessages(messages: ChatMessage[], options: CompactOptions = {}): ContextCompactionResult {
   const recentMessageCount = options.recentMessageCount ?? COMPACT_RECENT_MESSAGE_COUNT;
   const entryCharacterLimit = options.entryCharacterLimit ?? DEFAULT_ENTRY_LIMIT;
+  const recentEntryCharacterLimit = options.recentEntryCharacterLimit;
+  const preserveLatestUserMessage = options.preserveLatestUserMessage ?? false;
+  const activeUserMessageCharacterLimit = options.activeUserMessageCharacterLimit ?? recentEntryCharacterLimit;
   const systemMessages = messages.filter((message) => message.role === "system" && !isCompactionMessage(message));
   const previousCompactions = messages.filter(isCompactionMessage);
   const nonSystemMessages = messages.filter((message) => message.role !== "system");
 
-  if (nonSystemMessages.length <= recentMessageCount) {
+  if (!options.force && nonSystemMessages.length <= recentMessageCount) {
     return {
       messages,
       compacted: false,
@@ -35,8 +54,23 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
     };
   }
 
-  const olderMessages = nonSystemMessages.slice(0, -recentMessageCount);
-  const recentMessages = nonSystemMessages.slice(-recentMessageCount).map(toPlainTranscriptMessage);
+  const recentStart = Math.max(0, nonSystemMessages.length - recentMessageCount);
+  const latestUserMessageIndex = preserveLatestUserMessage ? latestUserIndex(nonSystemMessages) : -1;
+  const latestUserMessage = latestUserMessageIndex >= 0 ? nonSystemMessages[latestUserMessageIndex] : undefined;
+  const pinnedLatestUser =
+    latestUserMessage && latestUserMessageIndex < recentStart
+      ? [toPinnedUserMessage(latestUserMessage, activeUserMessageCharacterLimit)]
+      : [];
+  const olderMessages = nonSystemMessages.filter((_message, index) => index < recentStart && index !== latestUserMessageIndex);
+  const recentMessages = nonSystemMessages
+    .slice(recentStart)
+    .map((message, index) =>
+      toPlainTranscriptMessage(
+        message,
+        recentStart + index === latestUserMessageIndex ? activeUserMessageCharacterLimit : recentEntryCharacterLimit,
+        recentStart + index === latestUserMessageIndex && preserveLatestUserMessage
+      )
+    );
   const compactedAt = (options.now ?? new Date()).toISOString();
   const compactedMessage: ChatMessage = {
     role: "system",
@@ -44,17 +78,123 @@ export function compactSessionMessages(messages: ChatMessage[], options: Compact
       COMPACTION_PREFIX,
       `Compacted at: ${compactedAt}`,
       `Compacted messages: ${olderMessages.length}`,
+      // Textified tool exchanges below use a "Local tool request/result" transcript format;
+      // without this warning, some models imitate that format in their replies instead of
+      // making native tool calls, and the run ends without executing anything.
+      'Lines like "Local tool request:" and "Local tool result" below are historical records, not a format to reply in. To use a tool, emit a native tool call; never write a tool invocation as plain text.',
       "Older transcript summary:",
       buildCompactionSummary([...previousCompactions, ...olderMessages], entryCharacterLimit)
     ].join("\n")
   };
 
   return {
-    messages: [...systemMessages, compactedMessage, ...recentMessages],
+    messages: [...systemMessages, compactedMessage, ...pinnedLatestUser, ...recentMessages],
     compacted: true,
     compactedMessageCount: olderMessages.length,
+    remainingMessageCount: pinnedLatestUser.length + recentMessages.length
+  };
+}
+
+export function compactMessagesForModelRequest(messages: ChatMessage[], options: ModelRequestCompactOptions = {}): ContextCompactionResult {
+  const tokenLimit = options.tokenLimit ?? AUTO_COMPACT_REQUEST_TOKEN_LIMIT;
+  const estimatedTokensBefore = estimateMessageTokens(messages);
+  if (!options.force && estimatedTokensBefore <= tokenLimit) {
+    return {
+      messages,
+      compacted: false,
+      compactedMessageCount: 0,
+      remainingMessageCount: messages.filter((message) => message.role !== "system").length,
+      estimatedTokensBefore,
+      estimatedTokensAfter: estimatedTokensBefore
+    };
+  }
+
+  const compacted = compactSessionMessages(messages, {
+    recentMessageCount: options.recentMessageCount ?? AUTO_COMPACT_REQUEST_RECENT_MESSAGE_COUNT,
+    entryCharacterLimit: options.entryCharacterLimit ?? AUTO_COMPACT_REQUEST_ENTRY_CHARACTER_LIMIT,
+    recentEntryCharacterLimit: options.recentEntryCharacterLimit ?? AUTO_COMPACT_REQUEST_RECENT_CHARACTER_LIMIT,
+    activeUserMessageCharacterLimit: options.activeUserMessageCharacterLimit ?? AUTO_COMPACT_REQUEST_ACTIVE_USER_CHARACTER_LIMIT,
+    preserveLatestUserMessage: options.preserveLatestUserMessage ?? true,
+    force: true,
+    now: options.now
+  });
+  return {
+    ...compacted,
+    estimatedTokensBefore,
+    estimatedTokensAfter: estimateMessageTokens(compacted.messages)
+  };
+}
+
+export function estimateMessageTokens(messages: ChatMessage[]) {
+  const transcript = messages.map((message) => `${message.role}: ${transcriptContent(message)}`).join("\n\n");
+  return Math.ceil(transcript.length / 4);
+}
+
+/**
+ * The older, to-be-summarized slice of the conversation (everything but the base system messages and
+ * the most recent `recentMessageCount` turns). Callers feed this to the model to produce a summary.
+ */
+export function messagesToSummarize(messages: ChatMessage[], recentMessageCount = COMPACT_RECENT_MESSAGE_COUNT): ChatMessage[] {
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+  const recentStart = Math.max(0, nonSystemMessages.length - recentMessageCount);
+  return nonSystemMessages.slice(0, recentStart);
+}
+
+/**
+ * Replace the older conversation with a single model-generated summary system message, keeping the
+ * base system prompt(s) and the most recent turns verbatim. Leading orphan tool results (whose
+ * originating tool call fell into the summarized slice) are dropped to keep the tool protocol valid.
+ */
+export function applyModelSummary(
+  messages: ChatMessage[],
+  summary: string,
+  options: { recentMessageCount?: number; now?: Date } = {}
+): ContextCompactionResult {
+  const recentMessageCount = options.recentMessageCount ?? COMPACT_RECENT_MESSAGE_COUNT;
+  const systemMessages = messages.filter(
+    (message) => message.role === "system" && !isCompactionMessage(message) && !isModelSummaryMessage(message)
+  );
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+  const recentStart = Math.max(0, nonSystemMessages.length - recentMessageCount);
+  const olderCount = recentStart;
+  let recentMessages = nonSystemMessages.slice(recentStart);
+  let droppedOrphans = 0;
+  while (recentMessages.length > 0 && recentMessages[0]?.role === "tool") {
+    recentMessages = recentMessages.slice(1);
+    droppedOrphans += 1;
+  }
+
+  const summarizedCount = olderCount + droppedOrphans;
+  if (summarizedCount === 0) {
+    return {
+      messages,
+      compacted: false,
+      compactedMessageCount: 0,
+      remainingMessageCount: nonSystemMessages.length
+    };
+  }
+
+  const summaryMessage: ChatMessage = {
+    role: "system",
+    content: [
+      MODEL_SUMMARY_PREFIX,
+      `Summarized at: ${(options.now ?? new Date()).toISOString()}`,
+      `Summarized messages: ${summarizedCount}`,
+      "",
+      summary.trim()
+    ].join("\n")
+  };
+
+  return {
+    messages: [...systemMessages, summaryMessage, ...recentMessages],
+    compacted: true,
+    compactedMessageCount: summarizedCount,
     remainingMessageCount: recentMessages.length
   };
+}
+
+function isModelSummaryMessage(message: ChatMessage) {
+  return message.role === "system" && chatContentToText(message.content).startsWith(MODEL_SUMMARY_PREFIX);
 }
 
 function isCompactionMessage(message: ChatMessage) {
@@ -93,27 +233,80 @@ function messageLabel(message: ChatMessage) {
   return "User";
 }
 
-function toPlainTranscriptMessage(message: ChatMessage): ChatMessage {
+function latestUserIndex(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "user" && isPinnableUserMessage(message)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function isPinnableUserMessage(message: ChatMessage) {
+  const content = chatContentToText(message.content).trimStart();
+  return !content.startsWith("Local tool result");
+}
+
+function toPlainTranscriptMessage(message: ChatMessage, entryCharacterLimit?: number, preserveUserContent = false): ChatMessage {
+  if (preserveUserContent && message.role === "user") {
+    return toPinnedUserMessage(message, entryCharacterLimit);
+  }
+
+  const content = truncateTranscriptContent(transcriptContent(message), entryCharacterLimit);
   if (message.role === "tool") {
-    const label = message.name ? ` from ${message.name}` : "";
-    const id = message.toolCallId ? ` (${message.toolCallId})` : "";
     return {
       role: "user",
-      content: `Local tool result${label}${id}:\n${chatContentToText(message.content)}`
+      content
     };
   }
 
   if (message.toolCalls?.length) {
     return {
       role: message.role,
-      content: transcriptContent(message)
+      content
     };
   }
 
   return {
     role: message.role,
-    content: chatContentToText(message.content)
+    content
   };
+}
+
+function toPinnedUserMessage(message: ChatMessage, entryCharacterLimit?: number): ChatMessage {
+  return {
+    role: "user",
+    content: truncateChatContent(message.content, entryCharacterLimit)
+  };
+}
+
+function truncateChatContent(content: ChatContent, entryCharacterLimit: number | undefined): ChatContent {
+  if (typeof content === "string") {
+    return truncateTranscriptContent(content, entryCharacterLimit);
+  }
+  if (!entryCharacterLimit) {
+    return content.map((part) => (part.type === "text" ? { ...part } : { ...part, image_url: { ...part.image_url } }));
+  }
+
+  let remainingTextCharacters = entryCharacterLimit;
+  return content
+    .map((part) => {
+      if (part.type === "image_url") {
+        return { ...part, image_url: { ...part.image_url } };
+      }
+      if (remainingTextCharacters <= 0) {
+        return undefined;
+      }
+      if (part.text.length <= remainingTextCharacters) {
+        remainingTextCharacters -= part.text.length;
+        return { ...part };
+      }
+      const text = truncateTranscriptContent(part.text, remainingTextCharacters);
+      remainingTextCharacters = 0;
+      return text ? { ...part, text } : undefined;
+    })
+    .filter((part): part is ChatContentPart => Boolean(part));
 }
 
 function transcriptContent(message: ChatMessage) {
@@ -141,4 +334,14 @@ function formatToolArguments(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+function truncateTranscriptContent(content: string, entryCharacterLimit: number | undefined) {
+  if (!entryCharacterLimit || content.length <= entryCharacterLimit) {
+    return content;
+  }
+  if (entryCharacterLimit <= 3) {
+    return ".".repeat(Math.max(0, entryCharacterLimit));
+  }
+  return `${content.slice(0, Math.max(0, entryCharacterLimit - 3)).trimEnd()}...`;
 }

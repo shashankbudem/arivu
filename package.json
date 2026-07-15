@@ -3,6 +3,26 @@
   "version": "0.1.0",
   "description": "A local desktop, TUI, and CLI coding agent with OpenAI-compatible model support.",
   "type": "module",
+  "license": "MIT",
+  "author": "Arivu contributors",
+  "keywords": [
+    "ai",
+    "agent",
+    "coding-agent",
+    "cli",
+    "tui",
+    "desktop",
+    "openai-compatible",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shashankbudem/shankinster.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shashankbudem/shankinster/issues"
+  },
+  "homepage": "https://github.com/shashankbudem/shankinster#readme",
   "bin": {
     "arivu": "./dist/cli.js"
   },
@@ -21,7 +41,17 @@
     "desktop:dev": "npm run desktop:main:build && concurrently -k \"vite --config desktop/renderer/vite.config.ts --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && ARIVU_DESKTOP_DEV_URL=http://127.0.0.1:5173 electron dist-desktop/main/main.js\"",
     "desktop:start": "npm run desktop:build && electron dist-desktop/main/main.js",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "dist": "npm run desktop:build && electron-builder",
+    "dist:mac": "npm run desktop:build && electron-builder --mac",
+    "dist:win": "npm run desktop:build && electron-builder --win",
+    "dist:linux": "npm run desktop:build && electron-builder --linux",
+    "dist:dir": "npm run desktop:build && electron-builder --dir",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@inquirer/prompts": "^5.5.0",
@@ -31,14 +61,21 @@
     "commander": "^12.1.0",
     "execa": "^9.3.1",
     "lucide-react": "^1.17.0",
+    "page-agent": "1.11.0",
+    "@page-agent/core": "1.11.0",
+    "@page-agent/llms": "1.11.0",
+    "@page-agent/page-controller": "1.11.0",
+    "@page-agent/ui": "1.11.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "shiki": "^4.2.0",
-    "zod": "^3.23.8"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "@eslint/js": "^9.17.0",
     "@types/blessed": "^0.1.25",
     "@types/node": "^22.10.2",
     "@types/react": "^19.2.16",
@@ -46,9 +83,14 @@
     "@vitejs/plugin-react": "^4.7.0",
     "concurrently": "^10.0.3",
     "electron": "^42.3.2",
+    "electron-builder": "^25.1.8",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.4.2",
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0",
     "vite": "^5.4.21",
     "vitest": "^2.1.8",
     "wait-on": "^9.0.10"

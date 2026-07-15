@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OpenAICompatibleChatClient } from "../src/agent/OpenAICompatibleChatClient.js";
+import { OpenAICompatibleChatClient, retryAfterFromHeaders, type ApiRequestLogEntry } from "../src/agent/OpenAICompatibleChatClient.js";
 import type { ChatRequest } from "../src/agent/types.js";
 
 describe("OpenAICompatibleChatClient", () => {
@@ -9,6 +9,7 @@ describe("OpenAICompatibleChatClient", () => {
 
   it("falls back to markdown when an endpoint rejects tool calling", async () => {
     const bodies: Array<Record<string, unknown>> = [];
+    const observations: unknown[] = [];
     vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       if (bodies.length === 1) {
@@ -30,7 +31,10 @@ describe("OpenAICompatibleChatClient", () => {
       apiKey: "test-key",
       baseUrl: "https://api.example.test/v1",
       model: "test-model",
-      trustMode: "ask"
+      trustMode: "ask",
+      onCapabilityObservation: (observation) => {
+        observations.push(observation);
+      }
     });
     const request: ChatRequest = {
       messages: [{ role: "user", content: "read the file" }],
@@ -49,6 +53,80 @@ describe("OpenAICompatibleChatClient", () => {
     expect(bodies[0]?.tools).toBeTruthy();
     expect(bodies[1]?.tools).toBeUndefined();
     expect(JSON.stringify(bodies[1]?.messages)).toContain("Tool calling is unavailable");
+    expect(observations).toMatchObject([
+      {
+        capability: "toolCalling",
+        value: "disabled",
+        source: "provider_error",
+        status: 400
+      }
+    ]);
+  });
+
+  it("omits tools immediately when provider tool calling is disabled", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "Plain chat response."
+            }
+          }
+        ]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      toolCalling: "disabled"
+    });
+
+    const response = await client.complete({
+      messages: [{ role: "user", content: "read the file" }],
+      tools: [
+        {
+          name: "read",
+          description: "Read a file.",
+          parameters: { type: "object" }
+        }
+      ]
+    });
+
+    expect(response.message.content).toBe("Plain chat response.");
+    expect(body?.tools).toBeUndefined();
+    expect(body?.tool_choice).toBeUndefined();
+    expect(JSON.stringify(body?.messages)).toContain("Tool calling is unavailable");
+  });
+
+  it("does not downgrade when provider tool calling is explicitly enabled", async () => {
+    vi.stubGlobal("fetch", async () => new Response("tools are not supported", { status: 400 }));
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      toolCalling: "enabled"
+    });
+
+    await expect(
+      client.complete({
+        messages: [{ role: "user", content: "read the file" }],
+        tools: [
+          {
+            name: "read",
+            description: "Read a file.",
+            parameters: { type: "object" }
+          }
+        ]
+      })
+    ).rejects.toThrow("Model request failed (400): tools are not supported");
   });
 
   it("strips tool protocol history when retrying a failed tool result request", async () => {
@@ -108,7 +186,7 @@ describe("OpenAICompatibleChatClient", () => {
     expect(bodies[1]?.tools).toBeUndefined();
     expect(bodies[1]?.tool_choice).toBeUndefined();
     const retryMessages = JSON.stringify(bodies[1]?.messages);
-    expect(retryMessages).not.toContain("\"role\":\"tool\"");
+    expect(retryMessages).not.toContain('"role":"tool"');
     expect(retryMessages).not.toContain("tool_calls");
     expect(retryMessages).toContain("Local tool request");
     expect(retryMessages).toContain("Local tool result from web_search");
@@ -214,6 +292,76 @@ describe("OpenAICompatibleChatClient", () => {
       { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "low" } }
     ]);
     expect(JSON.stringify(messages[0]?.content)).not.toContain("diagram.png");
+  });
+
+  it("fails before sending images when provider image input is disabled", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      imageInput: "disabled"
+    });
+
+    await expect(
+      client.complete({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this." },
+              { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "low" } }
+            ]
+          }
+        ],
+        tools: []
+      })
+    ).rejects.toThrow("Image input is disabled for this provider");
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("observes image input as disabled when an endpoint rejects image parts", async () => {
+    const observations: unknown[] = [];
+    vi.stubGlobal("fetch", async () => new Response("image_url content parts are not supported by this model", { status: 400 }));
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      imageInput: "auto",
+      onCapabilityObservation: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await expect(
+      client.complete({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this." },
+              { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "low" } }
+            ]
+          }
+        ],
+        tools: []
+      })
+    ).rejects.toThrow("image_url content parts are not supported");
+
+    expect(observations).toMatchObject([
+      {
+        capability: "imageInput",
+        value: "disabled",
+        source: "provider_error",
+        status: 400
+      }
+    ]);
   });
 
   it("falls back to markdown when an endpoint rejects empty assistant tool-call content", async () => {
@@ -500,6 +648,370 @@ describe("OpenAICompatibleChatClient", () => {
     expect(streamed.join("")).not.toContain("【");
   });
 
+  it("recovers a provider-unparsed textual tool call from complete() content", async () => {
+    vi.stubGlobal("fetch", async () => {
+      return Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content:
+                'Delegating to the page agent now.\n\nLocal tool request:\n- browser_task: {\n  "instruction": "Create the catalog item",\n  "mode": "visible"\n}'
+            }
+          }
+        ]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.complete({
+      messages: [{ role: "user", content: "create the item" }],
+      tools: [{ name: "browser_task", description: "Delegate a browser task.", parameters: { type: "object", properties: {} } }]
+    });
+
+    expect(response.message.toolCalls).toHaveLength(1);
+    expect(response.message.toolCalls?.[0]).toMatchObject({
+      name: "browser_task",
+      arguments: { instruction: "Create the catalog item", mode: "visible" }
+    });
+    expect(String(response.message.content)).toBe("Delegating to the page agent now.");
+  });
+
+  it("recovers a provider-unparsed textual tool call from streamed content", async () => {
+    vi.stubGlobal("fetch", async () => {
+      const events = [
+        { choices: [{ delta: { content: "On it.\n<tool_call>\n" } }] },
+        { choices: [{ delta: { content: '{"name": "browser_state", "arguments": {}}\n</tool_call>' } }] }
+      ];
+      const body = `${events.map((event) => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.stream?.(
+      {
+        messages: [{ role: "user", content: "check the browser" }],
+        tools: [{ name: "browser_state", description: "Inspect browser state.", parameters: { type: "object", properties: {} } }]
+      },
+      () => undefined
+    );
+
+    expect(response?.message.toolCalls).toHaveLength(1);
+    expect(response?.message.toolCalls?.[0]).toMatchObject({ name: "browser_state", arguments: {} });
+    expect(String(response?.message.content)).toBe("On it.");
+  });
+
+  it("recovers textual tool calls when a provider answers a stream request with a batch body", async () => {
+    vi.stubGlobal("fetch", async () => {
+      return Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: 'Local tool request:\n- browser_task: {\n  "instruction": "Create the item"\n}'
+            }
+          }
+        ]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.stream?.(
+      {
+        messages: [{ role: "user", content: "create the item" }],
+        tools: [{ name: "browser_task", description: "Delegate a browser task.", parameters: { type: "object", properties: {} } }]
+      },
+      () => undefined
+    );
+
+    expect(response?.message.toolCalls).toHaveLength(1);
+    expect(response?.message.toolCalls?.[0]).toMatchObject({ name: "browser_task", arguments: { instruction: "Create the item" } });
+  });
+
+  it("retries retryable status codes with backoff and then succeeds", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response("rate limited", { status: 429, headers: { "Retry-After": "0" } });
+      }
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "Recovered after retry." } }]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] });
+
+    expect(response.message.content).toBe("Recovered after retry.");
+    expect(calls).toBe(2);
+  });
+
+  it("gives up after exhausting retries on retryable errors", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response("upstream unavailable", { status: 503, headers: { "Retry-After": "0" } });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      maxRequestRetries: 1
+    });
+
+    await expect(client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow("Model request failed (503)");
+    expect(calls).toBe(2);
+  });
+
+  it("retries rate limits past the generic retry budget so a 429 blip doesn't kill the run", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      // Four consecutive 429s — more than the default generic budget of 2 retries (3 attempts).
+      if (calls <= 4) {
+        return new Response("Too Many Requests", { status: 429, headers: { "Retry-After": "0" } });
+      }
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "Recovered after the rate limit cleared." } }]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+      // No maxRateLimitRetries override: the default (5) must carry it past the generic budget.
+    });
+
+    const response = await client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] });
+
+    expect(response.message.content).toBe("Recovered after the rate limit cleared.");
+    expect(calls).toBe(5);
+  });
+
+  it("stops retrying rate limits once the rate-limit budget is exhausted", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response("Too Many Requests", { status: 429, headers: { "Retry-After": "0" } });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      maxRateLimitRetries: 3
+    });
+
+    await expect(client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow("Model request failed (429)");
+    // 1 initial attempt + 3 retries.
+    expect(calls).toBe(4);
+  });
+
+  it("logs a diagnostics entry that flags a turn calling only unavailable tools as empty", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "",
+              tool_calls: [{ id: "c1", type: "function", function: { name: "browser_snapshot", arguments: "{}" } }]
+            },
+            finish_reason: "tool_calls"
+          }
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 }
+      })
+    );
+
+    const entries: ApiRequestLogEntry[] = [];
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "secret-key-12345678",
+      baseUrl: "https://api.example.test/v1",
+      model: "glm-5.2",
+      trustMode: "ask",
+      onRequestLog: (entry) => entries.push(entry),
+      captureRequestBodies: true
+    });
+
+    await client.complete({
+      messages: [{ role: "user", content: "look at the page" }],
+      tools: [{ name: "read", description: "read a file", parameters: { type: "object", properties: {} } }]
+    });
+
+    expect(entries).toHaveLength(1);
+    const entry = entries[0];
+    expect(entry.outcome).toBe("empty");
+    expect(entry.toolCalls).toEqual(["browser_snapshot"]);
+    expect(entry.droppedToolCalls).toEqual(["browser_snapshot"]);
+    expect(entry.contentChars).toBe(0);
+    expect(entry.model).toBe("glm-5.2");
+    expect(entry.finishReason).toBe("tool_calls");
+    expect(entry.toolsOffered).toEqual(["read"]);
+    expect(entry.requestMessages?.[0]?.content).toContain("look at the page");
+  });
+
+  it("logs an ok diagnostics entry for a normal text answer", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({ choices: [{ message: { role: "assistant", content: "All done." }, finish_reason: "stop" }] })
+    );
+    const entries: ApiRequestLogEntry[] = [];
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "secret-key-12345678",
+      baseUrl: "https://api.example.test/v1",
+      model: "glm-5.2",
+      trustMode: "ask",
+      onRequestLog: (entry) => entries.push(entry)
+    });
+    await client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].outcome).toBe("ok");
+    expect(entries[0].contentChars).toBeGreaterThan(0);
+    // Bodies are opt-in: not captured unless captureRequestBodies is set.
+    expect(entries[0].requestMessages).toBeUndefined();
+  });
+
+  it("does not retry non-retryable client errors", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response("nope", { status: 401 });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    await expect(client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow("Model request failed (401)");
+    expect(calls).toBe(1);
+  });
+
+  it("parses token usage from batch responses", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({
+        choices: [{ message: { role: "assistant", content: "Done." } }],
+        usage: { prompt_tokens: 100, completion_tokens: 25, total_tokens: 125 }
+      })
+    );
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] });
+
+    expect(response.usage).toEqual({ promptTokens: 100, completionTokens: 25, totalTokens: 125 });
+  });
+
+  it("requests and parses streamed usage", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const events = [
+        { choices: [{ delta: { content: "Answer." } }] },
+        { choices: [], usage: { prompt_tokens: 40, completion_tokens: 10, total_tokens: 50 } }
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(`${events}data: [DONE]\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" }
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] });
+
+    expect((body?.stream_options as Record<string, unknown>)?.include_usage).toBe(true);
+    expect(response?.usage).toEqual({ promptTokens: 40, completionTokens: 10, totalTokens: 50 });
+  });
+
+  it("does not send a request when the signal is already aborted", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const controller = new AbortController();
+    controller.abort();
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    await expect(
+      client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] }, { signal: controller.signal })
+    ).rejects.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not retry when the caller aborts the request", async () => {
+    let calls = 0;
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
+      calls += 1;
+      controller.abort();
+      const abortError = new Error("aborted");
+      abortError.name = "AbortError";
+      (init?.signal as AbortSignal | undefined)?.throwIfAborted?.();
+      throw abortError;
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    await expect(
+      client.complete({ messages: [{ role: "user", content: "hi" }], tools: [] }, { signal: controller.signal })
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+
   it("strips tool protocol history from no-tools requests", async () => {
     let body: Record<string, unknown> | undefined;
     vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
@@ -544,9 +1056,34 @@ describe("OpenAICompatibleChatClient", () => {
 
     expect(body?.tools).toBeUndefined();
     const messages = JSON.stringify(body?.messages);
-    expect(messages).not.toContain("\"role\":\"tool\"");
+    expect(messages).not.toContain('"role":"tool"');
     expect(messages).not.toContain("tool_calls");
     expect(messages).toContain("Local tool request");
     expect(messages).toContain("Local tool result from web_search");
+  });
+});
+
+describe("retryAfterFromHeaders", () => {
+  const headers = (value?: string) => new Headers(value === undefined ? {} : { "Retry-After": value });
+
+  it("honors a numeric Retry-After beyond our generic backoff cap", () => {
+    // 30s exceeds the 8s exponential-backoff cap; retrying sooner would just re-hit the limit.
+    expect(retryAfterFromHeaders(headers("30"))).toBe(30_000);
+  });
+
+  it("caps an oversized Retry-After at the 60s ceiling", () => {
+    expect(retryAfterFromHeaders(headers("600"))).toBe(60_000);
+  });
+
+  it("parses an HTTP-date Retry-After into a bounded delay", () => {
+    const tenSecondsOut = new Date(Date.now() + 10_000).toUTCString();
+    const result = retryAfterFromHeaders(headers(tenSecondsOut));
+    expect(result).toBeGreaterThan(0);
+    expect(result).toBeLessThanOrEqual(60_000);
+  });
+
+  it("returns undefined when the header is missing or unparseable", () => {
+    expect(retryAfterFromHeaders(headers())).toBeUndefined();
+    expect(retryAfterFromHeaders(headers("soon"))).toBeUndefined();
   });
 });

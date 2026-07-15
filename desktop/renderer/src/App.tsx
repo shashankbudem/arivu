@@ -6,7 +6,9 @@ import {
   useRef,
   useState,
   type ComponentPropsWithoutRef,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   type RefObject
 } from "react";
 import { createPortal } from "react-dom";
@@ -15,6 +17,7 @@ import remarkGfm from "remark-gfm";
 import {
   Activity,
   AlertTriangle,
+  Bell,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -24,15 +27,20 @@ import {
   FileText,
   FolderOpen,
   FolderPlus,
+  GitBranch,
+  GitPullRequest,
   Globe,
   Image as ImageIcon,
   Info,
   LayoutDashboard,
+  ListChecks,
   MessageSquare,
   MoreHorizontal,
   Moon,
   Palette,
   Pencil,
+  Pin,
+  PinOff,
   Play,
   Plus,
   RefreshCw,
@@ -45,14 +53,64 @@ import {
   Server,
   Settings,
   Shield,
+  Square,
   Sun,
   TerminalSquare,
   Trash2,
   Wrench,
   X
 } from "lucide-react";
+import { approvalViewFromRequest, parseApprovalMessage, type ApprovalView, type SideBySideDiff } from "./approvalParsing";
+import {
+  basename,
+  capitalize,
+  clamp,
+  formatBytes,
+  formatDateTime,
+  formatDurationMs,
+  formatError,
+  formatNumber,
+  writeClipboardText
+} from "./format";
 import { estimateTokenCount, truncateTextToTokenBudget } from "./tokenBudget";
+import {
+  buildReportRemediationPrompt,
+  buildTaskRunPullRequestReviewPrompt,
+  buildTaskRunReplayFailureReviewPrompt,
+  buildTaskRunVerificationRepairPrompt,
+  buildTaskRunVerificationReplayPrompt,
+  buildTaskRunVerificationRerunPrompt
+} from "../../../src/agent/reportRemediation";
+import { promptTextWithFileContext } from "../../../src/agent/fileContext";
+import {
+  buildTaskRunDiffComparison,
+  buildTaskRunPlanSourceReview,
+  buildTaskRunPullRequestReadiness,
+  buildTaskRunReplayOutcomeGroups,
+  type AgentTaskRunDiffComparison,
+  type AgentTaskRunPlanSourceReview,
+  type AgentTaskRunPullRequestReadiness,
+  type AgentTaskRunReplayOutcomeGroup
+} from "../../../src/agent/taskHistory";
+import { buildTaskRunAuditMarkdown } from "../../../src/agent/taskRunAudit";
+import { capabilityForToolName } from "../../../src/agent/toolCapabilities";
+import { scopePolicySummaryItems } from "../../../src/permissions/scopePolicy";
+import {
+  normalizedWorkspacePolicyPreset,
+  WORKSPACE_POLICY_PRESETS,
+  workspacePolicyPresetMatches,
+  type WorkspacePolicyPreset
+} from "../../../src/permissions/workspacePolicyPresets";
+import { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "../../../src/permissions/workspacePolicyProfiles";
+import { WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH } from "../../../src/permissions/workspacePolicyBundles";
+import {
+  parseWorkspacePolicyTransfer,
+  serializeWorkspacePolicyTransfer,
+  workspacePolicyTransferPayload,
+  type WorkspacePolicyTransferPayload
+} from "../../../src/permissions/workspacePolicyTransfer";
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
+import { resolveAppKeyboardShortcut } from "./keyboardShortcuts";
 
 type ViewMode = "chat" | "history" | "settings" | "ui";
 type SidebarSectionId = "projects" | "chats";
@@ -64,13 +122,36 @@ type ProviderFormState = LlmProviderPatch & {
   apiKeyPresent?: boolean;
 };
 
+type PullRequestWatch = {
+  sessionId: string;
+  taskRunId: string;
+  startedAt: string;
+  lastRefreshedAt?: string;
+  lastError?: string;
+};
+
+type PullRequestWatchView = {
+  active: boolean;
+  refreshing: boolean;
+  lastRefreshedAt?: string;
+  lastError?: string;
+};
+
 const AUTO_MODEL_VALUE = "auto";
 const STANDALONE_PROJECT_VALUE = "__standalone__";
 const COMPOSER_TOKEN_BUDGET = 8_000;
 const DEFAULT_AGENT_LOOP_MAX_ITERATIONS = 5;
 const MAX_IMAGE_ATTACHMENTS = 6;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_CONTEXT_FILE_ATTACHMENTS = 6;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const SUPPORTED_IMAGE_EXTENSIONS: Record<string, string> = {
+  gif: "image/gif",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp"
+};
 const NEW_PROVIDER_NAME = "New provider";
 const SIDEBAR_COLLAPSED_WIDTH = 68;
 const SIDEBAR_DEFAULT_WIDTH = 320;
@@ -80,8 +161,20 @@ const ACTIVITY_COLLAPSED_WIDTH = 46;
 const ACTIVITY_DEFAULT_WIDTH = 300;
 const ACTIVITY_MIN_WIDTH = 232;
 const ACTIVITY_MAX_WIDTH = 340;
-const CHAT_OPTIONS_MENU_WIDTH = 132;
-const CHAT_OPTIONS_MENU_HEIGHT = 40;
+const MAX_ACTIVITY_EVIDENCE_LINKS = 8;
+const CHAT_OPTIONS_MENU_WIDTH = 150;
+const PR_BACKGROUND_REFRESH_INTERVAL_MS = 90_000;
+const TRUST_MODE_ORDER: TrustMode[] = ["readonly", "ask", "trusted"];
+const WORKSPACE_POLICY_CAPABILITIES: WorkspacePolicyCapability[] = [
+  "read_repo",
+  "write_workspace",
+  "run_command",
+  "network_fetch",
+  "browser_control",
+  "mcp_call",
+  "unknown"
+];
+const CHAT_OPTIONS_MENU_HEIGHT = 106;
 const CHAT_OPTIONS_MENU_MARGIN = 8;
 const CHAT_OPTIONS_MENU_GAP = 2;
 const CONTEXT_COMPACT_RECENT_MESSAGE_COUNT = 8;
@@ -91,31 +184,41 @@ const PROVIDER_PRESETS: LlmProviderPatch[] = [
     id: "openai",
     name: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4.1"
+    model: "gpt-4.1",
+    toolCalling: "auto",
+    imageInput: "auto"
   },
   {
     id: "nvidia",
     name: "NVIDIA NIM",
     baseUrl: "https://integrate.api.nvidia.com/v1",
-    model: "moonshotai/kimi-k2.6"
+    model: "moonshotai/kimi-k2.6",
+    toolCalling: "auto",
+    imageInput: "auto"
   },
   {
     id: "openrouter",
     name: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
-    model: "openai/gpt-4.1"
+    model: "openai/gpt-4.1",
+    toolCalling: "auto",
+    imageInput: "auto"
   },
   {
     id: "groq",
     name: "Groq",
     baseUrl: "https://api.groq.com/openai/v1",
-    model: "llama-3.3-70b-versatile"
+    model: "llama-3.3-70b-versatile",
+    toolCalling: "auto",
+    imageInput: "auto"
   },
   {
     id: "local",
     name: "Local / Ollama",
     baseUrl: "http://localhost:11434/v1",
-    model: "llama3.1"
+    model: "llama3.1",
+    toolCalling: "auto",
+    imageInput: "auto"
   }
 ];
 const DEFAULT_COLLAPSED_SECTIONS: Record<SidebarSectionId, boolean> = {
@@ -158,20 +261,52 @@ const UI_CONCEPTS: Array<{
 
 type ActivityItem = {
   id: string;
-  kind: "call" | "result" | "system";
+  kind: "call" | "result" | "approval" | "system";
+  toolCallId?: string;
   title: string;
   detail: string;
   summary?: string;
-  status?: "running" | "done" | "waiting";
+  status?: "running" | "done" | "waiting" | "failed";
   imagePreview?: {
     path: string;
     width?: number;
     height?: number;
     caption: string;
   };
+  diffPreview?: DiffPreview;
+  evidenceLinks?: ActivityEvidenceLink[];
+  remediationPrompt?: string;
+  rollbackPrompt?: string;
+  policy?: ActivityPolicyDetail;
 };
 
-type ActivityGroupStatus = "running" | "done" | "waiting";
+type ActivityPolicyDetail = {
+  capability: AgentTaskRunCapability;
+  capabilityLabel: string;
+  source: "approval" | "tool" | "inferred";
+  label?: string;
+  reason?: string;
+  effect?: AgentTaskRunApprovalEffect;
+  status?: AgentTaskRunApprovalStatus;
+  trustMode?: TrustMode;
+  risky?: boolean;
+  override?: AgentTaskRunApprovalOverride;
+  scope?: AgentTaskRunApprovalScope;
+  summary?: string;
+};
+
+type ActivityEvidenceLink = {
+  id: string;
+  label: string;
+  title: string;
+  taskRunId: string;
+  artifactId: string;
+  path: string;
+  line?: number;
+  kind: "report" | "source" | "diagnostic";
+};
+
+type ActivityGroupStatus = "running" | "done" | "waiting" | "failed";
 
 type ActivityGroup = {
   id: string;
@@ -180,6 +315,10 @@ type ActivityGroup = {
   detail: string;
   items: ActivityItem[];
   status: ActivityGroupStatus;
+  run?: AgentTaskRun;
+  sourceRun?: AgentTaskRun;
+  planSourceRun?: AgentTaskRun;
+  worktreeAttemptRuns?: AgentTaskRun[];
 };
 
 type ActivityModel = {
@@ -187,6 +326,18 @@ type ActivityModel = {
   systemItems: ActivityItem[];
   groups: ActivityGroup[];
   groupsByUserMessageIndex: Map<number, ActivityGroup>;
+};
+
+type ToolRunEntry = {
+  id: string;
+  kind: "tool" | "approval" | "event";
+  title: string;
+  status?: ActivityItem["status"];
+  call?: ActivityItem;
+  result?: ActivityItem;
+  item?: ActivityItem;
+  policy?: ActivityPolicyDetail;
+  imagePreview?: ActivityItem["imagePreview"];
 };
 
 type VisibleMessageEntry = {
@@ -208,53 +359,13 @@ type DiffPreview = {
   lines: DiffLine[];
 };
 
-type SideBySideRow = {
-  kind: "add" | "delete" | "context" | "change" | "meta";
-  oldNumber?: number;
-  newNumber?: number;
-  left?: string;
-  right?: string;
-  label?: string;
-};
-
-type SideBySideDiff = {
-  title: string;
-  rows: SideBySideRow[];
-};
-
-type ApprovalView =
-  | {
-      type: "shell";
-      destructive: boolean;
-      command: string;
-      cwd?: string;
-      executable: string;
-      rest: string;
-      warnings: string[];
-    }
-  | {
-      type: "write";
-      destructive: boolean;
-      summary: string;
-      diff?: SideBySideDiff;
-    }
-  | {
-      type: "browser";
-      destructive: boolean;
-      action: string;
-      target: string;
-      mode?: BrowserMode;
-    }
-  | {
-      type: "unknown";
-      message: string;
-    };
-
 type ProjectSummary = {
   projectRoot: string;
   name: string;
+  projectRootExists: boolean;
   latestSessionId?: string;
   updatedAt?: string;
+  pinnedAt?: string;
   chatCount: number;
   sessions: SessionSummary[];
 };
@@ -262,6 +373,7 @@ type ProjectSummary = {
 type ProjectOption = {
   projectRoot: string;
   name: string;
+  projectRootExists?: boolean;
   updatedAt?: string;
 };
 
@@ -292,16 +404,72 @@ type FailedPrompt = {
   messageIndex: number;
   content: ChatContent;
   skillNames: string[];
+  planModeEnabled: boolean;
   loopEnabled: boolean;
+  worktreeEnabled: boolean;
+  worktreeTaskRunId?: string;
+  worktreeReplayOfTaskRunId?: string;
+  worktreePlannedFromTaskRunId?: string;
 };
 
 type SubmitPromptOptions = {
   reuseFailedPrompt?: boolean;
+  retryFromUserMessageIndex?: number;
   skillNames?: string[];
+  planModeEnabled?: boolean;
   loopEnabled?: boolean;
+  worktreeEnabled?: boolean;
+  worktreeTaskRunId?: string;
+  worktreeReplayOfTaskRunId?: string;
+  worktreePlannedFromTaskRunId?: string;
 };
 
-type SlashCommandId = "compact" | "session" | "tools" | "skills" | "browser" | "loop";
+type WorktreeContinuation = {
+  taskRunId: string;
+  branch?: string;
+  replayOfTaskRunId?: string;
+};
+
+type WorktreePlanSource = {
+  taskRunId: string;
+};
+
+type DraftPromptOptions = {
+  worktreeContinuation?: WorktreeContinuation;
+  worktreePlanSource?: WorktreePlanSource;
+  status?: string;
+  confirmLabel?: string;
+};
+
+type RetryPromptTarget = {
+  content: ChatContent;
+  userMessageIndex: number;
+};
+
+type TaskWorktreeAction =
+  | "open"
+  | "refresh"
+  | "preview"
+  | "merge"
+  | "discard"
+  | "cleanup"
+  | "prepare_pr"
+  | "create_pr"
+  | "refresh_pr"
+  | "fetch_pr_check_logs"
+  | "sync"
+  | "continue_conflict"
+  | "abort_conflict"
+  | "open_conflict_file";
+
+type TaskRunPlanAction = "approve" | "request_revision" | "cancel";
+
+type TaskWorktreeActionOptions = {
+  conflictPath?: string;
+};
+
+type SlashCommandId =
+  "compact" | "summarize" | "session" | "tools" | "skills" | "files" | "browser" | "browsermodel" | "plan" | "loop" | "worktree";
 
 type SlashCommandDefinition = {
   id: SlashCommandId;
@@ -336,6 +504,13 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
     keywords: ["context", "summarize", "trim"]
   },
   {
+    id: "summarize",
+    command: "summarize",
+    title: "Summarize context",
+    description: "Ask the model to summarize older messages, keeping recent turns verbatim.",
+    keywords: ["context", "compact", "model", "trim"]
+  },
+  {
     id: "session",
     command: "session",
     title: "Session details",
@@ -357,6 +532,13 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
     keywords: ["load", "local", "workflow", "skill"]
   },
   {
+    id: "files",
+    command: "files",
+    title: "File context",
+    description: "Attach workspace text files to the next prompt.",
+    keywords: ["attach", "context", "file", "code", "mention"]
+  },
+  {
     id: "browser",
     command: "browser",
     title: "Browser window",
@@ -364,11 +546,32 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
     keywords: ["open", "page", "window", "visible", "dev"]
   },
   {
+    id: "browsermodel",
+    command: "browsermodel",
+    title: "Browser task model",
+    description: "Set the model the in-page browser_task agent uses. Add a model id to set it instantly, or run bare to pick.",
+    keywords: ["llm", "model", "browser", "task", "agent", "provider", "pin"]
+  },
+  {
+    id: "plan",
+    command: "plan",
+    title: "Plan approval",
+    description: "Ask for a read-only plan before executing the next prompt.",
+    keywords: ["approve", "review", "strategy", "before", "execute"]
+  },
+  {
     id: "loop",
     command: "loop",
     title: "Agent loop",
     description: "Toggle bounded loop mode for the next prompt.",
     keywords: ["continue", "iterate", "autonomous", "until", "done"]
+  },
+  {
+    id: "worktree",
+    command: "worktree",
+    title: "Task worktree",
+    description: "Run the next prompt in an isolated git worktree.",
+    keywords: ["branch", "isolate", "checkout", "git", "sandbox"]
   }
 ];
 
@@ -379,6 +582,8 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState("");
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<ContextFileAttachment[]>([]);
+  const [composerDragActive, setComposerDragActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Starting");
   const [view, setView] = useState<ViewMode>("chat");
@@ -390,15 +595,30 @@ export function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [compactingContext, setCompactingContext] = useState(false);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(false);
   const [availableTools, setAvailableTools] = useState<ToolSummary[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [skillsRoot, setSkillsRoot] = useState("");
   const [pendingSkillNames, setPendingSkillNames] = useState<string[]>([]);
+  const [agentPlanModeEnabled, setAgentPlanModeEnabled] = useState(false);
   const [agentLoopEnabled, setAgentLoopEnabled] = useState(false);
+  const [agentWorktreeEnabled, setAgentWorktreeEnabled] = useState(false);
+  const [worktreeContinuation, setWorktreeContinuation] = useState<WorktreeContinuation | null>(null);
+  const [worktreePlanSource, setWorktreePlanSource] = useState<WorktreePlanSource | null>(null);
+  const [worktreeActionBusy, setWorktreeActionBusy] = useState<string | null>(null);
+  const [undoBusyRunId, setUndoBusyRunId] = useState<string | null>(null);
+  const [planReviewBusy, setPlanReviewBusy] = useState<string | null>(null);
+  const [evidenceOpenBusy, setEvidenceOpenBusy] = useState<string | null>(null);
+  const [watchedPullRequests, setWatchedPullRequests] = useState<Record<string, PullRequestWatch>>({});
+  const [pullRequestWatchBusy, setPullRequestWatchBusy] = useState<Record<string, boolean>>({});
+  const [focusedActivityRunId, setFocusedActivityRunId] = useState<string | null>(null);
   const [browserState, setBrowserState] = useState<BrowserState | null>(null);
   const [toolsPopoverOpen, setToolsPopoverOpen] = useState(false);
   const [skillsPopoverOpen, setSkillsPopoverOpen] = useState(false);
   const [composerOptionsOpen, setComposerOptionsOpen] = useState(false);
+  const [browserTaskModelPickerOpen, setBrowserTaskModelPickerOpen] = useState(false);
+  const [apiRequestLog, setApiRequestLog] = useState<ApiRequestLogEntry[]>([]);
+  const [apiLogOpen, setApiLogOpen] = useState(false);
   const [settingsFocus, setSettingsFocus] = useState<SettingsFocus>(null);
   const [selectedSlashCommandIndex, setSelectedSlashCommandIndex] = useState(0);
   const [commandOutput, setCommandOutput] = useState<CommandOutput | null>(null);
@@ -407,6 +627,8 @@ export function App() {
   const [chatSearchIndex, setChatSearchIndex] = useState(0);
   const [pasteReview, setPasteReview] = useState<PasteReview | null>(null);
   const [workspaceScaffoldOpen, setWorkspaceScaffoldOpen] = useState(false);
+  const [openingWorkspaceRoot, setOpeningWorkspaceRoot] = useState<string | null>(null);
+  const [forgettingProjectRoot, setForgettingProjectRoot] = useState<string | null>(null);
   const [openChatMenuId, setOpenChatMenuId] = useState<string | null>(null);
   const [openHistoryMenuId, setOpenHistoryMenuId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadPersistedUiState().sidebarCollapsed ?? false);
@@ -429,8 +651,11 @@ export function App() {
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const chatSearchInputRef = useRef<HTMLInputElement | null>(null);
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activityFocusResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSessionIdRef = useRef<string | undefined>(undefined);
   const activeSubmissionTokenRef = useRef<string | null>(null);
+  const composerDragDepthRef = useRef(0);
+  const pullRequestWatchInFlightRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     void refresh();
@@ -438,6 +663,10 @@ export function App() {
     void loadTools();
     void loadSkills();
     void loadBrowserState();
+    void loadApiRequestLog();
+    const stopApiLog = window.arivu.onApiRequestLog((entry) => {
+      setApiRequestLog((current) => [entry, ...current].slice(0, 50));
+    });
     const stopApprovals = window.arivu.onApprovalRequest((payload) => {
       setApproval(payload);
       setStatus("Approval required");
@@ -452,6 +681,7 @@ export function App() {
       applyBrowserState(payload);
     });
     return () => {
+      stopApiLog();
       stopApprovals();
       stopAgentEvents();
       stopSessionEvents();
@@ -464,9 +694,55 @@ export function App() {
   }, [state?.sessionId]);
 
   useEffect(() => {
+    const sessionId = state?.sessionId;
+    setWatchedPullRequests((current) => {
+      const entries = Object.entries(current).filter(([, watch]) => {
+        if (!sessionId || watch.sessionId !== sessionId) {
+          return false;
+        }
+        if (!state?.taskRuns) {
+          return true;
+        }
+        return state.taskRuns.some((run) => run.id === watch.taskRunId && Boolean(run.worktree?.pullRequest?.url));
+      });
+      if (entries.length === Object.keys(current).length) {
+        return current;
+      }
+      return Object.fromEntries(entries);
+    });
+    setPullRequestWatchBusy((current) => {
+      const entries = Object.entries(current).filter(([key]) => Boolean(sessionId && key.startsWith(`${sessionId}:`)));
+      if (entries.length === Object.keys(current).length) {
+        return current;
+      }
+      return Object.fromEntries(entries);
+    });
+  }, [state?.sessionId, state?.taskRuns]);
+
+  useEffect(() => {
+    const sessionId = state?.sessionId;
+    if (!sessionId) {
+      return;
+    }
+    const watches = Object.entries(watchedPullRequests).filter(([, watch]) => watch.sessionId === sessionId);
+    if (watches.length === 0) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      for (const [key, watch] of watches) {
+        void refreshWatchedPullRequest(key, watch, { silent: true });
+      }
+    }, PR_BACKGROUND_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [state?.sessionId, watchedPullRequests]);
+
+  useEffect(() => {
     return () => {
       if (copyResetTimeoutRef.current) {
         clearTimeout(copyResetTimeoutRef.current);
+      }
+      if (activityFocusResetTimeoutRef.current) {
+        clearTimeout(activityFocusResetTimeoutRef.current);
       }
     };
   }, []);
@@ -567,7 +843,10 @@ export function App() {
     }
 
     const closePopover = (event: MouseEvent) => {
-      if (event.target instanceof Element && event.target.closest(".composer-tools-region, .composer-skills-region, .composer-menu-region")) {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(".composer-tools-region, .composer-skills-region, .composer-menu-region")
+      ) {
         return;
       }
       setToolsPopoverOpen(false);
@@ -592,7 +871,7 @@ export function App() {
 
   const activityModel = useMemo(() => deriveActivityModel(messages, state), [messages, state]);
   const activity = activityModel.items;
-  const activityGroups = activityModel.groups.filter((group) => group.items.length > 0);
+  const activityGroups = activityModel.groups.filter((group) => group.items.length > 0 || group.run);
   const activityGroupByUserMessageIndex = activityModel.groupsByUserMessageIndex;
   const latestScreenshotActivity = useMemo(() => findLatestActivityScreenshot(activity), [activity]);
   const lastActivity = activity.at(-1);
@@ -610,7 +889,7 @@ export function App() {
     lastActivity?.status,
     state?.sessionId
   ]);
-  const promptTokens = useMemo(() => estimateTokenCount(prompt), [prompt]);
+  const promptTokens = useMemo(() => estimateTokenCount(promptTextWithFileContext(prompt, fileAttachments)), [fileAttachments, prompt]);
   const nonSystemMessageCount = useMemo(() => messages.filter((message) => message.role !== "system").length, [messages]);
   const estimatedContextTokens = useMemo(() => estimateContextTokens(messages), [messages]);
   const loadedSkillNames = useMemo(() => loadedSkillNamesFromMessages(messages), [messages]);
@@ -634,19 +913,33 @@ export function App() {
         availableToolCount: availableTools.length,
         availableSkillCount: availableSkills.length,
         pendingSkillCount: pendingSkillNames.length,
-        agentLoopEnabled
+        agentPlanModeEnabled,
+        agentLoopEnabled,
+        agentWorktreeEnabled: agentWorktreeEnabled || Boolean(worktreeContinuation) || Boolean(worktreePlanSource),
+        fileAttachmentCount: fileAttachments.length
       }),
-    [agentLoopEnabled, availableSkills.length, availableTools.length, busy, compactingContext, nonSystemMessageCount, pendingSkillNames.length, state]
+    [
+      agentPlanModeEnabled,
+      agentLoopEnabled,
+      agentWorktreeEnabled,
+      worktreeContinuation,
+      worktreePlanSource,
+      availableSkills.length,
+      availableTools.length,
+      busy,
+      compactingContext,
+      nonSystemMessageCount,
+      pendingSkillNames.length,
+      fileAttachments.length,
+      state
+    ]
   );
   const filteredSlashCommands = useMemo(
     () => (slashQuery === null ? [] : filterSlashCommands(slashCommandEntries, slashQuery)),
     [slashCommandEntries, slashQuery]
   );
   const slashCommandMenuOpen = slashQuery !== null && !busy;
-  const visibleMessages = useMemo(
-    () => deriveVisibleMessages(messages),
-    [messages]
-  );
+  const visibleMessages = useMemo(() => deriveVisibleMessages(messages), [messages]);
   const chatSearchMatches = useMemo(() => {
     const query = chatSearchQuery.trim().toLowerCase();
     if (!query) {
@@ -668,9 +961,14 @@ export function App() {
       byRoot.set(projectRoot, { projectRoot, name });
     }
     for (const project of projects) {
+      if (!project.projectRootExists) {
+        byRoot.delete(project.projectRoot);
+        continue;
+      }
       byRoot.set(project.projectRoot, {
         projectRoot: project.projectRoot,
         name: project.name,
+        projectRootExists: project.projectRootExists,
         updatedAt: project.updatedAt
       });
     }
@@ -695,6 +993,9 @@ export function App() {
   useEffect(() => {
     const nextProjects = new Map<string, string>();
     for (const project of projects) {
+      if (!project.projectRootExists) {
+        continue;
+      }
       nextProjects.set(project.projectRoot, project.name);
     }
     if (state?.projectRoot) {
@@ -745,6 +1046,25 @@ export function App() {
     target?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [activeChatSearchKey]);
 
+  useEffect(() => {
+    if (!focusedActivityRunId || activityCollapsed) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      const list = activityListRef.current;
+      if (!list) {
+        return;
+      }
+      const target = Array.from(list.querySelectorAll<HTMLElement>("[data-activity-run-id]")).find(
+        (element) => element.dataset.activityRunId === focusedActivityRunId
+      );
+      target?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [activityCollapsed, focusedActivityRunId, activityGroups.length]);
+
   async function refresh() {
     try {
       const next = await window.arivu.getState();
@@ -765,6 +1085,72 @@ export function App() {
     applyDesktopState(next);
     void loadSessions();
     setStatus("Workspace opened");
+  }
+
+  async function openWorkspace(projectRoot: string) {
+    if (openingWorkspaceRoot) {
+      return;
+    }
+
+    setOpeningWorkspaceRoot(projectRoot);
+    setError(null);
+    setOpenChatMenuId(null);
+    setOpenHistoryMenuId(null);
+    try {
+      const next = await window.arivu.openWorkspace(projectRoot);
+      applyDesktopState(next);
+      void loadSessions();
+      setStatus(`Workspace opened: ${basename(projectRoot)}`);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Open workspace failed");
+    } finally {
+      setOpeningWorkspaceRoot((current) => (current === projectRoot ? null : current));
+    }
+  }
+
+  async function forgetMissingProject(project: ProjectSummary) {
+    if (forgettingProjectRoot || project.projectRootExists) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Forget missing workspace "${project.name}"?\n\nArivu will remove the unavailable folder from Workspaces and keep its ${formatNumber(
+        project.chatCount
+      )} chat${project.chatCount === 1 ? "" : "s"} in standalone history.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setForgettingProjectRoot(project.projectRoot);
+    setError(null);
+    try {
+      const next = await window.arivu.forgetMissingProject(project.projectRoot);
+      applyDesktopState(next);
+      await loadSessions();
+      setRememberedProjectOptions((current) => {
+        if (!(project.projectRoot in current)) {
+          return current;
+        }
+        const updated = { ...current };
+        delete updated[project.projectRoot];
+        return updated;
+      });
+      setExpandedProjectRoots((current) => {
+        if (!(project.projectRoot in current)) {
+          return current;
+        }
+        const updated = { ...current };
+        delete updated[project.projectRoot];
+        return updated;
+      });
+      setStatus(`Forgot missing workspace: ${project.name}`);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Forget workspace failed");
+    } finally {
+      setForgettingProjectRoot((current) => (current === project.projectRoot ? null : current));
+    }
   }
 
   function createWorkspace() {
@@ -832,6 +1218,50 @@ export function App() {
       } else {
         setStatus("Deleted chat");
       }
+      setError(null);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
+  }
+
+  async function renameSession(session: SessionSummary) {
+    setOpenChatMenuId(null);
+    setOpenHistoryMenuId(null);
+    const nextTitle = window.prompt("Rename chat", session.title);
+    if (nextTitle === null) {
+      return;
+    }
+    const trimmed = nextTitle.trim();
+    if (!trimmed) {
+      setError("Chat name cannot be empty.");
+      setStatus("Rename cancelled");
+      return;
+    }
+    if (trimmed === session.title) {
+      return;
+    }
+
+    try {
+      const next = await window.arivu.updateSession({ id: session.id, title: trimmed });
+      applyDesktopState(next);
+      await loadSessions();
+      setStatus("Renamed chat");
+      setError(null);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
+  }
+
+  async function toggleSessionPin(session: SessionSummary) {
+    setOpenChatMenuId(null);
+    setOpenHistoryMenuId(null);
+    try {
+      const next = await window.arivu.updateSession({ id: session.id, pinned: !session.pinnedAt });
+      applyDesktopState(next);
+      await loadSessions();
+      setStatus(session.pinnedAt ? "Unpinned chat" : "Pinned chat");
       setError(null);
     } catch (err) {
       setError(formatError(err));
@@ -908,6 +1338,22 @@ export function App() {
     void loadSkills();
   }
 
+  async function showToolsPopover() {
+    const tools = await loadTools();
+    setToolsPopoverOpen(true);
+    setSkillsPopoverOpen(false);
+    setComposerOptionsOpen(false);
+    setStatus(`Showing ${formatNumber((tools ?? availableTools).length)} tools`);
+  }
+
+  async function showSkillsPopover() {
+    const skills = await loadSkills();
+    setSkillsPopoverOpen(true);
+    setToolsPopoverOpen(false);
+    setComposerOptionsOpen(false);
+    setStatus(`Showing ${formatNumber((skills ?? availableSkills).length)} skills`);
+  }
+
   function loadSkillForNextPrompt(skill: SkillSummary) {
     if (loadedSkillNames.includes(skill.name)) {
       setStatus(`$${skill.name} is already loaded in this chat`);
@@ -943,8 +1389,40 @@ export function App() {
     }
   }
 
-  async function attachImageFiles(files: File[], source: "pasted" | "selected") {
+  async function chooseContextFiles() {
     if (busy) {
+      return;
+    }
+    const slots = Math.max(0, MAX_CONTEXT_FILE_ATTACHMENTS - fileAttachments.length);
+    if (slots === 0) {
+      setError(`You can attach up to ${MAX_CONTEXT_FILE_ATTACHMENTS} files.`);
+      setStatus("File context limit reached");
+      return;
+    }
+
+    try {
+      const result = await window.arivu.chooseContextFiles();
+      if (result.files.length === 0) {
+        return;
+      }
+      const merged = mergeFileAttachments(fileAttachments, result.files);
+      setFileAttachments(merged);
+      const addedCount = Math.max(0, merged.length - fileAttachments.length);
+      if (addedCount > 0) {
+        setStatus(addedCount === 1 ? "Attached file context" : `Attached ${addedCount} files`);
+      } else {
+        setStatus("File context updated");
+      }
+      setError(null);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
+  }
+
+  async function attachImageFiles(files: File[], source: "pasted" | "selected" | "dropped") {
+    if (busy) {
+      setStatus("Wait for current response before attaching images");
       return;
     }
     const slots = Math.max(0, MAX_IMAGE_ATTACHMENTS - imageAttachments.length);
@@ -965,8 +1443,72 @@ export function App() {
     }
   }
 
+  function resetComposerDragState() {
+    composerDragDepthRef.current = 0;
+    setComposerDragActive(false);
+  }
+
+  function handleComposerDragEnter(event: ReactDragEvent<HTMLDivElement>) {
+    if (!hasFileTransfer(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    if (!hasPotentialImageTransfer(event.dataTransfer)) {
+      resetComposerDragState();
+      return;
+    }
+    composerDragDepthRef.current += 1;
+    setComposerDragActive(true);
+  }
+
+  function handleComposerDragOver(event: ReactDragEvent<HTMLDivElement>) {
+    if (!hasFileTransfer(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    if (!hasPotentialImageTransfer(event.dataTransfer)) {
+      event.dataTransfer.dropEffect = "none";
+      resetComposerDragState();
+      return;
+    }
+    event.dataTransfer.dropEffect = busy ? "none" : "copy";
+    setComposerDragActive(true);
+  }
+
+  function handleComposerDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+    if (!composerDragActive) {
+      return;
+    }
+    event.preventDefault();
+    composerDragDepthRef.current = Math.max(0, composerDragDepthRef.current - 1);
+    if (composerDragDepthRef.current === 0) {
+      setComposerDragActive(false);
+    }
+  }
+
+  function handleComposerDrop(event: ReactDragEvent<HTMLDivElement>) {
+    const files = imageFilesFromDataTransfer(event.dataTransfer);
+    if (files.length === 0) {
+      if (hasFileTransfer(event.dataTransfer)) {
+        event.preventDefault();
+        setError("Drop PNG, JPEG, WebP, or GIF images.");
+        setStatus("Unsupported image drop");
+      }
+      resetComposerDragState();
+      return;
+    }
+
+    event.preventDefault();
+    resetComposerDragState();
+    void attachImageFiles(files, "dropped");
+  }
+
   function removeImageAttachment(id: string) {
     setImageAttachments((current) => current.filter((image) => image.id !== id));
+  }
+
+  function removeFileAttachment(id: string) {
+    setFileAttachments((current) => current.filter((file) => file.id !== id));
   }
 
   async function selectChatProject(projectRoot: string | null) {
@@ -999,11 +1541,7 @@ export function App() {
       const result = await window.arivu.compactContext();
       applyDesktopState(result.state);
       await loadSessions();
-      setStatus(
-        result.compacted
-          ? `Compacted ${formatNumber(result.compactedMessageCount)} older messages`
-          : "Context already compact"
-      );
+      setStatus(result.compacted ? `Compacted ${formatNumber(result.compactedMessageCount)} older messages` : "Context already compact");
       return true;
     } catch (err) {
       setError(formatError(err));
@@ -1014,17 +1552,319 @@ export function App() {
     }
   }
 
+  async function summarizeContext(): Promise<boolean> {
+    if (busy || compactingContext || !state?.sessionId) {
+      return false;
+    }
+
+    const confirmed = window.confirm(
+      `Summarize this chat's context with the model? Older messages become a generated summary and the most recent ${CONTEXT_COMPACT_RECENT_MESSAGE_COUNT} messages remain. This cannot be undone.`
+    );
+    if (!confirmed) {
+      return false;
+    }
+
+    setCompactingContext(true);
+    setError(null);
+    setStatus("Summarizing context");
+    try {
+      const result = await window.arivu.summarizeContext();
+      applyDesktopState(result.state);
+      await loadSessions();
+      setStatus(result.compacted ? `Summarized ${formatNumber(result.compactedMessageCount)} older messages` : "Context already compact");
+      return true;
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+      return false;
+    } finally {
+      setCompactingContext(false);
+    }
+  }
+
+  async function handleUndoRun(run: AgentTaskRun) {
+    if (!state?.sessionId || undoBusyRunId) {
+      return;
+    }
+    const count = run.checkpoint?.changedPaths.length ?? 0;
+    const confirmed = window.confirm(
+      `Undo this run's changes to ${count} file${count === 1 ? "" : "s"}? Files will be restored to their pre-run state. This cannot be undone.`
+    );
+    if (!confirmed) {
+      return;
+    }
+    setUndoBusyRunId(run.id);
+    setError(null);
+    try {
+      const result = await window.arivu.undoTaskRun({ sessionId: state.sessionId, taskRunId: run.id });
+      applyDesktopState(result.state);
+      await loadSessions();
+      setStatus(`Reverted ${formatNumber(result.revertedCount)} file${result.revertedCount === 1 ? "" : "s"}`);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    } finally {
+      setUndoBusyRunId(null);
+    }
+  }
+
+  async function handleTaskWorktreeAction(run: AgentTaskRun, action: TaskWorktreeAction, options: TaskWorktreeActionOptions = {}) {
+    if (!state?.sessionId) {
+      return;
+    }
+    if (action === "create_pr" && !confirmCreatePullRequest(run.worktree?.pullRequest)) {
+      return;
+    }
+
+    const busyKey = `${run.id}:${action}`;
+    setWorktreeActionBusy(busyKey);
+    setError(null);
+    try {
+      const next = await window.arivu.taskWorktreeAction({
+        sessionId: state.sessionId,
+        taskRunId: run.id,
+        action,
+        ...options
+      });
+      applyDesktopStateSnapshot(next);
+      await loadSessions();
+      setStatus(taskWorktreeActionStatus(action));
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Task worktree action failed");
+    } finally {
+      setWorktreeActionBusy((current) => (current === busyKey ? null : current));
+    }
+  }
+
+  async function refreshWatchedPullRequest(key: string, watch: PullRequestWatch, options: { silent?: boolean } = {}) {
+    if (pullRequestWatchInFlightRef.current.has(key)) {
+      return;
+    }
+    pullRequestWatchInFlightRef.current.add(key);
+    setPullRequestWatchBusy((current) => ({ ...current, [key]: true }));
+    if (!options.silent) {
+      setError(null);
+      setStatus("Refreshing watched PR");
+    }
+    try {
+      const next = await window.arivu.taskWorktreeAction({
+        sessionId: watch.sessionId,
+        taskRunId: watch.taskRunId,
+        action: "refresh_pr"
+      });
+      if (activeSessionIdRef.current === watch.sessionId) {
+        applyDesktopStateSnapshot(next);
+      }
+      await loadSessions();
+      const lastRefreshedAt = new Date().toISOString();
+      setWatchedPullRequests((current) => {
+        if (!current[key]) {
+          return current;
+        }
+        return {
+          ...current,
+          [key]: {
+            ...current[key],
+            lastRefreshedAt,
+            lastError: undefined
+          }
+        };
+      });
+      if (!options.silent) {
+        setStatus("Watching PR in background");
+      }
+    } catch (err) {
+      const message = formatError(err);
+      setWatchedPullRequests((current) => {
+        if (!current[key]) {
+          return current;
+        }
+        return {
+          ...current,
+          [key]: {
+            ...current[key],
+            lastError: message
+          }
+        };
+      });
+      if (!options.silent) {
+        setError(message);
+        setStatus("PR watch refresh failed");
+      }
+    } finally {
+      pullRequestWatchInFlightRef.current.delete(key);
+      setPullRequestWatchBusy((current) => {
+        if (!current[key]) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    }
+  }
+
+  function handleTogglePullRequestWatch(run: AgentTaskRun) {
+    if (!state?.sessionId) {
+      return;
+    }
+    if (!run.worktree?.pullRequest?.url) {
+      setStatus("Create the PR before watching it");
+      return;
+    }
+    const key = pullRequestWatchKey(state.sessionId, run.id);
+    if (watchedPullRequests[key]) {
+      setWatchedPullRequests((current) => {
+        if (!current[key]) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setStatus("Stopped watching PR");
+      return;
+    }
+
+    const watch: PullRequestWatch = {
+      sessionId: state.sessionId,
+      taskRunId: run.id,
+      startedAt: new Date().toISOString()
+    };
+    setWatchedPullRequests((current) => ({ ...current, [key]: watch }));
+    setStatus("Watching PR in background");
+    void refreshWatchedPullRequest(key, watch);
+  }
+
+  async function handleTaskRunPlanAction(run: AgentTaskRun, action: TaskRunPlanAction) {
+    if (!state?.sessionId) {
+      return;
+    }
+
+    const busyKey = `${run.id}:${action}`;
+    setPlanReviewBusy(busyKey);
+    setError(null);
+    try {
+      const next = await window.arivu.taskRunPlanAction({
+        sessionId: state.sessionId,
+        taskRunId: run.id,
+        action
+      });
+      applyDesktopStateSnapshot(next);
+      await loadSessions();
+      setStatus(taskRunPlanActionStatus(action));
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Plan review action failed");
+    } finally {
+      setPlanReviewBusy((current) => (current === busyKey ? null : current));
+    }
+  }
+
+  function handleFocusTaskRunAttempt(run: AgentTaskRun) {
+    setView("chat");
+    setActivityCollapsed(false);
+    setFocusedActivityRunId(run.id);
+    setStatus(
+      run.worktree?.replayOfTaskRunId
+        ? "Showing replay attempt details"
+        : run.worktree?.continuedFromTaskRunId
+          ? "Showing repair attempt details"
+          : "Showing original attempt details"
+    );
+
+    if (activityFocusResetTimeoutRef.current) {
+      clearTimeout(activityFocusResetTimeoutRef.current);
+    }
+    activityFocusResetTimeoutRef.current = setTimeout(() => {
+      setFocusedActivityRunId((current) => (current === run.id ? null : current));
+    }, 3500);
+  }
+
+  async function handleOpenEvidence(link: ActivityEvidenceLink) {
+    if (!state?.sessionId) {
+      return;
+    }
+
+    setEvidenceOpenBusy(link.id);
+    setError(null);
+    try {
+      const result = await window.arivu.openTaskRunEvidence({
+        sessionId: state.sessionId,
+        taskRunId: link.taskRunId,
+        artifactId: link.artifactId,
+        path: link.path,
+        line: link.line
+      });
+      setStatus(link.line ? `Opened ${basename(result.path)}:${link.line}` : `Opened ${basename(result.path)}`);
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Open evidence failed");
+    } finally {
+      setEvidenceOpenBusy((current) => (current === link.id ? null : current));
+    }
+  }
+
+  function handleDraftRemediationPrompt(draftText: string, options: DraftPromptOptions = {}) {
+    if (prompt.trim() || imageAttachments.length > 0 || fileAttachments.length > 0) {
+      const confirmed = window.confirm(
+        options.confirmLabel ?? "Replace the current composer draft with a repair prompt from this report evidence?"
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    setPrompt(draftText);
+    setImageAttachments([]);
+    setFileAttachments([]);
+    if (options.worktreeContinuation) {
+      setWorktreeContinuation(options.worktreeContinuation);
+      setWorktreePlanSource(null);
+      setAgentWorktreeEnabled(false);
+      setAgentPlanModeEnabled(false);
+      setAgentLoopEnabled(false);
+    } else if (options.worktreePlanSource) {
+      setWorktreePlanSource(options.worktreePlanSource);
+      setWorktreeContinuation(null);
+      setAgentWorktreeEnabled(false);
+      setAgentPlanModeEnabled(false);
+      setAgentLoopEnabled(false);
+    } else {
+      setWorktreeContinuation(null);
+      setWorktreePlanSource(null);
+    }
+    setError(null);
+    setStatus(options.status ?? "Drafted repair prompt from report evidence");
+    setView("chat");
+    requestAnimationFrame(() => {
+      const input = promptInputRef.current;
+      if (!input) {
+        return;
+      }
+      input.focus();
+      const end = draftText.length;
+      input.setSelectionRange(end, end);
+    });
+  }
+
   function applyDesktopState(next: DesktopState) {
     activeSubmissionTokenRef.current = null;
-    setState(next);
-    setMessages(next.messages);
-    setBusy(isSessionRunning(next, next.sessionId));
-    applyBrowserState(next.browser);
+    applyDesktopStateSnapshot(next);
     setRetryPrompt(null);
     setFailedPrompt(null);
     setImageAttachments([]);
+    setFileAttachments([]);
     setPendingSkillNames([]);
     setCommandOutput(null);
+  }
+
+  function applyDesktopStateSnapshot(next: DesktopState) {
+    setState(next);
+    setMessages(next.messages);
+    setBusy(isSessionRunning(next, next.sessionId));
+    setBrowserState(next.browser);
   }
 
   function handleModelSaved(next: DesktopState) {
@@ -1036,6 +1876,86 @@ export function App() {
   function handleModelError(message: string) {
     setError(message);
     setStatus("Error");
+  }
+
+  // Resolves the endpoint/model the browser-task picker should show, mirroring the Settings panel:
+  // a pinned provider/model wins, otherwise it falls back to the active chat provider's values.
+  function browserTaskPickerContext() {
+    const config = state?.config;
+    const providers = config?.providers ?? [];
+    const activeProvider = providers.find((provider) => provider.id === config?.activeProviderId) ?? providers[0];
+    const profile = config?.browserTaskModel;
+    const pinnedProvider = profile?.providerId ? providers.find((provider) => provider.id === profile.providerId) : undefined;
+    const provider = pinnedProvider ?? activeProvider;
+    const baseUrl = profile?.baseUrl ?? provider?.baseUrl ?? config?.baseUrl ?? "";
+    const providerModel = provider?.model ?? config?.model ?? "";
+    const currentModel = profile?.model ?? providerModel;
+    return { baseUrl, currentModel, providerId: profile?.providerId ?? provider?.id };
+  }
+
+  function openBrowserTaskModelPicker() {
+    setComposerOptionsOpen(false);
+    setToolsPopoverOpen(false);
+    setSkillsPopoverOpen(false);
+    setBrowserTaskModelPickerOpen(true);
+  }
+
+  async function loadApiRequestLog() {
+    try {
+      setApiRequestLog(await window.arivu.getApiRequestLog());
+    } catch {
+      // A missing log is non-fatal; the panel just shows empty.
+    }
+  }
+
+  async function clearApiRequestLogEntries() {
+    try {
+      await window.arivu.clearApiRequestLog();
+      setApiRequestLog([]);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  function openApiLog() {
+    setComposerOptionsOpen(false);
+    setToolsPopoverOpen(false);
+    setSkillsPopoverOpen(false);
+    setApiLogOpen(true);
+  }
+
+  async function applyBrowserTaskModel(model: string) {
+    const trimmed = model.trim();
+    if (!trimmed) {
+      return;
+    }
+    try {
+      // Only change the model; preserve any pinned provider (and the merge layer preserves
+      // hand-configured baseUrl/apiKey/budget fields on the saved profile). This is an explicit
+      // set, so it stays put across later chat-model changes until the user changes it again.
+      const next = await window.arivu.saveConfig({
+        browserTaskModel: { providerId: state?.config.browserTaskModel?.providerId, model: trimmed }
+      });
+      applyDesktopStateSnapshot(next);
+      setError(null);
+      setStatus(`Browser task LLM set to ${modelDisplayName(trimmed)}`);
+    } catch (err) {
+      handleModelError(formatError(err));
+    }
+  }
+
+  // Inline "instant" form typed straight into the prompt box: `/browsermodel <id>` sets the browser
+  // task model from the RAW prompt text (not the lowercased slash query) so case-sensitive model ids
+  // survive. A bare `/browsermodel` (no argument) is left to the slash menu, which opens the picker.
+  // Returns true when it consumed the submit.
+  function tryInlineBrowserTaskModelCommand(): boolean {
+    const match = prompt.trim().match(/^\/browser-?model\s+(\S.*)$/i);
+    if (!match) {
+      return false;
+    }
+    setPrompt("");
+    void applyBrowserTaskModel(match[1].trim());
+    return true;
   }
 
   function moveChatSearch(direction: 1 | -1) {
@@ -1064,7 +1984,7 @@ export function App() {
         ...current,
         runningSessionIds: event.runningSessionIds,
         ...(current.sessionId === event.sessionId
-          ? { messages: event.messages, modelSelection: event.modelSelection, agentLoop: event.agentLoop }
+          ? { messages: event.messages, modelSelection: event.modelSelection, agentLoop: event.agentLoop, taskRuns: event.taskRuns }
           : {})
       };
     });
@@ -1086,7 +2006,9 @@ export function App() {
                 messageIndex: lastUserMessage.index,
                 content: lastUserMessage.content,
                 skillNames: [],
-                loopEnabled: Boolean(event.agentLoop)
+                planModeEnabled: Boolean(event.taskRuns?.at(-1)?.planMode?.enabled),
+                loopEnabled: Boolean(event.agentLoop),
+                worktreeEnabled: Boolean(event.taskRuns?.at(-1)?.worktree?.enabled)
               }
             : null
         );
@@ -1117,6 +2039,9 @@ export function App() {
   }
 
   function handleComposerSubmit() {
+    if (tryInlineBrowserTaskModelCommand()) {
+      return;
+    }
     if (slashQuery !== null) {
       const selectedCommand = filteredSlashCommands[selectedSlashCommandIndex];
       if (selectedCommand) {
@@ -1131,6 +2056,12 @@ export function App() {
   }
 
   function handlePromptKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    // The inline `/browsermodel <id>` form must be caught before the slash menu's Enter handler,
+    // which would otherwise report "no slash command matches" (an argument breaks the menu filter).
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && tryInlineBrowserTaskModelCommand()) {
+      event.preventDefault();
+      return;
+    }
     if (slashCommandMenuOpen) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -1175,6 +2106,7 @@ export function App() {
     setError(null);
     setComposerOptionsOpen(false);
     setToolsPopoverOpen(false);
+    setSkillsPopoverOpen(false);
     setCommandOutput(null);
 
     if (command.id === "compact") {
@@ -1186,10 +2118,56 @@ export function App() {
       return;
     }
 
+    if (command.id === "summarize") {
+      const summarized = await summarizeContext();
+      if (summarized) {
+        setPrompt("");
+      }
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+
+    if (command.id === "browsermodel") {
+      setPrompt("");
+      openBrowserTaskModelPicker();
+      return;
+    }
+
     if (command.id === "loop") {
+      setAgentPlanModeEnabled(false);
+      setWorktreePlanSource(null);
       setAgentLoopEnabled((current) => {
         const next = !current;
         setStatus(next ? `Agent loop armed for ${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iterations` : "Agent loop off");
+        return next;
+      });
+      setPrompt("");
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+
+    if (command.id === "plan") {
+      setWorktreeContinuation(null);
+      setWorktreePlanSource(null);
+      setAgentLoopEnabled(false);
+      setAgentWorktreeEnabled(false);
+      setAgentPlanModeEnabled((current) => {
+        const next = !current;
+        setStatus(next ? "Plan approval armed for the next prompt" : "Plan approval off");
+        return next;
+      });
+      setPrompt("");
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+
+    if (command.id === "worktree") {
+      setAgentPlanModeEnabled(false);
+      setWorktreeContinuation(null);
+      setWorktreePlanSource(null);
+      setAgentWorktreeEnabled((current) => {
+        const next = !current;
+        setStatus(next ? "Task worktree armed for the next prompt" : "Task worktree off");
         return next;
       });
       setPrompt("");
@@ -1209,7 +2187,8 @@ export function App() {
           messages,
           estimatedContextTokens,
           availableToolCount: availableTools.length,
-          imageAttachmentCount: imageAttachments.length
+          imageAttachmentCount: imageAttachments.length,
+          fileAttachmentCount: fileAttachments.length
         })
       );
       setStatus("Session details ready");
@@ -1218,10 +2197,13 @@ export function App() {
     }
 
     if (command.id === "skills") {
-      const skills = await loadSkills();
-      setSkillsPopoverOpen(true);
-      setToolsPopoverOpen(false);
-      setStatus(`Showing ${formatNumber((skills ?? availableSkills).length)} skills`);
+      await showSkillsPopover();
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+
+    if (command.id === "files") {
+      await chooseContextFiles();
       requestAnimationFrame(() => promptInputRef.current?.focus());
       return;
     }
@@ -1234,18 +2216,26 @@ export function App() {
       return;
     }
 
-    const tools = await loadTools();
-    setToolsPopoverOpen(true);
-    setSkillsPopoverOpen(false);
-    setStatus(`Showing ${formatNumber((tools ?? availableTools).length)} tools`);
+    await showToolsPopover();
     requestAnimationFrame(() => promptInputRef.current?.focus());
   }
 
   async function submitPrompt(content?: ChatContent, options: SubmitPromptOptions = {}) {
     const usingComposer = content === undefined;
-    const nextContent = content ?? createPromptContent(prompt, imageAttachments);
-    const nextSkillNames = usingComposer ? pendingSkillNames : options.skillNames ?? [];
-    const nextLoopEnabled = options.loopEnabled ?? (usingComposer ? agentLoopEnabled : false);
+    const nextContent = content ?? createPromptContent(prompt, imageAttachments, fileAttachments);
+    const nextSkillNames = usingComposer ? pendingSkillNames : (options.skillNames ?? []);
+    const nextPlanModeEnabled = options.planModeEnabled ?? (usingComposer ? agentPlanModeEnabled : false);
+    const nextLoopEnabled = nextPlanModeEnabled ? false : (options.loopEnabled ?? (usingComposer ? agentLoopEnabled : false));
+    const nextWorktreeTaskRunId = options.worktreeTaskRunId ?? (usingComposer ? worktreeContinuation?.taskRunId : undefined);
+    const nextWorktreeReplayOfTaskRunId =
+      options.worktreeReplayOfTaskRunId ?? (usingComposer ? worktreeContinuation?.replayOfTaskRunId : undefined);
+    const nextWorktreePlannedFromTaskRunId =
+      options.worktreePlannedFromTaskRunId ?? (usingComposer ? worktreePlanSource?.taskRunId : undefined);
+    const retryFromUserMessageIndex = options.retryFromUserMessageIndex;
+    const nextWorktreeEnabled = nextPlanModeEnabled
+      ? false
+      : (options.worktreeEnabled ??
+        (usingComposer ? agentWorktreeEnabled || Boolean(nextWorktreeTaskRunId) || Boolean(nextWorktreePlannedFromTaskRunId) : false));
     if (!chatContentHasRenderableContent(nextContent) || busy) {
       return;
     }
@@ -1260,7 +2250,12 @@ export function App() {
     if (usingComposer) {
       setPrompt("");
       setImageAttachments([]);
+      setFileAttachments([]);
+      setAgentPlanModeEnabled(false);
       setAgentLoopEnabled(false);
+      setAgentWorktreeEnabled(false);
+      setWorktreeContinuation(null);
+      setWorktreePlanSource(null);
     }
     setToolsPopoverOpen(false);
     setCommandOutput(null);
@@ -1273,7 +2268,9 @@ export function App() {
     activeSubmissionTokenRef.current = submissionToken;
     const messagesBeforeRun = messages;
     const failedMessageIndex = canReuseFailedPrompt ? failedPrompt.messageIndex : messagesBeforeRun.length;
-    if (!canReuseFailedPrompt) {
+    if (retryFromUserMessageIndex !== undefined) {
+      setMessages(messagesBeforeRun.slice(0, retryFromUserMessageIndex + 1));
+    } else if (!canReuseFailedPrompt) {
       setMessages((current) => [...current, { role: "user", content: nextContent }]);
     }
 
@@ -1282,10 +2279,24 @@ export function App() {
         content: nextContent,
         skills: nextSkillNames,
         reuseLastUserMessage: canReuseFailedPrompt,
+        retryFromUserMessageIndex,
         loop: nextLoopEnabled
           ? {
               enabled: true,
               maxIterations: DEFAULT_AGENT_LOOP_MAX_ITERATIONS
+            }
+          : undefined,
+        plan: nextPlanModeEnabled
+          ? {
+              enabled: true
+            }
+          : undefined,
+        worktree: nextWorktreeEnabled
+          ? {
+              enabled: true,
+              taskRunId: nextWorktreeTaskRunId,
+              replayOfTaskRunId: nextWorktreeReplayOfTaskRunId,
+              plannedFromTaskRunId: nextWorktreePlannedFromTaskRunId
             }
           : undefined
       });
@@ -1302,6 +2313,7 @@ export function App() {
                 messages: result.messages,
                 modelSelection: result.modelSelection,
                 agentLoop: result.agentLoop,
+                taskRuns: result.taskRuns,
                 runningSessionIds: result.running
                   ? Array.from(new Set([...current.runningSessionIds, result.sessionId]))
                   : current.runningSessionIds.filter((id) => id !== result.sessionId)
@@ -1318,14 +2330,43 @@ export function App() {
     } catch (err) {
       if (activeSubmissionTokenRef.current === submissionToken) {
         activeSubmissionTokenRef.current = null;
-        setMessages(canReuseFailedPrompt ? messagesBeforeRun : [...messagesBeforeRun, { role: "user", content: nextContent }]);
+        setMessages(
+          canReuseFailedPrompt || retryFromUserMessageIndex !== undefined
+            ? messagesBeforeRun
+            : [...messagesBeforeRun, { role: "user", content: nextContent }]
+        );
         if (usingComposer && nextLoopEnabled) {
           setAgentLoopEnabled(true);
+        }
+        if (usingComposer && nextPlanModeEnabled) {
+          setAgentPlanModeEnabled(true);
+        }
+        if (usingComposer && nextWorktreeEnabled) {
+          if (nextWorktreeTaskRunId) {
+            setWorktreeContinuation({ taskRunId: nextWorktreeTaskRunId, replayOfTaskRunId: nextWorktreeReplayOfTaskRunId });
+            setWorktreePlanSource(null);
+          } else if (nextWorktreePlannedFromTaskRunId) {
+            setWorktreePlanSource({ taskRunId: nextWorktreePlannedFromTaskRunId });
+            setAgentWorktreeEnabled(false);
+          } else {
+            setAgentWorktreeEnabled(true);
+            setWorktreePlanSource(null);
+          }
         }
         setBusy(false);
         setError(formatError(err));
         setRetryPrompt(nextContent);
-        setFailedPrompt({ messageIndex: failedMessageIndex, content: nextContent, skillNames: nextSkillNames, loopEnabled: nextLoopEnabled });
+        setFailedPrompt({
+          messageIndex: retryFromUserMessageIndex ?? failedMessageIndex,
+          content: nextContent,
+          skillNames: nextSkillNames,
+          planModeEnabled: nextPlanModeEnabled,
+          loopEnabled: nextLoopEnabled,
+          worktreeEnabled: nextWorktreeEnabled,
+          worktreeTaskRunId: nextWorktreeTaskRunId,
+          worktreeReplayOfTaskRunId: nextWorktreeReplayOfTaskRunId,
+          worktreePlannedFromTaskRunId: nextWorktreePlannedFromTaskRunId
+        });
         setStatus("Error");
       }
     }
@@ -1338,7 +2379,12 @@ export function App() {
     void submitPrompt(retryPrompt, {
       reuseFailedPrompt: canReuseFailedPrompt(retryPrompt),
       skillNames: failedPrompt?.skillNames ?? [],
-      loopEnabled: failedPrompt?.loopEnabled ?? false
+      planModeEnabled: failedPrompt?.planModeEnabled ?? false,
+      loopEnabled: failedPrompt?.loopEnabled ?? false,
+      worktreeEnabled: failedPrompt?.worktreeEnabled ?? false,
+      worktreeTaskRunId: failedPrompt?.worktreeTaskRunId,
+      worktreeReplayOfTaskRunId: failedPrompt?.worktreeReplayOfTaskRunId,
+      worktreePlannedFromTaskRunId: failedPrompt?.worktreePlannedFromTaskRunId
     });
   }
 
@@ -1351,16 +2397,19 @@ export function App() {
     );
   }
 
-  function retryPromptForAssistant(index: number) {
+  function retryPromptForAssistant(index: number): RetryPromptTarget | null {
     const message = visibleMessages[index]?.message;
     if (message?.role !== "assistant") {
       return null;
     }
 
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      const previous = visibleMessages[cursor]?.message;
-      if (previous?.role === "user") {
-        return previous.content;
+      const previous = visibleMessages[cursor];
+      if (previous?.message.role === "user") {
+        return {
+          content: previous.message.content,
+          userMessageIndex: previous.sourceIndexes.at(-1) ?? previous.messageIndex
+        };
       }
     }
     return null;
@@ -1374,6 +2423,20 @@ export function App() {
       const next = await window.arivu.stopAgentLoop(state.sessionId);
       applyDesktopState(next);
       setStatus("Stopping agent loop");
+    } catch (err) {
+      setError(formatError(err));
+      setStatus("Error");
+    }
+  }
+
+  async function stopAgentRun() {
+    if (!state?.sessionId) {
+      return;
+    }
+    try {
+      const next = await window.arivu.stopAgentRun(state.sessionId);
+      applyDesktopState(next);
+      setStatus("Stopping run");
     } catch (err) {
       setError(formatError(err));
       setStatus("Error");
@@ -1401,6 +2464,7 @@ export function App() {
   function editPromptContent(content: ChatContent) {
     setPrompt(chatContentTextOnly(content));
     setImageAttachments(imageAttachmentsFromContent(content));
+    setFileAttachments([]);
     setToolsPopoverOpen(false);
     setError(null);
     setStatus("Editing query");
@@ -1485,6 +2549,81 @@ export function App() {
     setStatus(approved ? "Approved" : "Denied");
   }
 
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !state) {
+        return;
+      }
+
+      const shortcut = resolveAppKeyboardShortcut(event);
+      if (!shortcut) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      setCommandOutput(null);
+
+      if (shortcut === "focus_composer") {
+        setView("chat");
+        setChatSearchOpen(false);
+        setStatus("Composer focused");
+        requestAnimationFrame(() => promptInputRef.current?.focus());
+        return;
+      }
+
+      if (shortcut === "new_chat") {
+        void startNewChat();
+        return;
+      }
+
+      if (shortcut === "search_chat") {
+        setView("chat");
+        setChatSearchOpen(true);
+        setStatus("Search chat");
+        requestAnimationFrame(() => chatSearchInputRef.current?.focus());
+        return;
+      }
+
+      if (shortcut === "settings") {
+        const nextView = view === "settings" ? "chat" : "settings";
+        setSettingsFocus(null);
+        setView(nextView);
+        setToolsPopoverOpen(false);
+        setSkillsPopoverOpen(false);
+        setComposerOptionsOpen(false);
+        setStatus(nextView === "settings" ? "Settings opened" : "Chat opened");
+        return;
+      }
+
+      if (shortcut === "refresh_state") {
+        void refresh();
+        return;
+      }
+
+      if (shortcut === "toggle_browser") {
+        void setBrowserPaneOpen(!browserState?.paneOpen);
+        return;
+      }
+
+      if (shortcut === "show_tools") {
+        setView("chat");
+        void showToolsPopover();
+        requestAnimationFrame(() => promptInputRef.current?.focus());
+        return;
+      }
+
+      if (shortcut === "show_skills") {
+        setView("chat");
+        void showSkillsPopover();
+        requestAnimationFrame(() => promptInputRef.current?.focus());
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  });
+
   if (!state) {
     return (
       <main className="boot">
@@ -1497,31 +2636,29 @@ export function App() {
     );
   }
 
-  const workspaceName = state.projectRoot === null ? "No project selected" : state.workspace.packageName ?? basename(state.workspace.root);
+  const workspaceName =
+    state.projectRoot === null ? "No project selected" : (state.workspace.packageName ?? basename(state.workspace.root));
   const workspaceDetail = state.projectRoot === null ? "Standalone chats" : state.workspace.root;
   const gitValue = state.projectRoot === null ? "none" : `${state.workspace.gitBranch ?? "none"}${state.workspace.dirty ? " *" : ""}`;
   const recentProjects = projects.slice(0, 5);
-  const standaloneSessions = sessions.filter((session) => session.projectRoot === null).slice(0, 5);
+  const standaloneSessions = sessions
+    .filter((session) => session.projectRoot === null)
+    .sort(compareSessionsForDisplay)
+    .slice(0, 5);
   const chatStarted = Boolean(state.sessionId) || messages.some((message) => message.role !== "system");
   const canSelectChatProject = !chatStarted && !busy;
   const canCompactContext =
-    Boolean(state.sessionId) &&
-    nonSystemMessageCount > CONTEXT_COMPACT_RECENT_MESSAGE_COUNT &&
-    !busy &&
-    !compactingContext;
+    Boolean(state.sessionId) && nonSystemMessageCount > CONTEXT_COMPACT_RECENT_MESSAGE_COUNT && !busy && !compactingContext;
   const effectiveSidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth;
   const toolActivityCount = activity.filter((item) => item.kind !== "system").length;
-  const effectiveActivityWidth = activityCollapsed ? ACTIVITY_COLLAPSED_WIDTH : clamp(activityWidth, ACTIVITY_MIN_WIDTH, ACTIVITY_MAX_WIDTH);
+  const effectiveActivityWidth = activityCollapsed
+    ? ACTIVITY_COLLAPSED_WIDTH
+    : clamp(activityWidth, ACTIVITY_MIN_WIDTH, ACTIVITY_MAX_WIDTH);
   const browserOpen = Boolean(browserState?.paneOpen);
   const activeAgentLoop = state.agentLoop;
   const agentLoopRunning = Boolean(activeAgentLoop && ["running", "stopping"].includes(activeAgentLoop.status));
   const agentLoopLabel = activeAgentLoop ? agentLoopStatusLabel(activeAgentLoop) : "Loop off";
-  const workspaceGridClassName = [
-    "workspace-grid",
-    activityCollapsed ? "activity-collapsed" : ""
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const workspaceGridClassName = ["workspace-grid", activityCollapsed ? "activity-collapsed" : ""].filter(Boolean).join(" ");
 
   return (
     <main
@@ -1531,9 +2668,11 @@ export function App() {
       <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="brand-row">
           <img className="brand-mark" src={arivuLogoUrl} alt="" />
-          {!sidebarCollapsed ? <div className="brand-copy">
-            <div className="brand-title">Arivu</div>
-          </div> : null}
+          {!sidebarCollapsed ? (
+            <div className="brand-copy">
+              <div className="brand-title">Arivu</div>
+            </div>
+          ) : null}
           <button
             className="icon-button sidebar-collapse-button"
             type="button"
@@ -1550,118 +2689,187 @@ export function App() {
           <span>New chat</span>
         </button>
 
-        {!sidebarCollapsed ? <div className="workspace-actions">
-          <button className="secondary-command" type="button" onClick={chooseWorkspace}>
-            <FolderOpen size={16} />
-            Open
-          </button>
-          <button className="secondary-command" type="button" onClick={() => void createWorkspace()}>
-            <FolderPlus size={16} />
-            New workspace
-          </button>
-        </div> : null}
-
-        {!sidebarCollapsed ? <section className={collapsedSections.projects ? "sidebar-section projects-section collapsed-section" : "sidebar-section projects-section"}>
-          <div className="section-row">
-            <button
-              className="section-toggle"
-              type="button"
-              aria-expanded={!collapsedSections.projects}
-              onClick={() => toggleSidebarSection("projects")}
-              title={collapsedSections.projects ? "Expand projects" : "Collapse projects"}
-            >
-              {collapsedSections.projects ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              <span className="section-label">Projects</span>
+        {!sidebarCollapsed ? (
+          <div className="workspace-actions">
+            <button className="secondary-command" type="button" onClick={chooseWorkspace}>
+              <FolderOpen size={16} />
+              Open
+            </button>
+            <button className="secondary-command" type="button" onClick={() => void createWorkspace()}>
+              <FolderPlus size={16} />
+              New workspace
             </button>
           </div>
-          {!collapsedSections.projects ? <div className="recent-project-list">
-            {recentProjects.length === 0 ? <div className="empty-sidebar-list">No recent projects yet.</div> : null}
-            {recentProjects.map((project) => {
-              const expanded = expandedProjectRoots[project.projectRoot] ?? project.projectRoot === state.projectRoot;
-              return (
-                <div
-                  key={project.projectRoot}
-                  className={project.projectRoot === state.projectRoot ? "project-group active" : "project-group"}
-                >
-                  <button
-                    className="project-row"
-                    type="button"
-                    onClick={() => toggleProject(project.projectRoot)}
-                    title={project.projectRoot}
-                    aria-expanded={expanded}
-                  >
-                    {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    <FolderOpen className="project-folder-icon" size={14} />
-                    <span className="recent-project-main">
-                      <strong>{project.name}</strong>
-                      <span>{project.chatCount === 0 ? "Current workspace" : `${project.chatCount} chats`}</span>
-                    </span>
-                  </button>
-                  {expanded ? (
-                    <div className="project-chat-list">
-                      {project.sessions.length === 0 ? <div className="empty-sidebar-list">No chats in this project yet.</div> : null}
-                      {project.sessions.map((session) => (
-                        <SidebarChatItem
-                          key={session.id}
-                          session={session}
-                          active={session.id === state.sessionId}
-                          menuOpen={openChatMenuId === session.id}
-                          className="project-chat-item"
-                          onOpen={() => void openSession(session.id)}
-                          onToggleMenu={() => setOpenChatMenuId((current) => current === session.id ? null : session.id)}
-                          onDelete={() => void deleteSession(session)}
-                        />
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div> : null}
-        </section> : null}
+        ) : null}
 
-        {!sidebarCollapsed ? <section className={collapsedSections.chats ? "sidebar-section chats-section collapsed-section" : "sidebar-section chats-section"}>
-          <div className="section-row">
-            <button
-              className="section-toggle"
-              type="button"
-              aria-expanded={!collapsedSections.chats}
-              onClick={() => toggleSidebarSection("chats")}
-              title={collapsedSections.chats ? "Expand chats" : "Collapse chats"}
-            >
-              {collapsedSections.chats ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              <span className="section-label">Chats</span>
-            </button>
-            {!collapsedSections.chats ? (
-              <button className="text-command" type="button" onClick={() => setView("history")}>
-                View all
+        {!sidebarCollapsed ? (
+          <section
+            className={
+              collapsedSections.projects ? "sidebar-section projects-section collapsed-section" : "sidebar-section projects-section"
+            }
+          >
+            <div className="section-row">
+              <button
+                className="section-toggle"
+                type="button"
+                aria-expanded={!collapsedSections.projects}
+                onClick={() => toggleSidebarSection("projects")}
+                title={collapsedSections.projects ? "Expand workspaces" : "Collapse workspaces"}
+              >
+                {collapsedSections.projects ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                <span className="section-label">Workspaces</span>
               </button>
+            </div>
+            {!collapsedSections.projects ? (
+              <div className="recent-project-list">
+                {recentProjects.length === 0 ? <div className="empty-sidebar-list">No recent workspaces yet.</div> : null}
+                {recentProjects.map((project) => {
+                  const expanded = expandedProjectRoots[project.projectRoot] ?? project.projectRoot === state.projectRoot;
+                  const projectOpenBusy = openingWorkspaceRoot === project.projectRoot;
+                  const projectForgetBusy = forgettingProjectRoot === project.projectRoot;
+                  const projectMissing = !project.projectRootExists;
+                  const projectRowClassName = ["project-row", projectMissing ? "missing with-action" : ""].filter(Boolean).join(" ");
+                  const projectGroupClassName = [
+                    "project-group",
+                    project.projectRoot === state.projectRoot ? "active" : "",
+                    projectMissing ? "missing" : ""
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
+                  const projectStatus = projectMissing
+                    ? `Missing folder - ${formatNumber(project.chatCount)} chat${project.chatCount === 1 ? "" : "s"}`
+                    : projectOpenBusy
+                      ? "Opening..."
+                      : project.chatCount === 0
+                        ? "Current workspace"
+                        : `${project.chatCount} chats`;
+                  return (
+                    <div key={project.projectRoot} className={projectGroupClassName}>
+                      <div className={projectRowClassName} title={project.projectRoot}>
+                        <button
+                          className="project-expand-button"
+                          type="button"
+                          onClick={() => toggleProject(project.projectRoot)}
+                          title={expanded ? "Hide workspace chats" : "Show workspace chats"}
+                          aria-label={expanded ? `Hide chats for ${project.name}` : `Show chats for ${project.name}`}
+                          aria-expanded={expanded}
+                        >
+                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </button>
+                        <button
+                          className="project-open-button"
+                          type="button"
+                          disabled={Boolean(openingWorkspaceRoot) || projectMissing}
+                          onClick={() => void openWorkspace(project.projectRoot)}
+                          title={
+                            projectMissing ? `Workspace folder missing: ${project.projectRoot}` : `Open workspace ${project.projectRoot}`
+                          }
+                          aria-current={project.projectRoot === state.projectRoot ? "page" : undefined}
+                        >
+                          {projectMissing ? (
+                            <AlertTriangle className="project-folder-icon" size={14} />
+                          ) : projectOpenBusy ? (
+                            <RefreshCw className="project-folder-icon spinning" size={14} />
+                          ) : (
+                            <FolderOpen className="project-folder-icon" size={14} />
+                          )}
+                          <span className="recent-project-main">
+                            <strong>{project.name}</strong>
+                            <span>{projectStatus}</span>
+                          </span>
+                        </button>
+                        {projectMissing ? (
+                          <button
+                            className="project-forget-button"
+                            type="button"
+                            onClick={() => void forgetMissingProject(project)}
+                            disabled={projectForgetBusy}
+                            title="Forget missing workspace and keep chats"
+                            aria-label={`Forget missing workspace ${project.name}`}
+                          >
+                            {projectForgetBusy ? <RefreshCw className="spinning" size={13} /> : <X size={13} />}
+                          </button>
+                        ) : null}
+                      </div>
+                      {expanded ? (
+                        <div className="project-chat-list">
+                          {project.sessions.length === 0 ? <div className="empty-sidebar-list">No chats in this project yet.</div> : null}
+                          {project.sessions.map((session) => (
+                            <SidebarChatItem
+                              key={session.id}
+                              session={session}
+                              active={session.id === state.sessionId}
+                              menuOpen={openChatMenuId === session.id}
+                              className="project-chat-item"
+                              onOpen={() => void openSession(session.id)}
+                              onToggleMenu={() => setOpenChatMenuId((current) => (current === session.id ? null : session.id))}
+                              onRename={() => void renameSession(session)}
+                              onTogglePin={() => void toggleSessionPin(session)}
+                              onDelete={() => void deleteSession(session)}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
             ) : null}
-          </div>
-          {!collapsedSections.chats ? <div className="recent-chat-list">
-            {loadingSessions ? <div className="empty-sidebar-list">Loading chats...</div> : null}
-            {!loadingSessions && standaloneSessions.length === 0 ? (
-              <div className="empty-sidebar-list">No standalone chats yet.</div>
-            ) : null}
-            {!loadingSessions
-              ? standaloneSessions.map((session) => (
-                  <SidebarChatItem
-                    key={session.id}
-                    session={session}
-                    active={session.id === state.sessionId}
-                    menuOpen={openChatMenuId === session.id}
-                    onOpen={() => void openSession(session.id)}
-                    onToggleMenu={() => setOpenChatMenuId((current) => current === session.id ? null : session.id)}
-                    onDelete={() => void deleteSession(session)}
-                  />
-                ))
-              : null}
-          </div> : null}
-        </section> : null}
+          </section>
+        ) : null}
 
-        {!sidebarCollapsed ? <div className="sidebar-footer">
-          <span>{status}</span>
-        </div> : null}
+        {!sidebarCollapsed ? (
+          <section
+            className={collapsedSections.chats ? "sidebar-section chats-section collapsed-section" : "sidebar-section chats-section"}
+          >
+            <div className="section-row">
+              <button
+                className="section-toggle"
+                type="button"
+                aria-expanded={!collapsedSections.chats}
+                onClick={() => toggleSidebarSection("chats")}
+                title={collapsedSections.chats ? "Expand chats" : "Collapse chats"}
+              >
+                {collapsedSections.chats ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                <span className="section-label">Chats</span>
+              </button>
+              {!collapsedSections.chats ? (
+                <button className="text-command" type="button" onClick={() => setView("history")}>
+                  View all
+                </button>
+              ) : null}
+            </div>
+            {!collapsedSections.chats ? (
+              <div className="recent-chat-list">
+                {loadingSessions ? <div className="empty-sidebar-list">Loading chats...</div> : null}
+                {!loadingSessions && standaloneSessions.length === 0 ? (
+                  <div className="empty-sidebar-list">No standalone chats yet.</div>
+                ) : null}
+                {!loadingSessions
+                  ? standaloneSessions.map((session) => (
+                      <SidebarChatItem
+                        key={session.id}
+                        session={session}
+                        active={session.id === state.sessionId}
+                        menuOpen={openChatMenuId === session.id}
+                        onOpen={() => void openSession(session.id)}
+                        onToggleMenu={() => setOpenChatMenuId((current) => (current === session.id ? null : session.id))}
+                        onRename={() => void renameSession(session)}
+                        onTogglePin={() => void toggleSessionPin(session)}
+                        onDelete={() => void deleteSession(session)}
+                      />
+                    ))
+                  : null}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {!sidebarCollapsed ? (
+          <div className="sidebar-footer">
+            <span>{status}</span>
+          </div>
+        ) : null}
       </aside>
       {!sidebarCollapsed ? (
         <div
@@ -1681,7 +2889,9 @@ export function App() {
           <div className="topbar-context">
             <div className="workspace-heading">
               <h1 title={workspaceDetail}>{workspaceName}</h1>
-              <span className="workspace-header-path" title={workspaceDetail}>{workspaceDetail}</span>
+              <span className="workspace-header-path" title={workspaceDetail}>
+                {workspaceDetail}
+              </span>
               <RuntimeDetails state={state} gitValue={gitValue} />
             </div>
           </div>
@@ -1689,8 +2899,10 @@ export function App() {
             <ThemeToggle theme={theme} onChange={setTheme} />
             <button
               type="button"
-              className={view === "ui" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"}
-              onClick={() => setView((current) => current === "ui" ? "chat" : "ui")}
+              className={
+                view === "ui" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"
+              }
+              onClick={() => setView((current) => (current === "ui" ? "chat" : "ui"))}
               aria-label="UI samples"
               data-tooltip="UI samples"
             >
@@ -1698,7 +2910,11 @@ export function App() {
             </button>
             <button
               type="button"
-              className={browserState?.paneOpen ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"}
+              className={
+                browserState?.paneOpen
+                  ? "ghost-button topbar-icon-action has-tooltip active"
+                  : "ghost-button topbar-icon-action has-tooltip"
+              }
               onClick={() => {
                 setView("chat");
                 void setBrowserPaneOpen(!browserState?.paneOpen);
@@ -1710,7 +2926,9 @@ export function App() {
             </button>
             <button
               type="button"
-              className={chatSearchOpen ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"}
+              className={
+                chatSearchOpen ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"
+              }
               onClick={() => {
                 setView("chat");
                 setChatSearchOpen((current) => !current);
@@ -1722,10 +2940,12 @@ export function App() {
             </button>
             <button
               type="button"
-              className={view === "settings" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"}
+              className={
+                view === "settings" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"
+              }
               onClick={() => {
                 setSettingsFocus(null);
-                setView((current) => current === "settings" ? "chat" : "settings");
+                setView((current) => (current === "settings" ? "chat" : "settings"));
               }}
               aria-label="Settings"
               data-tooltip="Settings"
@@ -1797,14 +3017,14 @@ export function App() {
                 {visibleMessages.length === 0 ? (
                   <EmptyConversation />
                 ) : (
-                  visibleMessages.map(({ message, messageIndex, sourceIndexes, key: messageKey }, index) => {
+                  visibleMessages.map(({ message, sourceIndexes, key: messageKey }, index) => {
                     const failedUserPrompt =
                       message.role === "user" &&
                       failedPrompt !== null &&
                       sourceIndexes.includes(failedPrompt.messageIndex) &&
                       chatContentEquals(failedPrompt.content, message.content);
-                    const assistantPromptToRetry = retryPromptForAssistant(index);
-                    const promptToRetry = failedUserPrompt ? message.content : assistantPromptToRetry;
+                    const assistantRetryTarget = retryPromptForAssistant(index);
+                    const promptToRetry = failedUserPrompt ? message.content : assistantRetryTarget?.content;
                     const activityGroup =
                       message.role === "user"
                         ? sourceIndexes
@@ -1828,12 +3048,19 @@ export function App() {
                               void submitPrompt(message.content, {
                                 reuseFailedPrompt: true,
                                 skillNames: failedPrompt?.skillNames ?? [],
-                                loopEnabled: failedPrompt?.loopEnabled ?? false
+                                planModeEnabled: failedPrompt?.planModeEnabled ?? false,
+                                loopEnabled: failedPrompt?.loopEnabled ?? false,
+                                worktreeEnabled: failedPrompt?.worktreeEnabled ?? false,
+                                worktreeTaskRunId: failedPrompt?.worktreeTaskRunId,
+                                worktreeReplayOfTaskRunId: failedPrompt?.worktreeReplayOfTaskRunId,
+                                worktreePlannedFromTaskRunId: failedPrompt?.worktreePlannedFromTaskRunId
                               });
                               return;
                             }
-                            if (assistantPromptToRetry) {
-                              void submitPrompt(assistantPromptToRetry);
+                            if (assistantRetryTarget) {
+                              void submitPrompt(assistantRetryTarget.content, {
+                                retryFromUserMessageIndex: assistantRetryTarget.userMessageIndex
+                              });
                             }
                           }}
                           onEdit={() => editPromptContent(message.content)}
@@ -1844,9 +3071,11 @@ export function App() {
                   })
                 )}
                 {busy ? (
-                  <div className={agentLoopRunning ? "agent-thinking loop-active" : "agent-thinking"}>
+                  <div className={agentLoopRunning ? "agent-thinking loop-active" : "agent-thinking"} role="status" aria-live="polite">
                     <span className="pulse-dot" />
-                    <span>{agentLoopRunning && activeAgentLoop ? agentLoopLabel : "Agent is working"}</span>
+                    <span className="agent-thinking-label">
+                      {agentLoopRunning && activeAgentLoop ? agentLoopLabel : "Agent is working"}
+                    </span>
                     {agentLoopRunning ? (
                       <button
                         type="button"
@@ -1867,15 +3096,11 @@ export function App() {
                 <div className="error-strip">
                   <span>{error}</span>
                   {retryPrompt ? (
-                    <button
-                      type="button"
-                      onClick={retryLastPrompt}
-                      disabled={busy}
-                      title="Retry query"
-                      aria-label="Retry query"
-                    >
+                    <button type="button" onClick={retryLastPrompt} disabled={busy} title="Retry query" aria-label="Retry query">
                       <RotateCcw size={14} />
-                      <span className="message-action-tooltip" aria-hidden="true">Retry query</span>
+                      <span className="message-action-tooltip" aria-hidden="true">
+                        Retry query
+                      </span>
                     </button>
                   ) : null}
                 </div>
@@ -1888,7 +3113,19 @@ export function App() {
                   handleComposerSubmit();
                 }}
               >
-                <div className="composer-surface">
+                <div
+                  className={composerDragActive ? "composer-surface drag-active" : "composer-surface"}
+                  onDragEnter={handleComposerDragEnter}
+                  onDragOver={handleComposerDragOver}
+                  onDragLeave={handleComposerDragLeave}
+                  onDrop={handleComposerDrop}
+                >
+                  {composerDragActive ? (
+                    <div className="composer-drop-overlay" aria-hidden="true">
+                      <ImageIcon size={18} />
+                      <span>{busy ? "Wait for current response" : "Drop images"}</span>
+                    </div>
+                  ) : null}
                   <textarea
                     ref={promptInputRef}
                     value={prompt}
@@ -1913,9 +3150,8 @@ export function App() {
                   {loadedSkills.length > 0 || pendingSkills.length > 0 ? (
                     <SkillContextStrip loadedSkills={loadedSkills} pendingSkills={pendingSkills} onRemovePending={removePendingSkill} />
                   ) : null}
-                  {imageAttachments.length > 0 ? (
-                    <ImageAttachmentStrip images={imageAttachments} onRemove={removeImageAttachment} />
-                  ) : null}
+                  {imageAttachments.length > 0 ? <ImageAttachmentStrip images={imageAttachments} onRemove={removeImageAttachment} /> : null}
+                  {fileAttachments.length > 0 ? <FileAttachmentStrip files={fileAttachments} onRemove={removeFileAttachment} /> : null}
                   {toolsPopoverOpen ? <ToolPanel tools={availableTools} /> : null}
                   {skillsPopoverOpen ? (
                     <SkillPanel
@@ -1952,6 +3188,7 @@ export function App() {
                             busy={busy}
                             canSelectChatProject={canSelectChatProject}
                             selectedImageCount={imageAttachments.length}
+                            selectedFileCount={fileAttachments.length}
                             toolsOpen={toolsPopoverOpen}
                             skillsOpen={skillsPopoverOpen}
                             skillCount={availableSkills.length}
@@ -1960,6 +3197,7 @@ export function App() {
                             onSelectProject={(projectRoot) => void selectChatProject(projectRoot)}
                             onOpenWorkspace={() => void chooseWorkspace()}
                             onChooseImages={() => void chooseImages()}
+                            onChooseContextFiles={() => void chooseContextFiles()}
                             onToggleTools={() => {
                               setToolsPopoverOpen((current) => !current);
                               setSkillsPopoverOpen(false);
@@ -1982,6 +3220,10 @@ export function App() {
                               setView("settings");
                             }}
                             onOpenSkillsSettings={openSkillsSettings}
+                            browserTaskModelLabel={modelDisplayName(browserTaskPickerContext().currentModel)}
+                            onOpenBrowserTaskModel={openBrowserTaskModelPicker}
+                            apiLogCount={apiRequestLog.length}
+                            onOpenApiLog={openApiLog}
                           />
                         ) : null}
                       </div>
@@ -1997,11 +3239,94 @@ export function App() {
                         }}
                       />
                       <button
+                        className={agentPlanModeEnabled ? "composer-plan-button active" : "composer-plan-button"}
+                        type="button"
+                        onClick={() => {
+                          setAgentPlanModeEnabled((current) => {
+                            const next = !current;
+                            if (next) {
+                              setAgentLoopEnabled(false);
+                              setAgentWorktreeEnabled(false);
+                              setWorktreeContinuation(null);
+                              setWorktreePlanSource(null);
+                            }
+                            setStatus(next ? "Plan approval armed for the next prompt" : "Plan approval off");
+                            return next;
+                          });
+                        }}
+                        disabled={busy}
+                        title={agentPlanModeEnabled ? "Turn off plan approval" : "Ask for a read-only plan before executing"}
+                        aria-label={agentPlanModeEnabled ? "Turn off plan approval" : "Turn on plan approval for the next prompt"}
+                        aria-pressed={agentPlanModeEnabled}
+                      >
+                        <ListChecks size={14} />
+                        <span>{agentPlanModeEnabled ? "Plan on" : "Plan"}</span>
+                      </button>
+                      <button
+                        className={
+                          agentWorktreeEnabled || worktreeContinuation || worktreePlanSource
+                            ? "composer-worktree-button active"
+                            : "composer-worktree-button"
+                        }
+                        type="button"
+                        onClick={() => {
+                          setAgentPlanModeEnabled(false);
+                          if (worktreeContinuation || worktreePlanSource) {
+                            setWorktreeContinuation(null);
+                            setWorktreePlanSource(null);
+                            setAgentWorktreeEnabled(false);
+                            setStatus(worktreePlanSource ? "Approved-plan worktree off" : "Task worktree continuation off");
+                            return;
+                          }
+                          setAgentWorktreeEnabled((current) => {
+                            const next = !current;
+                            setStatus(next ? "Task worktree armed for the next prompt" : "Task worktree off");
+                            return next;
+                          });
+                        }}
+                        disabled={busy || state?.projectRoot === null}
+                        title={
+                          state?.projectRoot === null
+                            ? "Select a git project before using task worktrees"
+                            : worktreeContinuation
+                              ? worktreeContinuation.replayOfTaskRunId
+                                ? `Replay checks in ${worktreeContinuation.branch ?? "existing task worktree"} for the next prompt`
+                                : `Continue ${worktreeContinuation.branch ?? "existing task worktree"} for the next prompt`
+                              : worktreePlanSource
+                                ? `Run approved plan ${shortRunId(worktreePlanSource.taskRunId)} in a new task worktree`
+                                : agentWorktreeEnabled
+                                  ? "Turn off task worktree"
+                                  : "Run the next prompt in an isolated git worktree"
+                        }
+                        aria-label={
+                          agentWorktreeEnabled || worktreeContinuation || worktreePlanSource
+                            ? "Turn off task worktree"
+                            : "Turn on task worktree for the next prompt"
+                        }
+                        aria-pressed={Boolean(agentWorktreeEnabled || worktreeContinuation || worktreePlanSource)}
+                      >
+                        <GitBranch size={14} />
+                        <span>
+                          {worktreeContinuation?.replayOfTaskRunId
+                            ? "Replay"
+                            : worktreeContinuation
+                              ? "Continue"
+                              : worktreePlanSource
+                                ? "Plan tree"
+                                : agentWorktreeEnabled
+                                  ? "Tree on"
+                                  : "Worktree"}
+                        </span>
+                      </button>
+                      <button
                         className={agentLoopEnabled ? "composer-loop-button active" : "composer-loop-button"}
                         type="button"
                         onClick={() => {
+                          setAgentPlanModeEnabled(false);
                           setAgentLoopEnabled((current) => !current);
-                          setStatus(!agentLoopEnabled ? `Agent loop armed for ${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iterations` : "Agent loop off");
+                          setStatus(
+                            !agentLoopEnabled ? `Agent loop armed for ${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iterations` : "Agent loop off"
+                          );
                         }}
                         disabled={busy}
                         title={agentLoopEnabled ? "Turn off agent loop" : "Turn on agent loop for the next prompt"}
@@ -2015,15 +3340,30 @@ export function App() {
                         {formatNumber(promptTokens)} / {formatNumber(COMPOSER_TOKEN_BUDGET)} tok
                       </span>
                     </div>
-                    <button
-                      className="composer-send-button icon-send-button"
-                      type="submit"
-                      disabled={busy || slashQuery !== null || !chatContentHasRenderableContent(createPromptContent(prompt, imageAttachments))}
-                      title="Send prompt"
-                      aria-label="Send prompt"
-                    >
-                      <SendArrowIcon size={22} />
-                    </button>
+                    {busy ? (
+                      <button
+                        className="composer-send-button icon-send-button composer-stop-button"
+                        type="button"
+                        onClick={() => void stopAgentRun()}
+                        title="Stop run"
+                        aria-label="Stop run"
+                      >
+                        <Square size={18} />
+                      </button>
+                    ) : (
+                      <button
+                        className="composer-send-button icon-send-button"
+                        type="submit"
+                        disabled={
+                          slashQuery !== null ||
+                          !chatContentHasRenderableContent(createPromptContent(prompt, imageAttachments, fileAttachments))
+                        }
+                        title="Send prompt"
+                        aria-label="Send prompt"
+                      >
+                        <SendArrowIcon size={22} />
+                      </button>
+                    )}
                   </div>
                 </div>
               </form>
@@ -2057,14 +3397,14 @@ export function App() {
                   aria-label={activityCollapsed ? "Expand activity" : "Collapse activity"}
                 >
                   {activityCollapsed ? <Activity size={16} /> : <ChevronRight size={16} />}
-                  {activityCollapsed && toolActivityCount > 0 ? <span className="activity-count-badge rail">{toolActivityCount}</span> : null}
+                  {activityCollapsed && toolActivityCount > 0 ? (
+                    <span className="activity-count-badge rail">{toolActivityCount}</span>
+                  ) : null}
                 </button>
               </div>
               {!activityCollapsed ? (
                 <div className="activity-content">
-                  {latestScreenshotActivity?.imagePreview ? (
-                    <LatestActivityScreenshot item={latestScreenshotActivity} />
-                  ) : null}
+                  {latestScreenshotActivity?.imagePreview ? <LatestActivityScreenshot item={latestScreenshotActivity} /> : null}
                   <div className="activity-list" ref={activityListRef}>
                     {activity.length === 0 ? (
                       <div className="empty-activity">Tool calls and approvals will appear here.</div>
@@ -2074,7 +3414,26 @@ export function App() {
                           <ActivityRow key={item.id} item={item} />
                         ))}
                         {activityGroups.map((group) => (
-                          <ActivityGroupCard key={group.id} group={group} />
+                          <ActivityGroupCard
+                            key={group.id}
+                            group={group}
+                            currentSessionId={state?.sessionId}
+                            focusedRunId={focusedActivityRunId}
+                            worktreeActionBusy={worktreeActionBusy}
+                            planReviewBusy={planReviewBusy}
+                            evidenceOpenBusy={evidenceOpenBusy}
+                            pullRequestWatches={watchedPullRequests}
+                            pullRequestWatchBusy={pullRequestWatchBusy}
+                            canCreateWorktree={Boolean(state && state.projectRoot !== null)}
+                            onTaskWorktreeAction={handleTaskWorktreeAction}
+                            onTaskRunPlanAction={handleTaskRunPlanAction}
+                            onTogglePullRequestWatch={handleTogglePullRequestWatch}
+                            onFocusTaskRun={handleFocusTaskRunAttempt}
+                            onOpenEvidence={handleOpenEvidence}
+                            onDraftRemediation={handleDraftRemediationPrompt}
+                            onUndoRun={handleUndoRun}
+                            undoBusyRunId={undoBusyRunId}
+                          />
                         ))}
                       </>
                     )}
@@ -2091,8 +3450,10 @@ export function App() {
             openMenuId={openHistoryMenuId}
             onReload={() => void loadSessions()}
             onOpen={openSession}
+            onRename={renameSession}
+            onTogglePin={toggleSessionPin}
             onDelete={deleteSession}
-            onToggleMenu={(id) => setOpenHistoryMenuId((current) => current === id ? null : id)}
+            onToggleMenu={(id) => setOpenHistoryMenuId((current) => (current === id ? null : id))}
             onError={(message) => {
               setError(message);
               setStatus("Error");
@@ -2114,6 +3475,10 @@ export function App() {
               setStatus("Settings saved");
               setView("chat");
             }}
+            onStateUpdated={(next) => {
+              applyDesktopState(next);
+              void loadSessions();
+            }}
           />
         ) : (
           <UiLabView activeConcept={uiConcept} onSelect={setUiConcept} />
@@ -2121,6 +3486,35 @@ export function App() {
       </section>
 
       {approval ? <ApprovalDialog approval={approval} onRespond={(approved) => void respondApproval(approved)} /> : null}
+      {browserTaskModelPickerOpen && state ? (
+        <ModelPickerDialog
+          currentModel={browserTaskPickerContext().currentModel}
+          baseUrl={browserTaskPickerContext().baseUrl}
+          providerId={browserTaskPickerContext().providerId}
+          includeAuto={false}
+          title="Select browser task model"
+          onSelect={(nextModel) => {
+            setBrowserTaskModelPickerOpen(false);
+            void applyBrowserTaskModel(nextModel);
+          }}
+          onClose={() => setBrowserTaskModelPickerOpen(false)}
+        />
+      ) : null}
+      {apiLogOpen ? (
+        <ApiRequestLogPanel entries={apiRequestLog} onClear={() => void clearApiRequestLogEntries()} onClose={() => setApiLogOpen(false)} />
+      ) : null}
+      {state &&
+      !onboardingDismissed &&
+      !state.config.apiKeyPresent &&
+      !(state.config.providers ?? []).some((provider) => provider.apiKeyPresent) ? (
+        <FirstRunOnboarding
+          initialBaseUrl={state.config.baseUrl}
+          initialModel={isAutoModelId(state.config.model) ? "" : state.config.model}
+          initialTrustMode={state.config.trustMode}
+          onStateUpdated={applyDesktopState}
+          onDismiss={() => setOnboardingDismissed(true)}
+        />
+      ) : null}
       {workspaceScaffoldOpen ? (
         <WorkspaceScaffoldDialog
           onCancel={() => setWorkspaceScaffoldOpen(false)}
@@ -2158,12 +3552,7 @@ function RuntimeDetails({ state, gitValue }: { state: DesktopState; gitValue: st
 
   return (
     <div className="runtime-details">
-      <button
-        type="button"
-        className="runtime-details-button"
-        aria-label="Runtime details"
-        aria-describedby="runtime-details-popover"
-      >
+      <button type="button" className="runtime-details-button" aria-label="Runtime details" aria-describedby="runtime-details-popover">
         <Info size={13} />
       </button>
       <div className="runtime-details-popover" id="runtime-details-popover" role="tooltip">
@@ -2211,7 +3600,13 @@ function ChatSearchBar({
         aria-label="Search chat"
       />
       <span className={matchCount === 0 && query.trim() ? "chat-search-count empty" : "chat-search-count"}>{countLabel}</span>
-      <button className="icon-button compact-icon-button" type="button" onClick={onPrevious} disabled={matchCount === 0} title="Previous match">
+      <button
+        className="icon-button compact-icon-button"
+        type="button"
+        onClick={onPrevious}
+        disabled={matchCount === 0}
+        title="Previous match"
+      >
         <ChevronLeft size={14} />
       </button>
       <button className="icon-button compact-icon-button" type="button" onClick={onNext} disabled={matchCount === 0} title="Next match">
@@ -2274,6 +3669,7 @@ function ComposerOptionsMenu({
   busy,
   canSelectChatProject,
   selectedImageCount,
+  selectedFileCount,
   toolsOpen,
   skillsOpen,
   skillCount,
@@ -2282,16 +3678,22 @@ function ComposerOptionsMenu({
   onSelectProject,
   onOpenWorkspace,
   onChooseImages,
+  onChooseContextFiles,
   onToggleTools,
   onToggleSkills,
   onToggleBrowser,
   onOpenSettings,
-  onOpenSkillsSettings
+  onOpenSkillsSettings,
+  browserTaskModelLabel,
+  onOpenBrowserTaskModel,
+  apiLogCount,
+  onOpenApiLog
 }: {
   state: DesktopState;
   busy: boolean;
   canSelectChatProject: boolean;
   selectedImageCount: number;
+  selectedFileCount: number;
   toolsOpen: boolean;
   skillsOpen: boolean;
   skillCount: number;
@@ -2300,11 +3702,16 @@ function ComposerOptionsMenu({
   onSelectProject: (projectRoot: string | null) => void;
   onOpenWorkspace: () => void;
   onChooseImages: () => void;
+  onChooseContextFiles: () => void;
   onToggleTools: () => void;
   onToggleSkills: () => void;
   onToggleBrowser: () => void;
   onOpenSettings: () => void;
   onOpenSkillsSettings: () => void;
+  browserTaskModelLabel: string;
+  onOpenBrowserTaskModel: () => void;
+  apiLogCount: number;
+  onOpenApiLog: () => void;
 }) {
   return (
     <div className="composer-options-menu" role="menu" aria-label="Prompt options">
@@ -2331,6 +3738,20 @@ function ComposerOptionsMenu({
       </div>
       <div className="composer-option-row">
         <span className="composer-option-label">
+          <FileText size={15} />
+          Files
+        </span>
+        <FileAttachButton
+          count={selectedFileCount}
+          disabled={busy || state.projectRoot === null}
+          disabledReason={
+            busy ? "Wait for the current response before attaching file context" : "Open a workspace before attaching file context"
+          }
+          onClick={onChooseContextFiles}
+        />
+      </div>
+      <div className="composer-option-row">
+        <span className="composer-option-label">
           <Wrench size={15} />
           Tools
         </span>
@@ -2354,6 +3775,13 @@ function ComposerOptionsMenu({
           <span className="browser-option-note">Agent runs hidden</span>
         </div>
       </div>
+      <button className="composer-option-row composer-option-action" type="button" onClick={onOpenBrowserTaskModel}>
+        <span className="composer-option-label">
+          <Cpu size={15} />
+          Browser LLM
+        </span>
+        <span>{browserTaskModelLabel}</span>
+      </button>
       <div className="composer-option-row">
         <span className="composer-option-label">
           <FileText size={15} />
@@ -2368,6 +3796,13 @@ function ComposerOptionsMenu({
         </span>
         <span>{skillCount} installed</span>
       </button>
+      <button className="composer-option-row composer-option-action" type="button" onClick={onOpenApiLog}>
+        <span className="composer-option-label">
+          <Activity size={15} />
+          API log
+        </span>
+        <span>{apiLogCount} recent</span>
+      </button>
       <button className="composer-option-row composer-option-action" type="button" onClick={onOpenSettings}>
         <span className="composer-option-label">
           <Server size={15} />
@@ -2379,15 +3814,7 @@ function ComposerOptionsMenu({
   );
 }
 
-function ImageAttachButton({
-  count,
-  disabled,
-  onClick
-}: {
-  count: number;
-  disabled: boolean;
-  onClick: () => void;
-}) {
+function ImageAttachButton({ count, disabled, onClick }: { count: number; disabled: boolean; onClick: () => void }) {
   const label = count > 0 ? `Attach images (${count})` : "Attach images";
   return (
     <button
@@ -2404,13 +3831,34 @@ function ImageAttachButton({
   );
 }
 
-function ImageAttachmentStrip({
-  images,
-  onRemove
+function FileAttachButton({
+  count,
+  disabled,
+  disabledReason,
+  onClick
 }: {
-  images: ImageAttachment[];
-  onRemove: (id: string) => void;
+  count: number;
+  disabled: boolean;
+  disabledReason: string;
+  onClick: () => void;
 }) {
+  const label = count > 0 ? `Attach file context (${count})` : "Attach file context";
+  return (
+    <button
+      className={count > 0 ? "composer-tool-button active" : "composer-tool-button"}
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={disabled ? disabledReason : label}
+      aria-label={label}
+    >
+      <FileText size={15} />
+      Files
+    </button>
+  );
+}
+
+function ImageAttachmentStrip({ images, onRemove }: { images: ImageAttachment[]; onRemove: (id: string) => void }) {
   return (
     <div className="image-attachment-strip" aria-label="Attached images">
       {images.map((image) => (
@@ -2420,6 +3868,31 @@ function ImageAttachmentStrip({
             <X size={12} />
           </button>
         </figure>
+      ))}
+    </div>
+  );
+}
+
+function FileAttachmentStrip({ files, onRemove }: { files: ContextFileAttachment[]; onRemove: (id: string) => void }) {
+  return (
+    <div className="file-attachment-strip" aria-label="Attached file context">
+      <span className="skill-context-label">
+        <FileText size={13} />
+        Files
+      </span>
+      {files.map((file) => (
+        <span
+          className="file-context-chip"
+          key={file.id}
+          title={`${file.path} - ${formatBytes(file.size)} - ${formatNumber(file.lineCount)} lines`}
+        >
+          <FileText size={13} />
+          <span>{file.path}</span>
+          <small>{file.truncated ? "truncated" : `${formatNumber(file.lineCount)} lines`}</small>
+          <button type="button" onClick={() => onRemove(file.id)} title={`Remove ${file.name}`} aria-label={`Remove ${file.name}`}>
+            <X size={12} />
+          </button>
+        </span>
       ))}
     </div>
   );
@@ -2442,8 +3915,7 @@ function SkillContextStrip({
       </span>
       {loadedSkills.map((skill) => (
         <span className="skill-context-chip loaded" key={`loaded-${skill.name}`} title={`Loaded in chat: $${skill.name}`}>
-          <Check size={12} />
-          ${skill.name}
+          <Check size={12} />${skill.name}
         </span>
       ))}
       {pendingSkills.map((skill) => (
@@ -2554,6 +4026,9 @@ function SlashCommandIcon({ id }: { id: SlashCommandId }) {
   if (id === "compact") {
     return <Scissors size={15} />;
   }
+  if (id === "summarize") {
+    return <MessageSquare size={15} />;
+  }
   if (id === "tools") {
     return <Wrench size={15} />;
   }
@@ -2565,6 +4040,9 @@ function SlashCommandIcon({ id }: { id: SlashCommandId }) {
   }
   if (id === "loop") {
     return <RefreshCw size={15} />;
+  }
+  if (id === "worktree") {
+    return <GitBranch size={15} />;
   }
   return <Info size={15} />;
 }
@@ -2611,6 +4089,13 @@ function ToolPanel({ tools }: { tools: ToolSummary[] }) {
                 <span className={`tool-status ${tool.status}`}>{tool.statusLabel}</span>
               </div>
               <p>{tool.description}</p>
+              {tool.scopeLabels.length > 0 ? (
+                <div className="tool-scope-list" aria-label={`${tool.name} workspace scope rules`}>
+                  {tool.scopeLabels.map((label) => (
+                    <span key={label}>{label}</span>
+                  ))}
+                </div>
+              ) : null}
               {tool.parameters.length > 0 ? <span className="tool-params">{tool.parameters.join(", ")}</span> : null}
             </article>
           ))
@@ -2620,13 +4105,7 @@ function ToolPanel({ tools }: { tools: ToolSummary[] }) {
   );
 }
 
-function UiLabView({
-  activeConcept,
-  onSelect
-}: {
-  activeConcept: UiConceptId;
-  onSelect: (concept: UiConceptId) => void;
-}) {
+function UiLabView({ activeConcept, onSelect }: { activeConcept: UiConceptId; onSelect: (concept: UiConceptId) => void }) {
   return (
     <section className="ui-lab-panel">
       <div className="ui-lab-grid">
@@ -2679,7 +4158,11 @@ function UiLabView({
                     <span key={metric}>{metric}</span>
                   ))}
                 </div>
-                <button className={selected ? "ui-sample-action selected" : "ui-sample-action"} type="button" onClick={() => onSelect(concept.id)}>
+                <button
+                  className={selected ? "ui-sample-action selected" : "ui-sample-action"}
+                  type="button"
+                  onClick={() => onSelect(concept.id)}
+                >
                   {selected ? <Check size={16} /> : <Palette size={16} />}
                   {selected ? "Selected" : "Apply"}
                 </button>
@@ -2777,7 +4260,9 @@ function SkillPanel({
                 </div>
                 <strong>{skill.title}</strong>
                 {skill.description ? <p>{skill.description}</p> : null}
-                <span className="skill-path" title={skill.path}>{skill.path}</span>
+                <span className="skill-path" title={skill.path}>
+                  {skill.path}
+                </span>
               </article>
             );
           })
@@ -2866,16 +4351,145 @@ function ModelSwitcher({
   );
 }
 
+function ApiRequestLogPanel({ entries, onClear, onClose }: { entries: ApiRequestLogEntry[]; onClear: () => void; onClose: () => void }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="model-dialog api-log-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="API request log"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="api-log-header">
+          <div className="api-log-header-title">
+            <Activity size={18} />
+            <div>
+              <h2>API requests</h2>
+              <p className="api-log-subtitle">
+                Last {entries.length} model calls, newest first. Metadata + bodies; API key redacted; in-memory only.
+              </p>
+            </div>
+          </div>
+          <div className="api-log-header-actions">
+            <button type="button" className="secondary-command" onClick={onClear} disabled={entries.length === 0}>
+              Clear
+            </button>
+            <button type="button" className="secondary-command" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </div>
+        {entries.length === 0 ? (
+          <p className="api-log-empty">No model calls recorded yet. Send a prompt and they will appear here.</p>
+        ) : (
+          <ul className="api-log-list">
+            {entries.map((entry) => {
+              const expanded = expandedId === entry.id;
+              return (
+                <li key={entry.id} className={`api-log-entry api-log-outcome-${entry.outcome}`}>
+                  <button
+                    type="button"
+                    className="api-log-entry-summary"
+                    onClick={() => setExpandedId(expanded ? null : entry.id)}
+                    aria-expanded={expanded}
+                  >
+                    <span className="api-log-time">{formatApiLogTime(entry.at)}</span>
+                    <span className="api-log-model">{entry.model}</span>
+                    <span className="api-log-status">{entry.status ?? "—"}</span>
+                    <span className="api-log-duration">{(entry.durationMs / 1000).toFixed(1)}s</span>
+                    {entry.retries > 0 ? <span className="api-log-retries">↻{entry.retries}</span> : null}
+                    <span className={`api-log-badge api-log-badge-${entry.outcome}`}>{apiLogOutcomeLabel(entry)}</span>
+                  </button>
+                  {expanded ? (
+                    <div className="api-log-detail">
+                      <ApiLogRow label="Outcome" value={entry.outcome} />
+                      <ApiLogRow label="Finish reason" value={entry.finishReason ?? "—"} />
+                      <ApiLogRow label="Streamed" value={entry.streamed ? "yes" : "no"} />
+                      <ApiLogRow label="Content" value={`${entry.contentChars} chars`} />
+                      <ApiLogRow label="Tools offered" value={entry.toolsOffered.length ? `${entry.toolsOffered.length}` : "none"} />
+                      <ApiLogRow label="Tool calls" value={entry.toolCalls.length ? entry.toolCalls.join(", ") : "none"} />
+                      {entry.droppedToolCalls.length ? (
+                        <ApiLogRow label="Dropped (unavailable)" value={entry.droppedToolCalls.join(", ")} highlight />
+                      ) : null}
+                      {entry.usage?.totalTokens !== undefined ? <ApiLogRow label="Tokens" value={`${entry.usage.totalTokens}`} /> : null}
+                      {entry.error ? <ApiLogRow label="Error" value={entry.error} highlight /> : null}
+                      {entry.requestMessages ? (
+                        <details className="api-log-body">
+                          <summary>Request messages ({entry.requestMessages.length})</summary>
+                          <pre>
+                            {entry.requestMessages
+                              .map(
+                                (message) =>
+                                  `[${message.role}]${message.toolCalls?.length ? ` calls: ${message.toolCalls.join(", ")}` : ""}\n${message.content}`
+                              )
+                              .join("\n\n")}
+                          </pre>
+                        </details>
+                      ) : null}
+                      {entry.responseBody ? (
+                        <details className="api-log-body">
+                          <summary>Response body</summary>
+                          <pre>{entry.responseBody}</pre>
+                        </details>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    </div>,
+    document.body
+  );
+}
+
+function ApiLogRow({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className={highlight ? "api-log-row api-log-row-highlight" : "api-log-row"}>
+      <span className="api-log-row-label">{label}</span>
+      <span className="api-log-row-value">{value}</span>
+    </div>
+  );
+}
+
+function apiLogOutcomeLabel(entry: ApiRequestLogEntry): string {
+  if (entry.outcome === "error") {
+    return "error";
+  }
+  if (entry.outcome === "empty") {
+    return "empty";
+  }
+  return entry.toolCalls.length ? `${entry.toolCalls.length} tool call${entry.toolCalls.length === 1 ? "" : "s"}` : "ok";
+}
+
+function formatApiLogTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString();
+  } catch {
+    return iso;
+  }
+}
+
 function ModelPickerDialog({
   currentModel,
   baseUrl,
   apiKey,
+  providerId,
+  includeAuto = true,
+  title = "Select model",
   onSelect,
   onClose
 }: {
   currentModel: string;
   baseUrl: string;
   apiKey?: string;
+  providerId?: string;
+  includeAuto?: boolean;
+  title?: string;
   onSelect: (model: string) => void;
   onClose: () => void;
 }) {
@@ -2891,7 +4505,13 @@ function ModelPickerDialog({
     void loadModels();
   }, []);
 
-  const options = useMemo(() => Array.from(new Set([AUTO_MODEL_VALUE, currentModel, ...models])).filter(Boolean), [currentModel, models]);
+  const options = useMemo(
+    () =>
+      Array.from(new Set([...(includeAuto ? [AUTO_MODEL_VALUE] : []), currentModel, ...models]))
+        .filter(Boolean)
+        .filter((model) => includeAuto || !isAutoModelId(model)),
+    [currentModel, includeAuto, models]
+  );
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return needle ? options.filter((model) => model.toLowerCase().includes(needle)) : options;
@@ -2912,6 +4532,7 @@ function ModelPickerDialog({
     setNotice(null);
     try {
       const result = await window.arivu.listModels({
+        activeProviderId: providerId,
         baseUrl,
         apiKey: apiKey?.trim() || undefined
       });
@@ -2929,13 +4550,13 @@ function ModelPickerDialog({
 
   return createPortal(
     <div className="modal-backdrop">
-      <section className="model-dialog" role="dialog" aria-modal="true" aria-label="Select model">
+      <section className="model-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <div className="model-dialog-header">
           <div className="approval-icon">
             <Cpu size={23} />
           </div>
           <div>
-            <h2>Select model</h2>
+            <h2>{title}</h2>
             <p>{baseUrl}</p>
           </div>
           <button className="icon-button compact-icon-button" type="button" onClick={onClose} aria-label="Close model picker">
@@ -2951,7 +4572,13 @@ function ModelPickerDialog({
             placeholder={showCustomModelAction ? "Search or enter model ID" : "Search models"}
             aria-label="Search models"
           />
-          <button className="icon-button compact-icon-button" type="button" onClick={() => void loadModels()} disabled={loading} title="Refresh models">
+          <button
+            className="icon-button compact-icon-button"
+            type="button"
+            onClick={() => void loadModels()}
+            disabled={loading}
+            title="Refresh models"
+          >
             <RefreshCw size={14} />
           </button>
         </div>
@@ -2993,6 +4620,8 @@ function HistoryView({
   openMenuId,
   onReload,
   onOpen,
+  onRename,
+  onTogglePin,
   onDelete,
   onToggleMenu,
   onError
@@ -3003,6 +4632,8 @@ function HistoryView({
   openMenuId: string | null;
   onReload: () => void;
   onOpen: (id: string) => Promise<void>;
+  onRename: (session: SessionSummary) => Promise<void>;
+  onTogglePin: (session: SessionSummary) => Promise<void>;
   onDelete: (session: SessionSummary) => Promise<void>;
   onToggleMenu: (id: string) => void;
   onError: (message: string) => void;
@@ -3050,10 +4681,7 @@ function HistoryView({
 
       <div className="history-list">
         {sessions.map((session) => (
-          <div
-            key={session.id}
-            className={session.id === activeSessionId ? "history-item active" : "history-item"}
-          >
+          <div key={session.id} className={session.id === activeSessionId ? "history-item active" : "history-item"}>
             <button
               className="history-row"
               type="button"
@@ -3062,21 +4690,28 @@ function HistoryView({
             >
               <div className="history-main">
                 <strong>{session.title}</strong>
+                {session.pinnedAt ? <Pin className="chat-pin-indicator" size={12} aria-label="Pinned chat" /> : null}
                 {session.running ? <span className="chat-loading-dot" title="Response loading" aria-label="Response loading" /> : null}
               </div>
               <div className="history-details">
                 <span>{formatDateTime(session.updatedAt)}</span>
+                {session.pinnedAt ? <span title={`Pinned ${formatDateTime(session.pinnedAt)}`}>Pinned</span> : null}
                 <span title={session.cwd}>{basename(session.cwd)}</span>
                 <span title={sessionModelTitle(session)}>{sessionModelLabel(session)}</span>
-                {session.agentLoop ? <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span> : null}
+                {session.agentLoop ? (
+                  <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span>
+                ) : null}
                 <span>{session.messageCount} messages</span>
               </div>
             </button>
             <ChatOptionsMenu
               open={openMenuId === session.id}
               title={session.title}
+              pinned={Boolean(session.pinnedAt)}
               disabled={deletingId === session.id}
               onToggle={() => onToggleMenu(session.id)}
+              onRename={() => void onRename(session)}
+              onTogglePin={() => void onTogglePin(session)}
               onDelete={() => void deleteSession(session)}
             />
           </div>
@@ -3093,6 +4728,8 @@ function SidebarChatItem({
   className,
   onOpen,
   onToggleMenu,
+  onRename,
+  onTogglePin,
   onDelete
 }: {
   session: SessionSummary;
@@ -3101,6 +4738,8 @@ function SidebarChatItem({
   className?: string;
   onOpen: () => void;
   onToggleMenu: () => void;
+  onRename: () => void;
+  onTogglePin: () => void;
   onDelete: () => void;
 }) {
   const classes = ["recent-chat-item", active ? "active" : "", className ?? ""].filter(Boolean).join(" ");
@@ -3110,10 +4749,12 @@ function SidebarChatItem({
       <button className="recent-chat-row" type="button" onClick={onOpen}>
         <div className="recent-chat-main">
           <strong>{session.title}</strong>
+          {session.pinnedAt ? <Pin className="chat-pin-indicator" size={11} aria-label="Pinned chat" /> : null}
           {session.running ? <span className="chat-loading-dot" title="Response loading" aria-label="Response loading" /> : null}
         </div>
         <div className="recent-chat-details">
           <span>{formatDateTime(session.updatedAt)}</span>
+          {session.pinnedAt ? <span title={`Pinned ${formatDateTime(session.pinnedAt)}`}>Pinned</span> : null}
           <span title={sessionModelTitle(session)}>{sessionModelLabel(session)}</span>
           {session.agentLoop ? <span title={agentLoopStatusLabel(session.agentLoop)}>{sessionLoopLabel(session.agentLoop)}</span> : null}
           <span>{session.messageCount} messages</span>
@@ -3122,7 +4763,10 @@ function SidebarChatItem({
       <ChatOptionsMenu
         open={menuOpen}
         title={session.title}
+        pinned={Boolean(session.pinnedAt)}
         onToggle={onToggleMenu}
+        onRename={onRename}
+        onTogglePin={onTogglePin}
         onDelete={onDelete}
       />
     </div>
@@ -3132,14 +4776,20 @@ function SidebarChatItem({
 function ChatOptionsMenu({
   open,
   title,
+  pinned,
   disabled,
   onToggle,
+  onRename,
+  onTogglePin,
   onDelete
 }: {
   open: boolean;
   title: string;
+  pinned: boolean;
   disabled?: boolean;
   onToggle: () => void;
+  onRename: () => void;
+  onTogglePin: () => void;
   onDelete: () => void;
 }) {
   const buttonRef = useRef<HTMLButtonElement | null>(null);
@@ -3177,25 +4827,36 @@ function ChatOptionsMenu({
     };
   }, [open]);
 
-  const menu = open && menuPosition ? createPortal(
-    <div
-      className="chat-options-menu"
-      role="menu"
-      style={{
-        left: menuPosition.left,
-        position: "fixed",
-        right: "auto",
-        top: menuPosition.top
-      }}
-      onClick={(event) => event.stopPropagation()}
-    >
-      <button className="chat-menu-item danger" type="button" onClick={onDelete} role="menuitem">
-        <Trash2 size={14} />
-        Delete
-      </button>
-    </div>,
-    document.body
-  ) : null;
+  const menu =
+    open && menuPosition
+      ? createPortal(
+          <div
+            className="chat-options-menu"
+            role="menu"
+            style={{
+              left: menuPosition.left,
+              position: "fixed",
+              right: "auto",
+              top: menuPosition.top
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button className="chat-menu-item" type="button" onClick={onRename} role="menuitem">
+              <Pencil size={14} />
+              Rename
+            </button>
+            <button className="chat-menu-item" type="button" onClick={onTogglePin} role="menuitem">
+              {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+              {pinned ? "Unpin" : "Pin"}
+            </button>
+            <button className="chat-menu-item danger" type="button" onClick={onDelete} role="menuitem">
+              <Trash2 size={14} />
+              Delete
+            </button>
+          </div>,
+          document.body
+        )
+      : null;
 
   return (
     <div className={open ? "chat-options open" : "chat-options"} onClick={(event) => event.stopPropagation()}>
@@ -3283,7 +4944,9 @@ function MessageBubble({
             aria-label="Edit query"
           >
             <Pencil size={13} />
-            <span className="message-action-tooltip" aria-hidden="true">Edit query</span>
+            <span className="message-action-tooltip" aria-hidden="true">
+              Edit query
+            </span>
           </button>
         ) : null}
         {canRetry ? (
@@ -3296,18 +4959,16 @@ function MessageBubble({
             aria-label="Retry query"
           >
             <RotateCcw size={13} />
-            <span className="message-action-tooltip" aria-hidden="true">Retry query</span>
+            <span className="message-action-tooltip" aria-hidden="true">
+              Retry query
+            </span>
           </button>
         ) : null}
-        <button
-          className="message-action-button"
-          type="button"
-          onClick={onCopy}
-          title={copyLabel}
-          aria-label={copyLabel}
-        >
+        <button className="message-action-button" type="button" onClick={onCopy} title={copyLabel} aria-label={copyLabel}>
           {copied ? <Check size={13} /> : <Copy size={13} />}
-          <span className="message-action-tooltip" aria-hidden="true">{copyLabel}</span>
+          <span className="message-action-tooltip" aria-hidden="true">
+            {copyLabel}
+          </span>
         </button>
       </div>
     </article>
@@ -3414,13 +5075,13 @@ function UserMessageContent({ content }: { content: ChatContent }) {
 
 function ToolRunSummary({ group }: { group: ActivityGroup }) {
   const [expanded, setExpanded] = useState(group.status === "running");
-  const toolItems = group.items.filter((item) => item.kind !== "system");
-  if (toolItems.length === 0) {
+  const entries = toolRunEntriesFromItems(group.items);
+  if (entries.length === 0) {
     return null;
   }
 
   return (
-    <section className={`tool-run-summary ${group.status}`} aria-label={`Tool activity for ${group.title}`}>
+    <section className={`tool-run-summary ${group.status}`} aria-label={`Activity for ${group.title}`}>
       <button
         className="tool-run-summary-button"
         type="button"
@@ -3431,36 +5092,159 @@ function ToolRunSummary({ group }: { group: ActivityGroup }) {
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <span className="tool-run-icon">{group.status === "running" ? <span className="pulse-dot" /> : <TerminalSquare size={13} />}</span>
         <strong>{toolRunSummaryLabel(group)}</strong>
-        <span>{group.title}</span>
+        <span title={group.detail}>For this query: {group.title}</span>
       </button>
+      {group.run ? <TaskRunMeta run={group.run} compact /> : null}
       {expanded ? (
         <div className="tool-run-list">
-          {toolItems.map((item, itemIndex) => {
-            const detailPreview = toolRunDetailPreview(item);
-            return (
-              <div className={`tool-run-item ${item.kind}${item.status ? ` status-${item.status}` : ""}`} key={item.id}>
-                <span className="tool-run-step">{itemIndex + 1}</span>
-                <span className="tool-run-kind">{toolRunKindLabel(item)}</span>
-                <strong>{item.title}</strong>
-                {item.status ? <span className={`activity-status ${item.status}`}>{activityStatusLabel(item.status)}</span> : null}
-                {item.imagePreview ? <span className="tool-run-chip">Screenshot</span> : null}
-                {item.summary ? <p>{item.summary}</p> : null}
-                {detailPreview ? <pre>{detailPreview}</pre> : null}
-              </div>
-            );
-          })}
+          {entries.map((entry, itemIndex) => (
+            <ToolRunEntryRow entry={entry} step={itemIndex + 1} key={entry.id} />
+          ))}
         </div>
       ) : null}
     </section>
   );
 }
 
-function ActivityGroupCard({ group }: { group: ActivityGroup }) {
+function ToolRunEntryRow({ entry, step }: { entry: ToolRunEntry; step: number }) {
+  const callPreview = entry.call ? toolRunDetailPreview(entry.call) : undefined;
+  const resultPreview = entry.result ? toolRunDetailPreview(entry.result) : undefined;
+  const itemPreview = entry.item ? toolRunDetailPreview(entry.item) : undefined;
+  const status = entry.status;
+  return (
+    <div className={`tool-run-item ${entry.kind}${status ? ` status-${status}` : ""}`}>
+      <span className="tool-run-step">{step}</span>
+      <span className="tool-run-kind">{toolRunEntryKindLabel(entry)}</span>
+      <strong>{entry.title}</strong>
+      {status ? <span className={`activity-status ${status}`}>{activityStatusLabel(status)}</span> : null}
+      {entry.imagePreview ? <span className="tool-run-chip">Screenshot</span> : null}
+      {entry.policy ? <ActivityPolicyChip policy={entry.policy} compact /> : null}
+      {entry.call?.summary ? (
+        <p>
+          <span>Call</span>
+          {entry.call.summary}
+        </p>
+      ) : null}
+      {entry.result?.summary ? (
+        <p>
+          <span>Result</span>
+          {entry.result.summary}
+        </p>
+      ) : null}
+      {entry.item?.summary ? <p>{entry.item.summary}</p> : null}
+      {callPreview ? <pre data-label="Call args">{callPreview}</pre> : null}
+      {resultPreview ? <pre data-label="Result">{resultPreview}</pre> : null}
+      {itemPreview ? <pre>{itemPreview}</pre> : null}
+    </div>
+  );
+}
+
+function RunCheckpointCard({ run, busy, onUndo }: { run: AgentTaskRun; busy: boolean; onUndo: () => void }) {
+  const checkpoint = run.checkpoint;
+  if (!checkpoint) {
+    return null;
+  }
+  const count = checkpoint.changedPaths.length;
+  const fileLabel = `${count} file${count === 1 ? "" : "s"}`;
+  return (
+    <div className="run-checkpoint-card">
+      <div className="run-checkpoint-summary">
+        <RotateCcw size={13} />
+        {checkpoint.revertedAt ? (
+          <span>Reverted this run's changes to {fileLabel}.</span>
+        ) : (
+          <span>This run changed {fileLabel} directly in the workspace.</span>
+        )}
+      </div>
+      {checkpoint.revertedAt ? null : (
+        <button type="button" className="run-checkpoint-undo" onClick={onUndo} disabled={busy}>
+          {busy ? "Undoing…" : "Undo run changes"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ActivityGroupCard({
+  group,
+  currentSessionId,
+  focusedRunId,
+  worktreeActionBusy,
+  planReviewBusy,
+  evidenceOpenBusy,
+  pullRequestWatches,
+  pullRequestWatchBusy,
+  canCreateWorktree,
+  onTaskWorktreeAction,
+  onTaskRunPlanAction,
+  onTogglePullRequestWatch,
+  onFocusTaskRun,
+  onOpenEvidence,
+  onDraftRemediation,
+  onUndoRun,
+  undoBusyRunId
+}: {
+  group: ActivityGroup;
+  currentSessionId?: string;
+  focusedRunId: string | null;
+  worktreeActionBusy: string | null;
+  planReviewBusy: string | null;
+  evidenceOpenBusy: string | null;
+  pullRequestWatches: Record<string, PullRequestWatch>;
+  pullRequestWatchBusy: Record<string, boolean>;
+  canCreateWorktree: boolean;
+  onTaskWorktreeAction: (run: AgentTaskRun, action: TaskWorktreeAction, options?: TaskWorktreeActionOptions) => void;
+  onTaskRunPlanAction: (run: AgentTaskRun, action: TaskRunPlanAction) => void;
+  onTogglePullRequestWatch: (run: AgentTaskRun) => void;
+  onFocusTaskRun: (run: AgentTaskRun) => void;
+  onOpenEvidence: (link: ActivityEvidenceLink) => void;
+  onDraftRemediation: (draftText: string, options?: DraftPromptOptions) => void;
+  onUndoRun: (run: AgentTaskRun) => void;
+  undoBusyRunId: string | null;
+}) {
   const [collapsed, setCollapsed] = useState(group.status !== "running");
-  const toolItemCount = group.items.filter((item) => item.kind !== "system").length;
+  const [copiedAudit, setCopiedAudit] = useState(false);
+  const auditCopyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toolCountLabel = toolActivityCountLabel(group.items);
+  const focused = Boolean(group.run && group.run.id === focusedRunId);
+  const planApprovalPrompt = group.run ? buildTaskRunPlanApprovalPrompt(group.run) : undefined;
+  const planWorktreePrompt = group.run ? buildTaskRunPlanApprovalPrompt(group.run, { worktree: true }) : undefined;
+
+  useEffect(() => {
+    if (focused) {
+      setCollapsed(false);
+    }
+  }, [focused]);
+
+  useEffect(() => {
+    return () => {
+      if (auditCopyResetTimeoutRef.current) {
+        clearTimeout(auditCopyResetTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  async function copyAuditSummary() {
+    if (!group.run) {
+      return;
+    }
+    try {
+      await writeClipboardText(buildTaskRunAuditMarkdown(group.run));
+      setCopiedAudit(true);
+      if (auditCopyResetTimeoutRef.current) {
+        clearTimeout(auditCopyResetTimeoutRef.current);
+      }
+      auditCopyResetTimeoutRef.current = setTimeout(() => {
+        setCopiedAudit(false);
+        auditCopyResetTimeoutRef.current = null;
+      }, 1400);
+    } catch {
+      setCopiedAudit(false);
+    }
+  }
 
   return (
-    <section className={`activity-group ${group.status}`}>
+    <section className={`activity-group ${group.status}${focused ? " focus-active" : ""}`} data-activity-run-id={group.run?.id}>
       <button
         className="activity-group-header"
         type="button"
@@ -3470,16 +5254,81 @@ function ActivityGroupCard({ group }: { group: ActivityGroup }) {
       >
         {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         <div className="activity-group-title">
-          <span>Query</span>
-          <strong>{group.title}</strong>
+          <span>{activityGroupEyebrow(group)}</span>
+          <strong title={group.detail}>{group.title}</strong>
         </div>
-        <span className="activity-group-count">{toolEventCountLabel(toolItemCount)}</span>
+        <span className="activity-group-count">{toolCountLabel}</span>
         <span className={`activity-status ${group.status}`}>{activityStatusLabel(group.status)}</span>
       </button>
+      {group.run ? (
+        <button
+          className="activity-group-audit-button"
+          type="button"
+          onClick={() => void copyAuditSummary()}
+          title={copiedAudit ? "Copied audit summary" : "Copy audit summary"}
+          aria-label={copiedAudit ? "Copied audit summary" : "Copy audit summary"}
+        >
+          {copiedAudit ? <Check size={12} /> : <Copy size={12} />}
+        </button>
+      ) : null}
       {!collapsed ? (
         <div className="activity-group-body">
+          {group.run ? <TaskRunMeta run={group.run} /> : null}
+          {group.run?.loop?.iterations?.length ? <TaskRunLoop loop={group.run.loop} /> : null}
+          {group.run?.verification ? <TaskRunVerification verification={group.run.verification} /> : null}
+          {group.run?.plan ? (
+            <TaskRunPlan
+              plan={group.run.plan}
+              planReview={group.run.planReview}
+              approvalPrompt={planApprovalPrompt}
+              worktreePrompt={planWorktreePrompt}
+              canCreateWorktree={canCreateWorktree}
+              actionBusyKey={planReviewBusy}
+              runId={group.run.id}
+              onDraftApproval={(draftText) =>
+                onDraftRemediation(draftText, {
+                  status: "Approved-plan prompt drafted",
+                  confirmLabel: "Replace the composer with this approved-plan prompt?"
+                })
+              }
+              onDraftWorktreeApproval={(draftText) =>
+                group.run &&
+                onDraftRemediation(draftText, {
+                  worktreePlanSource: { taskRunId: group.run.id },
+                  status: "Approved plan drafted in a task worktree",
+                  confirmLabel: "Replace the composer and arm a new task worktree for this approved plan?"
+                })
+              }
+              onPlanAction={(action) => group.run && onTaskRunPlanAction(group.run, action)}
+            />
+          ) : null}
+          {group.run ? (
+            <TaskWorktreeActions
+              run={group.run}
+              sourceRun={group.sourceRun}
+              planSourceRun={group.planSourceRun}
+              attemptRuns={group.worktreeAttemptRuns}
+              focusedRunId={focusedRunId}
+              busyKey={worktreeActionBusy}
+              pullRequestWatch={pullRequestWatchForRun(currentSessionId, group.run, pullRequestWatches, pullRequestWatchBusy)}
+              onAction={onTaskWorktreeAction}
+              onTogglePullRequestWatch={onTogglePullRequestWatch}
+              onFocusAttempt={onFocusTaskRun}
+              onDraftRemediation={onDraftRemediation}
+            />
+          ) : null}
+          {group.run && group.run.checkpoint && !group.run.worktree?.enabled ? (
+            <RunCheckpointCard run={group.run} busy={undoBusyRunId === group.run.id} onUndo={() => group.run && onUndoRun(group.run)} />
+          ) : null}
           {group.items.map((item) => (
-            <ActivityRow key={item.id} item={item} defaultCollapsed />
+            <ActivityRow
+              key={item.id}
+              item={item}
+              defaultCollapsed
+              evidenceOpenBusy={evidenceOpenBusy}
+              onOpenEvidence={onOpenEvidence}
+              onDraftRemediation={onDraftRemediation}
+            />
           ))}
         </div>
       ) : null}
@@ -3487,9 +5336,1245 @@ function ActivityGroupCard({ group }: { group: ActivityGroup }) {
   );
 }
 
-function ActivityRow({ item, defaultCollapsed }: { item: ActivityItem; defaultCollapsed?: boolean }) {
+function TaskWorktreeActions({
+  run,
+  sourceRun,
+  planSourceRun,
+  attemptRuns,
+  focusedRunId,
+  busyKey,
+  pullRequestWatch,
+  onAction,
+  onTogglePullRequestWatch,
+  onFocusAttempt,
+  onDraftRemediation
+}: {
+  run: AgentTaskRun;
+  sourceRun?: AgentTaskRun;
+  planSourceRun?: AgentTaskRun;
+  attemptRuns?: AgentTaskRun[];
+  focusedRunId: string | null;
+  busyKey: string | null;
+  pullRequestWatch: PullRequestWatchView;
+  onAction: (run: AgentTaskRun, action: TaskWorktreeAction, options?: TaskWorktreeActionOptions) => void;
+  onTogglePullRequestWatch: (run: AgentTaskRun) => void;
+  onFocusAttempt: (run: AgentTaskRun) => void;
+  onDraftRemediation: (draftText: string, options?: DraftPromptOptions) => void;
+}) {
+  const worktree = run.worktree;
+  if (!worktree?.enabled) {
+    return null;
+  }
+
+  const actions = taskWorktreeActionsForRun(run);
+  const diffLabel = worktreeDiffLabel(worktree.diff);
+  const busy = busyKey?.startsWith(`${run.id}:`) ?? false;
+  const patchPreview = worktreePatchDiffPreview(worktree.patchPreview);
+  const verificationGate = taskWorktreeVerificationGate(run, sourceRun);
+  const verificationRepairPrompt = buildTaskRunVerificationRepairPrompt(run);
+  const verificationRerunPrompt = buildTaskRunVerificationRerunPrompt(run, sourceRun);
+  const pullRequestReviewPrompt = buildTaskRunPullRequestReviewPrompt(run);
+  const planSourceReview = buildTaskRunPlanSourceReview(run, planSourceRun);
+  return (
+    <div className="task-worktree-panel">
+      <div className="task-worktree-summary">
+        <GitBranch size={13} />
+        <span title={worktree.path ?? worktree.error}>
+          {worktree.branch ?? "Task worktree"} - {worktreeStatusLabel(worktree.status)}
+        </span>
+        {diffLabel ? <strong>{diffLabel}</strong> : null}
+      </div>
+      {worktree.error ? <p className="task-worktree-error">{worktree.error}</p> : null}
+      {planSourceReview ? <TaskWorktreePlanSourceReview review={planSourceReview} /> : null}
+      {verificationGate ? <p className={`task-worktree-gate ${verificationGate.status}`}>{verificationGate.message}</p> : null}
+      {worktree.conflict ? <TaskWorktreeConflictCard run={run} busyKey={busyKey} onAction={onAction} /> : null}
+      <TaskWorktreeAttemptTimeline
+        runs={attemptRuns ?? []}
+        currentRunId={run.id}
+        focusedRunId={focusedRunId}
+        busyKey={busyKey}
+        onFocusAttempt={onFocusAttempt}
+        onOpenAttempt={(attempt) => onAction(attempt, "open")}
+        onDraftRemediation={onDraftRemediation}
+      />
+      {actions.length > 0 ? (
+        <div className="task-worktree-actions">
+          {actions.map((action) => {
+            const actionBusy = busyKey === `${run.id}:${action.id}`;
+            return (
+              <button
+                key={action.id}
+                type="button"
+                onClick={() => onAction(run, action.id)}
+                disabled={busy || action.disabled}
+                title={action.disabledReason ?? action.title}
+                aria-label={action.title}
+              >
+                {actionBusy ? <span className="pulse-dot" /> : action.icon}
+                {action.label}
+              </button>
+            );
+          })}
+          {verificationRepairPrompt ? (
+            <button
+              type="button"
+              disabled={busy}
+              title="Draft a repair prompt and continue this task worktree"
+              onClick={() =>
+                onDraftRemediation(verificationRepairPrompt, {
+                  worktreeContinuation: { taskRunId: run.id, branch: worktree.branch },
+                  status: "Drafted repair prompt for task worktree",
+                  confirmLabel: "Replace the current composer draft with a repair prompt for this task worktree?"
+                })
+              }
+            >
+              <Wrench size={12} />
+              Fix verification
+            </button>
+          ) : null}
+          {verificationRerunPrompt ? (
+            <button
+              type="button"
+              disabled={busy}
+              title="Draft a prompt that reruns verification in this task worktree"
+              onClick={() =>
+                onDraftRemediation(verificationRerunPrompt, {
+                  worktreeContinuation: { taskRunId: run.id, branch: worktree.branch },
+                  status: "Drafted verification rerun prompt for task worktree",
+                  confirmLabel: "Replace the current composer draft with a verification rerun prompt for this task worktree?"
+                })
+              }
+            >
+              <RefreshCw size={12} />
+              Rerun checks
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {worktree.pullRequest ? (
+        <TaskWorktreePullRequestCard
+          run={run}
+          pullRequest={worktree.pullRequest}
+          reviewPrompt={pullRequestReviewPrompt}
+          busy={busy}
+          watch={pullRequestWatch}
+          onAction={onAction}
+          onToggleWatch={onTogglePullRequestWatch}
+          onDraftRemediation={onDraftRemediation}
+        />
+      ) : null}
+      {patchPreview ? (
+        <div className="task-worktree-patch">
+          <div className="task-worktree-patch-note">
+            <span>{worktree.patchPreview?.truncated ? "Patch preview truncated" : "Patch preview ready"}</span>
+            <strong>{formatBytes(worktree.patchPreview?.bytes ?? 0)}</strong>
+          </div>
+          <DiffBlock preview={patchPreview} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TaskWorktreePlanSourceReview({ review }: { review: AgentTaskRunPlanSourceReview }) {
+  const visiblePaths = review.changedPaths.slice(0, 4);
+  const hiddenPathCount = Math.max(0, review.changedPaths.length - visiblePaths.length);
+  return (
+    <div className="task-worktree-plan-source">
+      <div className="task-worktree-plan-source-heading">
+        <ListChecks size={12} />
+        <div>
+          <strong>Approved plan source</strong>
+          <span>
+            {shortRunId(review.sourceRunId)}
+            {review.reviewStatus ? ` - ${planReviewStatusLabel(review.reviewStatus)}` : ""}
+            {review.reviewUpdatedAt ? ` - ${formatDateTime(review.reviewUpdatedAt)}` : ""}
+          </span>
+        </div>
+      </div>
+      {review.sourcePromptPreview ? <p>{review.sourcePromptPreview}</p> : null}
+      {review.planSummary ? <p>{review.planSummary}</p> : null}
+      {review.completionNotes.length > 0 ? (
+        <div className="task-worktree-plan-source-completion">
+          <div className="task-worktree-plan-source-completion-heading">
+            <strong>Completion notes</strong>
+            <span className={review.completionStatus}>{planCompletionStatusLabel(review.completionStatus)}</span>
+          </div>
+          <p>{review.completionSummary}</p>
+          <ol>
+            {review.completionNotes.map((note, index) => (
+              <li className={`completion-${note.status}`} key={`${note.text}-${index}`}>
+                <span>{planCompletionStatusLabel(note.status)}</span>
+                <div>
+                  <strong>{note.text}</strong>
+                  <small>
+                    {[note.planStatus ? `Plan ${planItemStatusLabel(note.planStatus).toLowerCase()}` : undefined, ...note.evidence]
+                      .filter(Boolean)
+                      .join(" - ")}
+                  </small>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+      <div className="task-worktree-plan-source-cues">
+        {review.cues.map((cue) => (
+          <span key={`${cue.status}-${cue.text}`} className={cue.status}>
+            {planSourceCueIcon(cue.status)}
+            {cue.text}
+          </span>
+        ))}
+      </div>
+      {visiblePaths.length > 0 ? (
+        <div className="task-worktree-plan-source-paths">
+          {visiblePaths.map((changedPath) => (
+            <code key={changedPath}>{changedPath}</code>
+          ))}
+          {hiddenPathCount > 0 ? <code>+{hiddenPathCount} more</code> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function planSourceCueIcon(status: AgentTaskRunPlanSourceReview["cues"][number]["status"]) {
+  switch (status) {
+    case "passed":
+      return <Check size={11} />;
+    case "failed":
+      return <AlertTriangle size={11} />;
+    default:
+      return <Info size={11} />;
+  }
+}
+
+function planCompletionStatusLabel(status: AgentTaskRunPlanSourceReview["completionStatus"]) {
+  switch (status) {
+    case "supported":
+      return "Supported";
+    case "blocked":
+      return "Blocked";
+    case "needs_evidence":
+      return "Needs evidence";
+  }
+}
+
+function TaskWorktreeConflictCard({
+  run,
+  busyKey,
+  onAction
+}: {
+  run: AgentTaskRun;
+  busyKey: string | null;
+  onAction: (run: AgentTaskRun, action: TaskWorktreeAction, options?: TaskWorktreeActionOptions) => void;
+}) {
+  const conflict = run.worktree?.conflict;
+  if (!conflict) {
+    return null;
+  }
+  const visibleFiles = conflict.files.slice(0, 6);
+  const hiddenCount = conflict.files.length - visibleFiles.length;
+  const busy = busyKey?.startsWith(`${run.id}:`) ?? false;
+  return (
+    <div className="task-worktree-conflict" aria-label="Task worktree conflict resolution">
+      <div className="task-worktree-conflict-heading">
+        <AlertTriangle size={13} />
+        <span>Conflict resolution</span>
+        <strong>{formatDateTime(conflict.detectedAt)}</strong>
+      </div>
+      <p>{conflict.message}</p>
+      {visibleFiles.length > 0 ? (
+        <ul>
+          {visibleFiles.map((file) => (
+            <li key={file}>
+              <button
+                type="button"
+                onClick={() => onAction(run, "open_conflict_file", { conflictPath: file })}
+                disabled={busy}
+                title={`Open ${file}`}
+              >
+                <FileText size={11} />
+                <span>{truncateMiddle(file, 54)}</span>
+              </button>
+            </li>
+          ))}
+          {hiddenCount > 0 ? (
+            <li>
+              <MoreHorizontal size={11} />
+              <span>
+                {formatNumber(hiddenCount)} more file{hiddenCount === 1 ? "" : "s"}
+              </span>
+            </li>
+          ) : null}
+        </ul>
+      ) : null}
+      <div className="task-worktree-conflict-actions">
+        <button type="button" onClick={() => onAction(run, "open")} disabled={busy} title="Open this worktree to resolve conflicts">
+          <FolderOpen size={12} />
+          Open
+        </button>
+        <button
+          type="button"
+          onClick={() => onAction(run, "continue_conflict")}
+          disabled={busy}
+          title="Continue after conflicts are resolved and staged"
+        >
+          <Check size={12} />
+          Continue
+        </button>
+        <button
+          type="button"
+          onClick={() => onAction(run, "abort_conflict")}
+          disabled={busy}
+          title="Abort this sync and return to the previous task branch state"
+        >
+          <RotateCcw size={12} />
+          Abort
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TaskWorktreeAttemptTimeline({
+  runs,
+  currentRunId,
+  focusedRunId,
+  busyKey,
+  onFocusAttempt,
+  onOpenAttempt,
+  onDraftRemediation
+}: {
+  runs: AgentTaskRun[];
+  currentRunId: string;
+  focusedRunId: string | null;
+  busyKey: string | null;
+  onFocusAttempt: (run: AgentTaskRun) => void;
+  onOpenAttempt: (run: AgentTaskRun) => void;
+  onDraftRemediation: (draftText: string, options?: DraftPromptOptions) => void;
+}) {
+  const [compareRunId, setCompareRunId] = useState<string | null>(null);
+  if (runs.length <= 1) {
+    return null;
+  }
+  const currentRun = runs.find((run) => run.id === currentRunId) ?? runs.at(-1);
+  const comparisonRun = compareRunId ? runs.find((run) => run.id === compareRunId) : undefined;
+  const comparison = currentRun && comparisonRun ? attemptComparisonForRuns(runs, comparisonRun, currentRun) : undefined;
+  const replayOutcomeGroups = buildTaskRunReplayOutcomeGroups(runs);
+  const runsById = new Map(runs.map((attempt) => [attempt.id, attempt]));
+
+  return (
+    <div className="task-worktree-attempts" aria-label="Task worktree repair history">
+      <div className="task-worktree-attempts-heading">
+        <ListChecks size={13} />
+        <span>Repair history</span>
+        <strong>{runs.length} attempts</strong>
+      </div>
+      <ol>
+        {runs.map((attempt, index) => {
+          const verificationStatus = attempt.verification?.status ?? "unknown";
+          const stage = attempt.worktree?.replayOfTaskRunId
+            ? "Replay"
+            : attempt.worktree?.continuedFromTaskRunId
+              ? "Continuation"
+              : "Original";
+          const isCurrent = attempt.id === currentRunId;
+          const focused = attempt.id === focusedRunId;
+          const openAction = taskWorktreeActionsForRun(attempt).find((action) => action.id === "open");
+          const openBusy = busyKey === `${attempt.id}:open`;
+          const compareAvailable = Boolean(
+            currentRun && (attempt.id !== currentRun.id || runs.findIndex((run) => run.id === attempt.id) > 0)
+          );
+          const replayPrompt = currentRun ? buildTaskRunVerificationReplayPrompt(attempt, currentRun) : undefined;
+          const meta = [
+            isCurrent ? "Current" : stage,
+            taskRunStatusLabel(attempt.status),
+            attempt.worktree?.replayOfTaskRunId ? `Replay of ${shortRunId(attempt.worktree.replayOfTaskRunId)}` : undefined,
+            attempt.verification ? verificationStatusLabel(attempt.verification.status) : "Verification unknown",
+            formatDateTime(attempt.updatedAt)
+          ].filter((part): part is string => Boolean(part));
+          return (
+            <li key={attempt.id} className={`status-${verificationStatus}${focused ? " focus-active" : ""}`}>
+              <span className="task-worktree-attempt-index">{index + 1}</span>
+              <div>
+                <strong title={attempt.promptPreview}>{attempt.promptPreview || stage}</strong>
+                <small>{meta.join(" - ")}</small>
+              </div>
+              <div className="task-worktree-attempt-actions">
+                <button type="button" onClick={() => onFocusAttempt(attempt)} title="Show this attempt's Activity details">
+                  <MessageSquare size={11} />
+                  Details
+                </button>
+                {compareAvailable ? (
+                  <button type="button" onClick={() => setCompareRunId(attempt.id)} title="Compare this attempt with the current attempt">
+                    <Rows3 size={11} />
+                    Compare
+                  </button>
+                ) : null}
+                {replayPrompt && currentRun?.worktree ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onDraftRemediation(replayPrompt, {
+                        worktreeContinuation: {
+                          taskRunId: currentRun.id,
+                          branch: currentRun.worktree?.branch,
+                          replayOfTaskRunId: attempt.id
+                        },
+                        status: "Drafted replay checks prompt for task worktree",
+                        confirmLabel: "Replace the current composer draft with a replay-checks prompt for this task worktree?"
+                      })
+                    }
+                    title="Draft a prompt that replays this attempt's verification commands in the current worktree"
+                  >
+                    <RefreshCw size={11} />
+                    Replay
+                  </button>
+                ) : null}
+                {openAction ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenAttempt(attempt)}
+                    disabled={Boolean(busyKey) || openAction.disabled}
+                    title={openAction.disabledReason ?? "Open this attempt's managed worktree"}
+                  >
+                    {openBusy ? <span className="pulse-dot" /> : <FolderOpen size={11} />}
+                    Open
+                  </button>
+                ) : null}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+      {replayOutcomeGroups.length > 0 ? (
+        <TaskWorktreeReplayOutcomes
+          groups={replayOutcomeGroups}
+          runsById={runsById}
+          currentRun={currentRun}
+          onFocusAttempt={onFocusAttempt}
+          onDraftRemediation={onDraftRemediation}
+        />
+      ) : null}
+      {comparison ? (
+        <TaskWorktreeAttemptComparison from={comparison.from} to={comparison.to} onClose={() => setCompareRunId(null)} />
+      ) : null}
+    </div>
+  );
+}
+
+function TaskWorktreeAttemptComparison({ from, to, onClose }: { from: AgentTaskRun; to: AgentTaskRun; onClose: () => void }) {
+  const diffComparison = buildTaskRunDiffComparison(from, to);
+  const rows = [
+    ["Prompt", attemptPromptLabel(from), attemptPromptLabel(to)],
+    ["Run", taskRunStatusLabel(from.status), taskRunStatusLabel(to.status)],
+    ["Verification", attemptVerificationLabel(from), attemptVerificationLabel(to)],
+    ["Commands", attemptCommandEvidenceLabel(from), attemptCommandEvidenceLabel(to)],
+    ["Reports", attemptReportEvidenceLabel(from), attemptReportEvidenceLabel(to)],
+    ["Changes", attemptWorktreeChangeLabel(from), attemptWorktreeChangeLabel(to)],
+    ["Replay", attemptReplayLabel(from), attemptReplayLabel(to)],
+    ["Updated", formatDateTime(from.updatedAt), formatDateTime(to.updatedAt)]
+  ];
+
+  return (
+    <div className="task-worktree-attempt-comparison" aria-label="Repair attempt comparison">
+      <div className="task-worktree-attempt-comparison-heading">
+        <Rows3 size={13} />
+        <span>Compare attempts</span>
+        <button type="button" onClick={onClose} title="Close comparison" aria-label="Close comparison">
+          <X size={12} />
+        </button>
+      </div>
+      <div className="task-worktree-attempt-comparison-grid">
+        <span />
+        <strong title={from.promptPreview}>{from.id === to.id ? "Selected" : "Selected attempt"}</strong>
+        <strong title={to.promptPreview}>Current attempt</strong>
+        {rows.map(([label, left, right]) => (
+          <Fragment key={label}>
+            <span>{label}</span>
+            <small title={left}>{left}</small>
+            <small title={right}>{right}</small>
+          </Fragment>
+        ))}
+      </div>
+      <TaskWorktreeAttemptDiffDetails comparison={diffComparison} />
+    </div>
+  );
+}
+
+function TaskWorktreeReplayOutcomes({
+  groups,
+  runsById,
+  currentRun,
+  onFocusAttempt,
+  onDraftRemediation
+}: {
+  groups: AgentTaskRunReplayOutcomeGroup[];
+  runsById: Map<string, AgentTaskRun>;
+  currentRun: AgentTaskRun | undefined;
+  onFocusAttempt: (run: AgentTaskRun) => void;
+  onDraftRemediation: (draftText: string, options?: DraftPromptOptions) => void;
+}) {
+  return (
+    <div className="task-worktree-replay-outcomes" aria-label="Replay outcomes">
+      <div className="task-worktree-replay-outcomes-heading">
+        <RefreshCw size={12} />
+        <span>Replay outcomes</span>
+        <strong>
+          {groups.reduce((total, group) => total + group.outcomes.length, 0)} replay
+          {groups.reduce((total, group) => total + group.outcomes.length, 0) === 1 ? "" : "s"}
+        </strong>
+      </div>
+      {groups.map((group) => {
+        const evidenceRun = runsById.get(group.evidenceRunId);
+        const outcomeRuns = group.outcomes.map((outcome) => runsById.get(outcome.runId)).filter((run): run is AgentTaskRun => Boolean(run));
+        const reviewPrompt =
+          evidenceRun && currentRun ? buildTaskRunReplayFailureReviewPrompt(evidenceRun, outcomeRuns, currentRun) : undefined;
+        const outcomeSummary = replayOutcomeSummary(group);
+        return (
+          <div key={group.evidenceRunId} className="task-worktree-replay-group">
+            <div className="task-worktree-replay-group-heading">
+              <div>
+                <strong title={group.evidencePromptPreview}>Evidence {shortRunId(group.evidenceRunId)}</strong>
+                <small>
+                  {[
+                    group.evidenceVerificationStatus
+                      ? `Evidence ${verificationStatusLabel(group.evidenceVerificationStatus)}`
+                      : "Evidence status unknown",
+                    outcomeSummary,
+                    group.latestOutcome ? formatDateTime(group.latestOutcome.updatedAt) : undefined
+                  ]
+                    .filter((part): part is string => Boolean(part))
+                    .join(" - ")}
+                </small>
+              </div>
+              {reviewPrompt && currentRun?.worktree ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onDraftRemediation(reviewPrompt, {
+                      worktreeContinuation: {
+                        taskRunId: currentRun.id,
+                        branch: currentRun.worktree?.branch,
+                        replayOfTaskRunId: group.evidenceRunId
+                      },
+                      status: "Drafted replay failure review prompt for task worktree",
+                      confirmLabel: "Replace the current composer draft with a replay failure review prompt for this task worktree?"
+                    })
+                  }
+                  title="Draft a review prompt for repeated failed replay checks"
+                >
+                  <Wrench size={11} />
+                  Review
+                </button>
+              ) : null}
+            </div>
+            <div className="task-worktree-replay-list">
+              {group.outcomes.map((outcome) => {
+                const run = runsById.get(outcome.runId);
+                const status = outcome.verificationStatus ?? "unknown";
+                return (
+                  <button
+                    key={outcome.runId}
+                    type="button"
+                    className={`status-${status}`}
+                    onClick={() => (run ? onFocusAttempt(run) : undefined)}
+                    disabled={!run}
+                    title={outcome.verificationSummary ?? outcome.promptPreview ?? outcome.runId}
+                  >
+                    <span>{shortRunId(outcome.runId)}</span>
+                    <strong>{verificationStatusLabel(status)}</strong>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TaskWorktreeAttemptDiffDetails({ comparison }: { comparison: AgentTaskRunDiffComparison }) {
+  const visibleDeltas = comparison.pathDeltas.slice(0, 8);
+  const hiddenCount = comparison.pathDeltas.length - visibleDeltas.length;
+  const counters = [
+    `${formatNumber(comparison.right.pathCount)} current path${comparison.right.pathCount === 1 ? "" : "s"}`,
+    comparison.added.length ? `${formatNumber(comparison.added.length)} added` : undefined,
+    comparison.removed.length ? `${formatNumber(comparison.removed.length)} removed` : undefined,
+    comparison.shared.length ? `${formatNumber(comparison.shared.length)} shared` : undefined,
+    attemptChangeStatsLabel(comparison.right)
+  ].filter((part): part is string => Boolean(part));
+
+  return (
+    <div className="task-worktree-diff-details" aria-label="Attempt file-level comparison">
+      <div className="task-worktree-diff-details-heading">
+        <FileText size={12} />
+        <span>File delta</span>
+        <strong>{counters.join(" - ") || "No changed paths recorded"}</strong>
+      </div>
+      {comparison.pathDeltas.length > 0 ? (
+        <ul>
+          {visibleDeltas.map((delta) => (
+            <li key={delta.path} className={`state-${delta.state}`}>
+              <span>{attemptPathDeltaLabel(delta.state)}</span>
+              <strong title={delta.path}>{truncateMiddle(delta.path, 54)}</strong>
+              <small title={attemptPathDeltaSources(delta)}>{attemptPathDeltaSources(delta)}</small>
+            </li>
+          ))}
+          {hiddenCount > 0 ? (
+            <li className="state-hidden">
+              <span>More</span>
+              <strong>
+                {formatNumber(hiddenCount)} more path{hiddenCount === 1 ? "" : "s"}
+              </strong>
+              <small>Open patch preview for full diff evidence.</small>
+            </li>
+          ) : null}
+        </ul>
+      ) : (
+        <p>No per-file diff evidence was stored for these attempts.</p>
+      )}
+    </div>
+  );
+}
+
+function attemptComparisonForRuns(runs: AgentTaskRun[], selectedRun: AgentTaskRun, currentRun: AgentTaskRun) {
+  if (selectedRun.id !== currentRun.id) {
+    return { from: selectedRun, to: currentRun };
+  }
+  const selectedIndex = runs.findIndex((run) => run.id === selectedRun.id);
+  const previous = selectedIndex > 0 ? runs[selectedIndex - 1] : undefined;
+  return previous ? { from: previous, to: currentRun } : undefined;
+}
+
+function attemptPromptLabel(run: AgentTaskRun) {
+  return run.promptPreview ? truncateMiddle(run.promptPreview, 70) : "(no prompt)";
+}
+
+function shortRunId(id: string) {
+  return truncateMiddle(id, 18);
+}
+
+function attemptVerificationLabel(run: AgentTaskRun) {
+  const verification = run.verification;
+  if (!verification) {
+    return "No verification captured";
+  }
+  const stats = [
+    `${verificationStatusLabel(verification.status)}`,
+    `${formatNumber(verification.commandCount)} cmd`,
+    verification.failedCommandCount ? `${formatNumber(verification.failedCommandCount)} failed` : undefined,
+    verification.timedOutCommandCount ? `${formatNumber(verification.timedOutCommandCount)} timed out` : undefined,
+    verification.parsedReportCount ? `${formatNumber(verification.parsedReportCount)} reports` : undefined,
+    verification.failedReportCount ? `${formatNumber(verification.failedReportCount)} failed reports` : undefined
+  ].filter((part): part is string => Boolean(part));
+  return stats.join(" - ");
+}
+
+function attemptCommandEvidenceLabel(run: AgentTaskRun) {
+  const commands = run.artifacts.filter((artifact) => artifact.kind === "command_output");
+  if (!commands.length) {
+    return "No command evidence";
+  }
+  const failed = commands.filter((artifact) => artifact.exitCode !== undefined && artifact.exitCode !== 0).length;
+  const latest = commands.at(-1);
+  const command = latest?.command ? truncateMiddle(latest.command, 42) : (latest?.title ?? "command");
+  return `${formatNumber(commands.length)} command${commands.length === 1 ? "" : "s"}${failed ? `, ${formatNumber(failed)} failed` : ""} - ${command}`;
+}
+
+function attemptReportEvidenceLabel(run: AgentTaskRun) {
+  const reports = run.artifacts.flatMap((artifact) => (artifact.kind === "command_output" ? (artifact.testReports ?? []) : []));
+  if (!reports.length) {
+    return "No parsed reports";
+  }
+  const failed = reports.filter((report) => report.status === "failed").length;
+  const latest = reports.at(-1);
+  return `${formatNumber(reports.length)} report${reports.length === 1 ? "" : "s"}${failed ? `, ${formatNumber(failed)} failed` : ""} - ${latest?.summary ?? latest?.path ?? "report"}`;
+}
+
+function attemptWorktreeChangeLabel(run: AgentTaskRun) {
+  const diffLabel = worktreeDiffLabel(run.worktree?.diff);
+  if (diffLabel) {
+    return diffLabel;
+  }
+  const patch = run.worktree?.patchPreview;
+  if (patch) {
+    return `Patch ${formatBytes(patch.bytes)}${patch.truncated ? " truncated" : ""}`;
+  }
+  const patchArtifacts = run.artifacts.filter((artifact) => artifact.kind === "patch" || artifact.kind === "file_change");
+  if (patchArtifacts.length) {
+    return `${formatNumber(patchArtifacts.length)} edit artifact${patchArtifacts.length === 1 ? "" : "s"}`;
+  }
+  return "No change summary";
+}
+
+function attemptReplayLabel(run: AgentTaskRun) {
+  return run.worktree?.replayOfTaskRunId ? `Replay of ${shortRunId(run.worktree.replayOfTaskRunId)}` : "Not a replay";
+}
+
+function replayOutcomeSummary(group: AgentTaskRunReplayOutcomeGroup) {
+  const parts = [
+    group.failedOutcomeCount ? `${formatNumber(group.failedOutcomeCount)} failed` : undefined,
+    group.passedOutcomeCount ? `${formatNumber(group.passedOutcomeCount)} passed` : undefined,
+    group.unknownOutcomeCount ? `${formatNumber(group.unknownOutcomeCount)} unknown` : undefined
+  ].filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(", ") : `${formatNumber(group.outcomes.length)} replay${group.outcomes.length === 1 ? "" : "s"}`;
+}
+
+function attemptChangeStatsLabel(summary: AgentTaskRunDiffComparison["right"]) {
+  const stats = [
+    summary.insertions ? `+${formatNumber(summary.insertions)}` : undefined,
+    summary.deletions ? `-${formatNumber(summary.deletions)}` : undefined,
+    summary.patchPreviewBytes ? `patch ${formatBytes(summary.patchPreviewBytes)}` : undefined,
+    summary.patchPreviewTruncated ? "truncated" : undefined
+  ].filter((part): part is string => Boolean(part));
+  return stats.join(" ");
+}
+
+function attemptPathDeltaLabel(state: AgentTaskRunDiffComparison["pathDeltas"][number]["state"]) {
+  switch (state) {
+    case "added":
+      return "Current";
+    case "removed":
+      return "Selected";
+    case "shared":
+      return "Both";
+    default:
+      return "Path";
+  }
+}
+
+function attemptPathDeltaSources(delta: AgentTaskRunDiffComparison["pathDeltas"][number]) {
+  const left = delta.leftSources.length ? `selected: ${delta.leftSources.join(", ")}` : undefined;
+  const right = delta.rightSources.length ? `current: ${delta.rightSources.join(", ")}` : undefined;
+  return [left, right].filter((part): part is string => Boolean(part)).join(" | ") || "No source label";
+}
+
+function pullRequestWatchKey(sessionId: string, taskRunId: string) {
+  return `${sessionId}:${taskRunId}`;
+}
+
+function pullRequestWatchForRun(
+  sessionId: string | undefined,
+  run: AgentTaskRun,
+  watches: Record<string, PullRequestWatch>,
+  busy: Record<string, boolean>
+): PullRequestWatchView {
+  if (!sessionId) {
+    return { active: false, refreshing: false };
+  }
+  const key = pullRequestWatchKey(sessionId, run.id);
+  const watch = watches[key];
+  return {
+    active: Boolean(watch),
+    refreshing: Boolean(busy[key]),
+    lastRefreshedAt: watch?.lastRefreshedAt,
+    lastError: watch?.lastError
+  };
+}
+
+function pullRequestWatchStatusLabel(watch: PullRequestWatchView) {
+  if (!watch.active && !watch.refreshing) {
+    return "";
+  }
+  if (watch.lastError) {
+    return `Watch error: ${watch.lastError}`;
+  }
+  if (watch.refreshing) {
+    return "Refreshing PR status...";
+  }
+  if (watch.lastRefreshedAt) {
+    return `Watching in background - last refreshed ${formatDateTime(watch.lastRefreshedAt)}`;
+  }
+  return "Watching in background";
+}
+
+function TaskWorktreePullRequestCard({
+  run,
+  pullRequest,
+  reviewPrompt,
+  busy,
+  watch,
+  onAction,
+  onToggleWatch,
+  onDraftRemediation
+}: {
+  run: AgentTaskRun;
+  pullRequest: AgentTaskRunWorktreePullRequest;
+  reviewPrompt?: string;
+  busy: boolean;
+  watch: PullRequestWatchView;
+  onAction: (run: AgentTaskRun, action: TaskWorktreeAction, options?: TaskWorktreeActionOptions) => void;
+  onToggleWatch: (run: AgentTaskRun) => void;
+  onDraftRemediation: (draftText: string, options?: DraftPromptOptions) => void;
+}) {
+  const watchStatus = pullRequestWatchStatusLabel(watch);
+  return (
+    <div className="task-worktree-pr">
+      <div className="task-worktree-pr-heading">
+        <GitPullRequest size={13} />
+        <strong>{pullRequest.url ? "Pull request created" : "Pull request draft"}</strong>
+        <span>{formatDateTime(pullRequest.createdAt ?? pullRequest.preparedAt)}</span>
+      </div>
+      <p>{pullRequest.title}</p>
+      <div className="task-worktree-pr-meta">
+        <span>{pullRequest.branch}</span>
+        {pullRequest.baseBranch ? <span>base {pullRequest.baseBranch}</span> : null}
+        {pullRequest.remoteName ? <span>remote {pullRequest.remoteName}</span> : null}
+      </div>
+      {pullRequest.pushCommand ? <code>{pullRequest.pushCommand}</code> : null}
+      {pullRequest.createCommand ? <code>{pullRequest.createCommand}</code> : null}
+      {pullRequest.url ? <code>{pullRequest.url}</code> : null}
+      {pullRequest.review ? <TaskWorktreePullRequestReview review={pullRequest.review} /> : null}
+      {pullRequest.url || reviewPrompt ? (
+        <div className="task-worktree-pr-actions">
+          {pullRequest.url ? (
+            <button
+              type="button"
+              disabled={busy}
+              title="Refresh this pull request's review and check status with GitHub CLI"
+              onClick={() => onAction(run, "refresh_pr")}
+            >
+              <RefreshCw size={12} />
+              Refresh PR
+            </button>
+          ) : null}
+          {pullRequest.review?.checkItems?.some(
+            (item) => item.logCommand && (item.bucket === "failed" || item.bucket === "cancelled" || item.bucket === "unknown")
+          ) ? (
+            <button
+              type="button"
+              disabled={busy}
+              title="Fetch failed, cancelled, or unknown PR check evidence and save it on the task run"
+              onClick={() => onAction(run, "fetch_pr_check_logs")}
+            >
+              <TerminalSquare size={12} />
+              Fetch evidence
+            </button>
+          ) : null}
+          {pullRequest.url ? (
+            <button
+              type="button"
+              disabled={busy || watch.refreshing}
+              title={
+                watch.active
+                  ? "Stop background refresh for this pull request"
+                  : "Refresh this pull request in the background every 90 seconds"
+              }
+              onClick={() => onToggleWatch(run)}
+            >
+              {watch.refreshing ? <span className="pulse-dot" /> : <RefreshCw size={12} />}
+              {watch.active ? "Watching" : "Watch PR"}
+            </button>
+          ) : null}
+          {reviewPrompt ? (
+            <button
+              type="button"
+              disabled={busy}
+              title="Draft a prompt to review this PR and continue the task worktree"
+              onClick={() =>
+                onDraftRemediation(reviewPrompt, {
+                  worktreeContinuation: { taskRunId: run.id, branch: run.worktree?.branch },
+                  status: "Drafted PR review prompt for task worktree",
+                  confirmLabel: "Replace the current composer draft with a PR review prompt for this task worktree?"
+                })
+              }
+            >
+              <Search size={12} />
+              Review PR
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {watchStatus ? (
+        <small className={watch.lastError ? "task-worktree-pr-watch-status error" : "task-worktree-pr-watch-status"}>{watchStatus}</small>
+      ) : null}
+      {!pullRequest.createCommand ? <small>Add an origin remote and base branch before creating this PR with GitHub CLI.</small> : null}
+    </div>
+  );
+}
+
+function TaskWorktreePullRequestReview({ review }: { review: AgentTaskRunWorktreePullRequestReview }) {
+  const readiness = buildTaskRunPullRequestReadiness(review);
+  return (
+    <div className="task-worktree-pr-review">
+      <div className="task-worktree-pr-review-heading">
+        <ListChecks size={12} />
+        <strong>{review.summary}</strong>
+      </div>
+      <div className="task-worktree-pr-meta">
+        {review.state ? <span>state {formatPrStatusToken(review.state)}</span> : null}
+        {review.isDraft !== undefined ? <span>{review.isDraft ? "draft" : "ready for review"}</span> : null}
+        {review.reviewDecision ? <span>review {formatPrStatusToken(review.reviewDecision)}</span> : null}
+        {review.mergeStateStatus ? <span>merge {formatPrStatusToken(review.mergeStateStatus)}</span> : null}
+        <span>{review.checkSummary}</span>
+        <span>{formatDateTime(review.updatedAt)}</span>
+      </div>
+      <TaskWorktreePullRequestReadiness readiness={readiness} />
+      {review.notifications?.length ? <TaskWorktreePullRequestNotifications items={review.notifications} /> : null}
+      {review.checkItems?.length ? <TaskWorktreePullRequestChecks items={review.checkItems} /> : null}
+      {review.feedback ? <TaskWorktreePullRequestFeedback feedback={review.feedback} /> : null}
+    </div>
+  );
+}
+
+function TaskWorktreePullRequestReadiness({ readiness }: { readiness: AgentTaskRunPullRequestReadiness }) {
+  return (
+    <div className={`task-worktree-pr-readiness ${readiness.status}`}>
+      {pullRequestReadinessIcon(readiness.status)}
+      <strong>{readiness.label}</strong>
+      <span>{readiness.summary}</span>
+    </div>
+  );
+}
+
+function TaskWorktreePullRequestNotifications({ items }: { items: AgentTaskRunWorktreePullRequestReviewNotification[] }) {
+  return (
+    <div className="task-worktree-pr-notifications">
+      <div className="task-worktree-pr-feedback-heading">
+        <Bell size={12} />
+        <strong>PR updates</strong>
+      </div>
+      <ul>
+        {items.map((item, index) => (
+          <li key={`${item.summary}-${item.detail ?? ""}-${item.createdAt}-${index}`} className={item.level}>
+            <span>{item.summary}</span>
+            {item.detail ? <p>{item.detail}</p> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function TaskWorktreePullRequestFeedback({ feedback }: { feedback: AgentTaskRunWorktreePullRequestFeedback }) {
+  return (
+    <div className="task-worktree-pr-feedback">
+      <div className="task-worktree-pr-feedback-heading">
+        <MessageSquare size={12} />
+        <strong>{feedback.summary}</strong>
+      </div>
+      {feedback.threadFetchError ? <p>Review thread details unavailable: {feedback.threadFetchError}</p> : null}
+      {feedback.items.length > 0 ? (
+        <ul>
+          {feedback.items.map((item, index) => (
+            <li key={`${item.kind}-${item.url ?? item.updatedAt ?? item.createdAt ?? index}`}>
+              <span>{pullRequestFeedbackLabel(item)}</span>
+              {item.body ? <p>{item.body}</p> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function TaskWorktreePullRequestChecks({ items }: { items: AgentTaskRunWorktreePullRequestCheckItem[] }) {
+  return (
+    <div className="task-worktree-pr-feedback">
+      <div className="task-worktree-pr-feedback-heading">
+        <ListChecks size={12} />
+        <strong>Check evidence</strong>
+      </div>
+      <ul>
+        {items.map((item, index) => (
+          <li key={`${item.name}-${item.detailsUrl ?? item.completedAt ?? index}`}>
+            <span>{pullRequestCheckLabel(item)}</span>
+            {item.detailsUrl ? <p>{item.detailsUrl}</p> : null}
+            {item.logCommand ? (
+              <p>
+                {item.logSource === "details_url" ? "Check details capture" : "Log command"}: {item.logCommand}
+              </p>
+            ) : null}
+            {item.logArtifactId ? <p>Saved evidence artifact: {item.logArtifactId}</p> : null}
+            {item.logError ? <p>Evidence fetch issue: {item.logError}</p> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function pullRequestCheckLabel(item: AgentTaskRunWorktreePullRequestCheckItem) {
+  const details = [
+    item.bucket,
+    item.conclusion ? `conclusion ${formatPrStatusToken(item.conclusion)}` : undefined,
+    item.state ? `state ${formatPrStatusToken(item.state)}` : undefined,
+    item.status ? `status ${formatPrStatusToken(item.status)}` : undefined
+  ].filter((part): part is string => Boolean(part));
+  return `${item.name} - ${details.join(", ")}`;
+}
+
+function pullRequestFeedbackLabel(item: AgentTaskRunWorktreePullRequestFeedbackItem) {
+  const parts = [
+    item.kind === "review" ? "Review" : item.kind === "thread" ? "Thread" : "Comment",
+    item.state ? formatPrStatusToken(item.state) : undefined,
+    item.author ? `by ${item.author}` : undefined,
+    item.path ? `at ${item.path}${item.line !== undefined ? `:${item.line}` : ""}` : undefined
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" ");
+}
+
+function pullRequestReadinessIcon(status: AgentTaskRunPullRequestReadiness["status"]) {
+  switch (status) {
+    case "ready":
+      return <Check size={12} />;
+    case "blocked":
+      return <AlertTriangle size={12} />;
+    default:
+      return <Info size={12} />;
+  }
+}
+
+function TaskRunMeta({ run, compact = false }: { run: AgentTaskRun; compact?: boolean }) {
+  const capabilityLabels = run.capabilities.map(capabilityLabel);
+  return (
+    <div className={compact ? "task-run-meta compact" : "task-run-meta"}>
+      <span className={`task-run-state ${activityStatusForTaskRun(run)}`}>{taskRunStatusLabel(run.status)}</span>
+      {run.providerName || run.model ? (
+        <span title={run.modelSelectionReason}>{[run.providerName, run.model].filter(Boolean).join(" - ")}</span>
+      ) : null}
+      {run.planMode?.enabled ? <span>Plan approval</span> : null}
+      {run.loop?.enabled ? <span>Loop {run.loop.maxIterations} max</span> : null}
+      {run.worktree?.enabled ? (
+        <span title={run.worktree.path ?? run.worktree.error}>
+          {run.worktree.replayOfTaskRunId
+            ? `Replay ${run.worktree.branch ?? "worktree"} from ${shortRunId(run.worktree.replayOfTaskRunId)}`
+            : run.worktree.continuedFromTaskRunId
+              ? `Continued ${run.worktree.branch ?? "worktree"}`
+              : run.worktree.plannedFromTaskRunId
+                ? `Plan worktree ${shortRunId(run.worktree.plannedFromTaskRunId)}`
+                : run.worktree.status === "ready"
+                  ? `Worktree ${run.worktree.branch ?? "ready"}`
+                  : `Worktree ${worktreeStatusLabel(run.worktree.status)}`}
+        </span>
+      ) : null}
+      {capabilityLabels.length > 0 ? (
+        <span>{compact ? capabilityLabels.slice(0, 3).join(", ") : capabilityLabels.join(", ")}</span>
+      ) : (
+        <span>No tools yet</span>
+      )}
+      {run.plan?.items.length ? (
+        <span>
+          {run.plan.items.length} plan step{run.plan.items.length === 1 ? "" : "s"}
+        </span>
+      ) : null}
+      {run.verification ? <span>{verificationMetaLabel(run.verification)}</span> : null}
+      {run.artifacts.length > 0 ? (
+        <span>
+          {run.artifacts.length} artifact{run.artifacts.length === 1 ? "" : "s"}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function TaskRunLoop({ loop }: { loop: NonNullable<AgentTaskRun["loop"]> }) {
+  const iterations = loop.iterations ?? [];
+  const latest = iterations.at(-1);
+  const summary = [
+    `${loop.iteration ?? iterations.length}/${loop.maxIterations}`,
+    loop.status ? agentLoopRunStatusLabel(loop.status) : undefined,
+    loop.lastDecision ? `last ${loop.lastDecision}` : undefined
+  ].filter((item): item is string => Boolean(item));
+
+  return (
+    <div className="task-run-loop">
+      <div className="task-run-loop-heading">
+        <Activity size={13} />
+        <span>Loop iterations</span>
+        <strong>{summary.join(" - ")}</strong>
+      </div>
+      <ol>
+        {iterations.map((iteration) => (
+          <li key={`${iteration.iteration}-${iteration.startedAt}`} className={iteration.status}>
+            <div>
+              <strong>Iteration {iteration.iteration}</strong>
+              <span>{agentLoopIterationStatusLabel(iteration.status)}</span>
+              {iteration.decision ? <span>decision {iteration.decision}</span> : null}
+              {iteration.toolCallCount !== undefined ? (
+                <span>
+                  {iteration.toolCallCount} tool{iteration.toolCallCount === 1 ? "" : "s"}
+                </span>
+              ) : null}
+              {iteration.artifactCount !== undefined ? (
+                <span>
+                  {iteration.artifactCount} artifact{iteration.artifactCount === 1 ? "" : "s"}
+                </span>
+              ) : null}
+            </div>
+            {iteration.error || iteration.outputPreview ? <p>{iteration.error ?? iteration.outputPreview}</p> : null}
+          </li>
+        ))}
+      </ol>
+      {latest?.status === "running" ? <p className="task-run-loop-live">Current iteration is still running.</p> : null}
+    </div>
+  );
+}
+
+function TaskRunVerification({ verification }: { verification: AgentTaskRunVerification }) {
+  const counters = [
+    `${verification.commandCount} command${verification.commandCount === 1 ? "" : "s"}`,
+    verification.failedCommandCount > 0
+      ? `${verification.failedCommandCount} failed exit${verification.failedCommandCount === 1 ? "" : "s"}`
+      : null,
+    verification.timedOutCommandCount && verification.timedOutCommandCount > 0 ? `${verification.timedOutCommandCount} timed out` : null,
+    verification.parsedReportCount > 0
+      ? `${verification.parsedReportCount} report${verification.parsedReportCount === 1 ? "" : "s"}`
+      : null,
+    verification.failedReportCount > 0
+      ? `${verification.failedReportCount} failed report${verification.failedReportCount === 1 ? "" : "s"}`
+      : null
+  ].filter((counter): counter is string => Boolean(counter));
+
+  return (
+    <div className={`task-run-verification ${verification.status}`}>
+      <div className="task-run-verification-heading">
+        <Activity size={13} />
+        <span>Verification</span>
+        <strong>{verificationStatusLabel(verification.status)}</strong>
+        <time>{formatDateTime(verification.updatedAt)}</time>
+      </div>
+      <p>{verification.summary}</p>
+      {counters.length > 0 ? (
+        <div className="task-run-verification-counters">
+          {counters.map((counter) => (
+            <span key={counter}>{counter}</span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TaskRunPlan({
+  plan,
+  planReview,
+  approvalPrompt,
+  worktreePrompt,
+  canCreateWorktree,
+  actionBusyKey,
+  runId,
+  onDraftApproval,
+  onDraftWorktreeApproval,
+  onPlanAction
+}: {
+  plan: NonNullable<AgentTaskRun["plan"]>;
+  planReview?: AgentTaskRun["planReview"];
+  approvalPrompt?: string;
+  worktreePrompt?: string;
+  canCreateWorktree?: boolean;
+  actionBusyKey?: string | null;
+  runId?: string;
+  onDraftApproval?: (draftText: string) => void;
+  onDraftWorktreeApproval?: (draftText: string) => void;
+  onPlanAction?: (action: TaskRunPlanAction) => void;
+}) {
+  const reviewStatus = planReview?.status;
+  const isPlanActionBusy = Boolean(runId && actionBusyKey?.startsWith(`${runId}:`));
+  return (
+    <div className="task-run-plan">
+      <div className="task-run-plan-heading">
+        <ListChecks size={13} />
+        <span>Plan</span>
+        <time>{formatDateTime(plan.updatedAt)}</time>
+      </div>
+      {planReview ? (
+        <div className={`task-run-plan-review ${planReview.status}`}>
+          <strong>{planReviewStatusLabel(planReview.status)}</strong>
+          <span>{formatDateTime(planReview.updatedAt)}</span>
+        </div>
+      ) : null}
+      {plan.summary ? <p>{plan.summary}</p> : null}
+      <ol>
+        {plan.items.map((item, index) => (
+          <li key={`${item.text}-${index}`} className={item.status ? `status-${item.status}` : undefined}>
+            <span>{planItemStatusLabel(item.status)}</span>
+            <strong>{item.text}</strong>
+          </li>
+        ))}
+      </ol>
+      {onPlanAction && runId && reviewStatus !== "approved" ? (
+        <div className="task-run-plan-actions">
+          <button type="button" className="secondary-command" disabled={isPlanActionBusy} onClick={() => onPlanAction("approve")}>
+            Approve
+          </button>
+          <button type="button" className="secondary-command" disabled={isPlanActionBusy} onClick={() => onPlanAction("request_revision")}>
+            Revise
+          </button>
+          <button type="button" className="secondary-command" disabled={isPlanActionBusy} onClick={() => onPlanAction("cancel")}>
+            Cancel
+          </button>
+        </div>
+      ) : null}
+      {approvalPrompt && onDraftApproval && reviewStatus === "approved" ? (
+        <div className="task-run-plan-actions">
+          <button type="button" className="secondary-command" onClick={() => onDraftApproval(approvalPrompt)}>
+            Use approved plan
+          </button>
+          {worktreePrompt && onDraftWorktreeApproval ? (
+            <button
+              type="button"
+              className="secondary-command"
+              disabled={!canCreateWorktree}
+              title={
+                canCreateWorktree
+                  ? "Draft this approved plan and arm a new task worktree"
+                  : "Select a git project before using task worktrees"
+              }
+              onClick={() => onDraftWorktreeApproval(worktreePrompt)}
+            >
+              Start worktree
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function buildTaskRunPlanApprovalPrompt(run: AgentTaskRun, options: { worktree?: boolean } = {}) {
+  if (!run.planMode?.enabled || !run.plan || (!run.plan.summary && run.plan.items.length === 0)) {
+    return undefined;
+  }
+  const lines = [
+    options.worktree
+      ? `Proceed with the approved plan from Arivu task run ${run.id} in a new isolated task worktree.`
+      : `Proceed with the approved plan from Arivu task run ${run.id}.`,
+    options.worktree
+      ? "Use the task worktree for edits and verification, while keeping the work scoped to the approved plan."
+      : "Use normal tools, edits, and verification as needed now, while keeping the work scoped to the approved plan.",
+    run.promptPreview ? `Original request: ${run.promptPreview}` : undefined,
+    "",
+    "Approved plan:",
+    run.plan.summary ? `- Summary: ${run.plan.summary}` : undefined,
+    ...run.plan.items.map((item, index) => `${index + 1}. ${item.text}`),
+    "",
+    "Before editing, re-check any relevant files if needed. After changes, run the first focused verification that fits the plan and summarize the result."
+  ].filter((line): line is string => line !== undefined);
+  return lines.join("\n");
+}
+
+function ActivityRow({
+  item,
+  defaultCollapsed,
+  evidenceOpenBusy,
+  onOpenEvidence,
+  onDraftRemediation
+}: {
+  item: ActivityItem;
+  defaultCollapsed?: boolean;
+  evidenceOpenBusy?: string | null;
+  onOpenEvidence?: (link: ActivityEvidenceLink) => void;
+  onDraftRemediation?: (draftText: string, options?: DraftPromptOptions) => void;
+}) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed ?? item.kind === "system");
-  const diff = buildActivityDiffPreview(item);
+  const diff = item.diffPreview ?? buildActivityDiffPreview(item);
+  const evidenceLinks = item.evidenceLinks ?? [];
+  const showEvidenceActions =
+    (evidenceLinks.length > 0 && onOpenEvidence) || ((item.remediationPrompt || item.rollbackPrompt) && onDraftRemediation);
 
   return (
     <article className={activityRowClassName(item, collapsed)}>
@@ -3503,17 +6588,151 @@ function ActivityRow({ item, defaultCollapsed }: { item: ActivityItem; defaultCo
         {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         <span>{item.kind}</span>
         <strong>{item.title}</strong>
+        {item.policy ? <ActivityPolicyChip policy={item.policy} /> : null}
         {item.status ? <span className={`activity-status ${item.status}`}>{activityStatusLabel(item.status)}</span> : null}
       </button>
       {!collapsed ? (
         <div className="activity-body">
           {item.summary ? <p className="activity-summary">{item.summary}</p> : null}
+          {item.policy ? <ActivityPolicyDetails policy={item.policy} /> : null}
+          {showEvidenceActions ? (
+            <div className="activity-evidence-actions" aria-label="Task-run evidence actions">
+              {onOpenEvidence
+                ? evidenceLinks.map((link) => (
+                    <button
+                      key={link.id}
+                      className="activity-evidence-button"
+                      type="button"
+                      disabled={evidenceOpenBusy === link.id}
+                      title={link.title}
+                      onClick={() => onOpenEvidence(link)}
+                    >
+                      <FileText size={13} />
+                      <span>{evidenceOpenBusy === link.id ? "Opening..." : link.label}</span>
+                    </button>
+                  ))
+                : null}
+              {item.remediationPrompt && onDraftRemediation ? (
+                <button
+                  className="activity-evidence-button repair"
+                  type="button"
+                  title="Draft a repair prompt from this report evidence"
+                  onClick={() => onDraftRemediation(item.remediationPrompt ?? "")}
+                >
+                  <Wrench size={13} />
+                  <span>Draft fix</span>
+                </button>
+              ) : null}
+              {item.rollbackPrompt && onDraftRemediation ? (
+                <button
+                  className="activity-evidence-button repair"
+                  type="button"
+                  title="Draft a revert prompt for this edit artifact"
+                  onClick={() =>
+                    onDraftRemediation(item.rollbackPrompt ?? "", {
+                      status: "Drafted revert prompt from edit evidence",
+                      confirmLabel: "Replace the current composer draft with a revert prompt from this edit evidence?"
+                    })
+                  }
+                >
+                  <RotateCcw size={13} />
+                  <span>Draft revert</span>
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {item.imagePreview ? <ActivityScreenshotPreview preview={item.imagePreview} /> : null}
           {diff ? <DiffBlock preview={diff} /> : item.detail ? <pre>{item.detail}</pre> : null}
         </div>
       ) : null}
     </article>
   );
+}
+
+function ActivityPolicyChip({ policy, compact = false }: { policy: ActivityPolicyDetail; compact?: boolean }) {
+  const label = compact ? activityPolicyShortLabel(policy) : activityPolicyLabel(policy);
+  return (
+    <span className={`activity-policy-chip ${policy.effect ?? "inferred"}`} title={activityPolicyTitle(policy)}>
+      <Shield size={compact ? 10 : 11} />
+      {label}
+    </span>
+  );
+}
+
+function ActivityPolicyDetails({ policy }: { policy: ActivityPolicyDetail }) {
+  const metadata = [
+    policy.trustMode ? `Trust: ${trustModeLabel(policy.trustMode)}` : undefined,
+    policy.status ? `Audit: ${approvalStatusLabel(policy.status)}` : undefined,
+    policy.effect ? `Effect: ${policyEffectLabel(policy.effect)}` : undefined,
+    policy.override ? `Override: ${policy.override}` : undefined,
+    policy.risky !== undefined ? `Risk: ${policy.risky ? "risky action" : "standard action"}` : undefined,
+    policy.scope ? `Scope: ${approvalScopeLabel(policy.scope)}` : undefined
+  ].filter((item): item is string => Boolean(item));
+  return (
+    <div className={`activity-policy-detail ${policy.effect ?? "inferred"}`}>
+      <div>
+        <Shield size={13} />
+        <span>{policy.capabilityLabel}</span>
+        <strong>{activityPolicyLabel(policy)}</strong>
+      </div>
+      {policy.reason ? <p>{policy.reason}</p> : <p>{activityPolicyFallbackReason(policy)}</p>}
+      {policy.summary ? <small>{policy.summary}</small> : null}
+      {metadata.length > 0 ? (
+        <div className="activity-policy-meta">
+          {metadata.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function activityPolicyShortLabel(policy: ActivityPolicyDetail) {
+  if (policy.effect) {
+    return `${policy.capabilityLabel} · ${policyEffectLabel(policy.effect)}`;
+  }
+  return policy.capabilityLabel;
+}
+
+function activityPolicyLabel(policy: ActivityPolicyDetail) {
+  if (policy.label && policy.effect) {
+    return `${policy.label} · ${policyEffectLabel(policy.effect)}`;
+  }
+  if (policy.label) {
+    return policy.label;
+  }
+  if (policy.effect) {
+    return policyEffectLabel(policy.effect);
+  }
+  return policy.source === "inferred" ? "Inferred capability" : "Recorded capability";
+}
+
+function activityPolicyTitle(policy: ActivityPolicyDetail) {
+  const lines = [
+    `Capability: ${policy.capabilityLabel}`,
+    policy.effect ? `Effect: ${policyEffectLabel(policy.effect)}` : undefined,
+    policy.status ? `Audit: ${approvalStatusLabel(policy.status)}` : undefined,
+    policy.trustMode ? `Trust mode: ${trustModeLabel(policy.trustMode)}` : undefined,
+    policy.override ? `Workspace override: ${policy.override}` : undefined,
+    policy.scope ? `Scope: ${approvalScopeLabel(policy.scope)}` : undefined,
+    policy.reason
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n");
+}
+
+function approvalScopeLabel(scope: AgentTaskRunApprovalScope) {
+  return [scope.label, scope.value].filter(Boolean).join(": ");
+}
+
+function activityPolicyFallbackReason(policy: ActivityPolicyDetail) {
+  if (policy.source === "inferred") {
+    return "Capability was inferred from the tool name because this row was restored from transcript protocol.";
+  }
+  if (policy.source === "tool") {
+    return "Capability was recorded on the task run; no matching approval audit was found for this tool call.";
+  }
+  return "Policy audit details were recorded on the task run.";
 }
 
 function LatestActivityScreenshot({ item }: { item: ActivityItem }) {
@@ -3533,7 +6752,13 @@ function LatestActivityScreenshot({ item }: { item: ActivityItem }) {
   );
 }
 
-function ActivityScreenshotPreview({ preview, compact = false }: { preview: NonNullable<ActivityItem["imagePreview"]>; compact?: boolean }) {
+function ActivityScreenshotPreview({
+  preview,
+  compact = false
+}: {
+  preview: NonNullable<ActivityItem["imagePreview"]>;
+  compact?: boolean;
+}) {
   const [imageState, setImageState] = useState<{ src: string | null; failed: boolean }>({ src: null, failed: false });
 
   useEffect(() => {
@@ -3598,6 +6823,9 @@ function activityStatusLabel(status: NonNullable<ActivityItem["status"]>) {
   if (status === "done") {
     return "Done";
   }
+  if (status === "failed") {
+    return "Failed";
+  }
   return "Waiting";
 }
 
@@ -3611,7 +6839,10 @@ function localImageSrc(filePath: string) {
     return `file:///${normalized.split("/").map(encodeURIComponent).join("/")}`;
   }
   if (normalized.startsWith("/")) {
-    return `file://${normalized.split("/").map((part) => encodeURIComponent(part)).join("/")}`;
+    return `file://${normalized
+      .split("/")
+      .map((part) => encodeURIComponent(part))
+      .join("/")}`;
   }
   return normalized;
 }
@@ -3728,7 +6959,8 @@ function SettingsView({
   focusSection,
   onFocusSettled,
   onSkillsChanged,
-  onSaved
+  onSaved,
+  onStateUpdated
 }: {
   state: DesktopState;
   skills: SkillSummary[];
@@ -3737,18 +6969,28 @@ function SettingsView({
   onFocusSettled: () => void;
   onSkillsChanged: (skills: SkillSummary[], skillsRoot: string) => void;
   onSaved: (state: DesktopState) => void;
+  onStateUpdated: (state: DesktopState) => void;
 }) {
   const initialProviders = providerFormsFromConfig(state.config);
   const [providers, setProviders] = useState<ProviderFormState[]>(initialProviders);
   const [activeProviderId, setActiveProviderId] = useState(
     state.config.activeProviderId && initialProviders.some((provider) => provider.id === state.config.activeProviderId)
       ? state.config.activeProviderId
-      : initialProviders[0]?.id ?? "current"
+      : (initialProviders[0]?.id ?? "current")
   );
   const [tavilyApiKey, setTavilyApiKey] = useState("");
+  const [browserTaskProviderId, setBrowserTaskProviderId] = useState(state.config.browserTaskModel?.providerId ?? "");
+  const [browserTaskModelId, setBrowserTaskModelId] = useState(state.config.browserTaskModel?.model ?? "");
+  const [browserTaskMaxSteps, setBrowserTaskMaxSteps] = useState(
+    state.config.browserTaskModel?.maxSteps !== undefined ? String(state.config.browserTaskModel.maxSteps) : ""
+  );
+  const [browserTaskStepDelayMs, setBrowserTaskStepDelayMs] = useState(
+    state.config.browserTaskModel?.stepDelayMs !== undefined ? String(state.config.browserTaskModel.stepDelayMs) : ""
+  );
   const [trustMode, setTrustMode] = useState<TrustMode>(state.config.trustMode);
   const [mcpServersText, setMcpServersText] = useState(() => JSON.stringify(state.config.mcpServers ?? {}, null, 2));
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [browserTaskModelDialogOpen, setBrowserTaskModelDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [doctorRunning, setDoctorRunning] = useState(false);
@@ -3760,12 +7002,39 @@ function SettingsView({
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillError, setSkillError] = useState<string | null>(null);
   const [skillStatus, setSkillStatus] = useState<string | null>(null);
+  const [worktreeInventory, setWorktreeInventory] = useState<TaskWorktreeInventoryItem[]>([]);
+  const [worktreeInventoryLoading, setWorktreeInventoryLoading] = useState(false);
+  const [worktreeInventoryBusy, setWorktreeInventoryBusy] = useState<string | null>(null);
+  const [worktreeInventoryError, setWorktreeInventoryError] = useState<string | null>(null);
+  const [worktreeInventoryStatus, setWorktreeInventoryStatus] = useState<string | null>(null);
+  const [capabilityPolicies, setCapabilityPolicies] = useState<CapabilityPolicySummary[]>([]);
+  const [capabilityPolicyLoading, setCapabilityPolicyLoading] = useState(false);
+  const [capabilityPolicyError, setCapabilityPolicyError] = useState<string | null>(null);
+  const [capabilityPolicySource, setCapabilityPolicySource] = useState<CapabilityPolicyResult["source"]>("built-in");
+  const [workspacePolicyOverrides, setWorkspacePolicyOverrides] = useState<WorkspaceCapabilityPolicyOverrides>(() =>
+    workspacePolicyOverridesFromConfig(state.config.workspacePolicies, state.workspace.root)
+  );
+  const [workspaceScopeRules, setWorkspaceScopeRules] = useState<WorkspaceScopePolicyRules>(() =>
+    workspaceScopeRulesFromConfig(state.config.workspacePolicies, state.workspace.root)
+  );
+  const [workspacePolicyProfiles, setWorkspacePolicyProfiles] = useState<WorkspacePolicyProfiles>(() =>
+    normalizeWorkspacePolicyProfiles(state.config.workspacePolicyProfiles)
+  );
+  const [workspacePolicyBundle, setWorkspacePolicyBundle] = useState<WorkspacePolicyBundleResult | null>(null);
+  const [workspacePolicyBundleLoading, setWorkspacePolicyBundleLoading] = useState(false);
+  const [workspacePolicyBundleError, setWorkspacePolicyBundleError] = useState<string | null>(null);
   const skillsSectionRef = useRef<HTMLElement | null>(null);
   const selectedProvider = providers.find((provider) => provider.id === activeProviderId) ?? providers[0];
   const baseUrl = selectedProvider?.baseUrl ?? state.config.baseUrl;
   const model = selectedProvider?.model ?? state.config.model;
   const apiKey = selectedProvider?.apiKey ?? "";
   const selectedProviderApiKeyPresent = Boolean(selectedProvider?.apiKeyPresent || apiKey.trim());
+  const browserTaskProvider =
+    (browserTaskProviderId ? providers.find((provider) => provider.id === browserTaskProviderId) : selectedProvider) ?? selectedProvider;
+  const browserTaskBaseUrl = browserTaskProvider?.baseUrl ?? baseUrl;
+  const browserTaskProviderModel = browserTaskProvider?.model ?? model;
+  const browserTaskEffectiveModel = browserTaskModelId.trim() || browserTaskProviderModel;
+  const browserTaskApiKey = browserTaskProvider?.apiKey ?? "";
 
   useEffect(() => {
     if (focusSection !== "skills") {
@@ -3775,10 +7044,14 @@ function SettingsView({
     onFocusSettled();
   }, [focusSection, onFocusSettled]);
 
+  useEffect(() => {
+    void refreshTaskWorktrees();
+    void refreshCapabilityPolicies();
+    void refreshWorkspacePolicyBundle();
+  }, [state.workspace.root]);
+
   function updateSelectedProvider(patch: Partial<ProviderFormState>) {
-    setProviders((current) =>
-      current.map((provider) => (provider.id === activeProviderId ? { ...provider, ...patch } : provider))
-    );
+    setProviders((current) => current.map((provider) => (provider.id === activeProviderId ? { ...provider, ...patch } : provider)));
   }
 
   function addProvider() {
@@ -3788,6 +7061,8 @@ function SettingsView({
       name,
       baseUrl: "",
       model: "",
+      toolCalling: "auto",
+      imageInput: "auto",
       apiKey: ""
     };
     setProviders((current) => [...current, nextProvider]);
@@ -3801,6 +7076,10 @@ function SettingsView({
     const nextProviders = providers.filter((provider) => provider.id !== selectedProvider.id);
     setProviders(nextProviders);
     setActiveProviderId(nextProviders[0]?.id ?? "current");
+    if (browserTaskProviderId === selectedProvider.id) {
+      setBrowserTaskProviderId("");
+      setBrowserTaskModelId("");
+    }
   }
 
   async function save() {
@@ -3814,8 +7093,29 @@ function SettingsView({
         providers: providerPatch.providers,
         baseUrl: providerPatch.activeProvider.baseUrl,
         model: providerPatch.activeProvider.model,
+        toolCalling: providerPatch.activeProvider.toolCalling,
+        imageInput: providerPatch.activeProvider.imageInput,
         trustMode,
-        mcpServers
+        mcpServers,
+        workspacePolicies: updateWorkspacePoliciesForRoot(
+          state.config.workspacePolicies,
+          state.workspace.root,
+          workspacePolicyOverrides,
+          workspaceScopeRules
+        ),
+        workspacePolicyProfiles,
+        browserTaskModel:
+          browserTaskProviderId.trim() ||
+          browserTaskModelId.trim() ||
+          parseOptionalInt(browserTaskMaxSteps) !== undefined ||
+          parseOptionalInt(browserTaskStepDelayMs) !== undefined
+            ? {
+                providerId: browserTaskProviderId.trim() || undefined,
+                model: browserTaskModelId.trim() || undefined,
+                maxSteps: parseOptionalInt(browserTaskMaxSteps),
+                stepDelayMs: parseOptionalInt(browserTaskStepDelayMs)
+              }
+            : null
       };
       if (providerPatch.activeProvider.apiKey?.trim()) {
         patch.apiKey = providerPatch.activeProvider.apiKey.trim();
@@ -3825,6 +7125,12 @@ function SettingsView({
       }
       const next = await window.arivu.saveConfig(patch);
       onSaved(next);
+      const policyResult = await window.arivu.listCapabilityPolicies();
+      setCapabilityPolicies(policyResult.policies);
+      setCapabilityPolicySource(policyResult.source);
+      setWorkspacePolicyOverrides(policyResult.workspaceOverrides);
+      setWorkspaceScopeRules(policyResult.workspaceScopeRules);
+      setWorkspacePolicyProfiles(normalizeWorkspacePolicyProfiles(next.config.workspacePolicyProfiles));
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -3842,17 +7148,46 @@ function SettingsView({
     setDoctorError(null);
     try {
       const report = await window.arivu.runDoctor({
+        activeProviderId: selectedProvider?.id,
         baseUrl,
         model,
         apiKey: apiKey.trim() || undefined,
         tavilyApiKey: tavilyApiKey.trim() || undefined,
+        toolCalling: selectedProvider?.toolCalling ?? "auto",
+        imageInput: selectedProvider?.imageInput ?? "auto",
         trustMode
       });
       setDoctorReport(report);
+      applyDoctorCapabilityObservations(report);
+      if (report.capabilityObservations?.length) {
+        onStateUpdated(await window.arivu.getState());
+      }
     } catch (err) {
       setDoctorError(formatError(err));
     } finally {
       setDoctorRunning(false);
+    }
+  }
+
+  function applyDoctorCapabilityObservations(report: DoctorReport) {
+    if (!selectedProvider || !report.capabilityObservations?.length) {
+      return;
+    }
+
+    const patch: Partial<ProviderFormState> = {};
+    for (const observation of report.capabilityObservations) {
+      if (observation.value !== "disabled") {
+        continue;
+      }
+      if (observation.capability === "toolCalling" && selectedProvider.toolCalling === "auto") {
+        patch.toolCalling = "disabled";
+      }
+      if (observation.capability === "imageInput" && selectedProvider.imageInput === "auto") {
+        patch.imageInput = "disabled";
+      }
+    }
+    if (Object.keys(patch).length > 0) {
+      updateSelectedProvider(patch);
     }
   }
 
@@ -3890,6 +7225,84 @@ function SettingsView({
     }
   }
 
+  async function refreshTaskWorktrees(showStatus = false) {
+    setWorktreeInventoryLoading(true);
+    setWorktreeInventoryError(null);
+    try {
+      const result = await window.arivu.listTaskWorktrees();
+      setWorktreeInventory(result.worktrees);
+      if (showStatus) {
+        setWorktreeInventoryStatus("Task worktrees refreshed");
+      }
+    } catch (err) {
+      setWorktreeInventoryError(formatError(err));
+    } finally {
+      setWorktreeInventoryLoading(false);
+    }
+  }
+
+  async function refreshCapabilityPolicies() {
+    setCapabilityPolicyLoading(true);
+    setCapabilityPolicyError(null);
+    try {
+      const result = await window.arivu.listCapabilityPolicies();
+      setCapabilityPolicies(result.policies);
+      setCapabilityPolicySource(result.source);
+      setWorkspacePolicyOverrides(result.workspaceOverrides);
+      setWorkspaceScopeRules(result.workspaceScopeRules);
+    } catch (err) {
+      setCapabilityPolicyError(formatError(err));
+    } finally {
+      setCapabilityPolicyLoading(false);
+    }
+  }
+
+  async function refreshWorkspacePolicyBundle() {
+    setWorkspacePolicyBundleLoading(true);
+    setWorkspacePolicyBundleError(null);
+    try {
+      setWorkspacePolicyBundle(await window.arivu.readWorkspacePolicyBundle());
+    } catch (err) {
+      setWorkspacePolicyBundle(null);
+      setWorkspacePolicyBundleError(formatError(err));
+    } finally {
+      setWorkspacePolicyBundleLoading(false);
+    }
+  }
+
+  async function openInventoryWorktree(item: TaskWorktreeInventoryItem) {
+    await runInventoryWorktreeAction(item, "open");
+  }
+
+  async function runInventoryWorktreeAction(item: TaskWorktreeInventoryItem, action: TaskWorktreeAction) {
+    if (!["open", "discard", "cleanup", "prepare_pr", "create_pr"].includes(action)) {
+      return;
+    }
+    if (action !== "open" && !confirmInventoryWorktreeAction(item, action)) {
+      return;
+    }
+    const busyKey = `${item.sessionId}:${item.taskRunId}:${action}`;
+    setWorktreeInventoryBusy(busyKey);
+    setWorktreeInventoryError(null);
+    setWorktreeInventoryStatus(null);
+    try {
+      const next = await window.arivu.taskWorktreeAction({
+        sessionId: item.sessionId,
+        taskRunId: item.taskRunId,
+        action
+      });
+      if (action !== "open") {
+        onStateUpdated(next);
+        await refreshTaskWorktrees();
+      }
+      setWorktreeInventoryStatus(taskWorktreeActionStatus(action));
+    } catch (err) {
+      setWorktreeInventoryError(formatError(err));
+    } finally {
+      setWorktreeInventoryBusy((current) => (current === busyKey ? null : current));
+    }
+  }
+
   return (
     <section className="settings-panel">
       <div className="settings-grid">
@@ -3907,7 +7320,14 @@ function SettingsView({
               <Plus size={15} />
               Add provider
             </button>
-            <button className="icon-button compact-icon-button" type="button" onClick={removeSelectedProvider} disabled={providers.length <= 1} title="Remove provider" aria-label="Remove provider">
+            <button
+              className="icon-button compact-icon-button"
+              type="button"
+              onClick={removeSelectedProvider}
+              disabled={providers.length <= 1}
+              title="Remove provider"
+              aria-label="Remove provider"
+            >
               <Trash2 size={14} />
             </button>
           </div>
@@ -3942,6 +7362,45 @@ function SettingsView({
             placeholder={selectedProviderApiKeyPresent ? "Saved. Enter a new key to replace it." : "No key saved for this provider."}
           />
         </label>
+        <label>
+          <span>Tool calling</span>
+          <select
+            value={selectedProvider?.toolCalling ?? "auto"}
+            onChange={(event) => updateSelectedProvider({ toolCalling: event.target.value as ProviderToolCallingMode })}
+          >
+            <option value="auto">Auto fallback</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          <small className="field-note">Disable for plain-chat endpoints that reject OpenAI tool schemas.</small>
+        </label>
+        <label>
+          <span>Image input</span>
+          <select
+            value={selectedProvider?.imageInput ?? "auto"}
+            onChange={(event) => updateSelectedProvider({ imageInput: event.target.value as ProviderImageInputMode })}
+          >
+            <option value="auto">Auto</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          <small className="field-note">Disable for text-only endpoints; enable for models that accept OpenAI image parts.</small>
+        </label>
+        <label>
+          <span>Context window (tokens)</span>
+          <input
+            value={selectedProvider?.contextWindowTokens ?? ""}
+            onChange={(event) => {
+              const parsed = Number.parseInt(event.target.value, 10);
+              updateSelectedProvider({ contextWindowTokens: Number.isFinite(parsed) && parsed > 0 ? parsed : undefined });
+            }}
+            type="number"
+            min={1000}
+            step={1000}
+            placeholder="Auto (uses conservative default)"
+          />
+          <small className="field-note">This model's context window. Sets when Arivu compacts requests; leave blank for the default.</small>
+        </label>
         <label className="tavily-key-field">
           <span>Tavily API key</span>
           <input
@@ -3959,26 +7418,138 @@ function SettingsView({
             <option value="trusted">trusted</option>
           </select>
         </label>
+        <label>
+          <span>Browser task LLM</span>
+          <select
+            value={browserTaskProviderId}
+            onChange={(event) => {
+              setBrowserTaskProviderId(event.target.value);
+              setBrowserTaskModelId("");
+            }}
+          >
+            <option value="">Same as chat model</option>
+            {providers.map((provider) => (
+              <option key={provider.id} value={provider.id}>
+                {provider.name.trim() || "Unnamed provider"}
+              </option>
+            ))}
+          </select>
+          <small className="field-note">
+            Provider the in-page browser_task agent uses for its own model calls. Defaults to the active chat model.
+          </small>
+        </label>
+        <label className="browser-task-model-field">
+          <span>Browser task model</span>
+          <div className="browser-task-model-picker">
+            <button
+              className="model-dialog-trigger settings-model-trigger"
+              type="button"
+              onClick={() => setBrowserTaskModelDialogOpen(true)}
+              aria-label={`Choose browser task model. Current model: ${modelDisplayName(browserTaskEffectiveModel)}`}
+            >
+              <Cpu size={15} />
+              <span>
+                {browserTaskModelId.trim()
+                  ? modelDisplayName(browserTaskModelId)
+                  : `Provider default: ${modelDisplayName(browserTaskProviderModel)}`}
+              </span>
+              <Search size={13} />
+            </button>
+            {browserTaskModelId.trim() ? (
+              <button
+                className="icon-button compact-icon-button"
+                type="button"
+                onClick={() => setBrowserTaskModelId("")}
+                title="Use provider default model"
+                aria-label="Use provider default browser task model"
+              >
+                <RotateCcw size={14} />
+              </button>
+            ) : null}
+          </div>
+          <input
+            value={browserTaskModelId}
+            onChange={(event) => setBrowserTaskModelId(event.target.value)}
+            placeholder="Or enter a model ID manually"
+          />
+          <small className="field-note">
+            Choose from the provider's models or enter an ID manually. Use a model with strong native tool calling.
+          </small>
+        </label>
+        <label>
+          <span>Browser task max loops</span>
+          <input
+            type="number"
+            min={1}
+            max={200}
+            value={browserTaskMaxSteps}
+            onChange={(event) => setBrowserTaskMaxSteps(event.target.value)}
+            placeholder="100 (default)"
+          />
+          <small className="field-note">Maximum observe/act loops per browser_task call, from 1 to 200.</small>
+        </label>
+        <label>
+          <span>Browser task loop delay (ms)</span>
+          <input
+            type="number"
+            min={0}
+            max={120000}
+            step={500}
+            value={browserTaskStepDelayMs}
+            onChange={(event) => setBrowserTaskStepDelayMs(event.target.value)}
+            placeholder="35000 (default)"
+          />
+          <small className="field-note">
+            Pause between agent loops, from 0 to 120000 ms. Defaults to 35000 ms; provider rate-limit responses are also retried with
+            backoff automatically.
+          </small>
+        </label>
       </div>
+
+      <CapabilityPolicyPanel
+        activeTrustMode={trustMode}
+        policies={capabilityPolicies}
+        source={capabilityPolicySource}
+        workspaceRoot={state.workspace.root}
+        workspaceOverrides={workspacePolicyOverrides}
+        workspaceScopeRules={workspaceScopeRules}
+        workspacePolicyProfiles={workspacePolicyProfiles}
+        workspacePolicyBundle={workspacePolicyBundle}
+        workspacePolicyBundleLoading={workspacePolicyBundleLoading}
+        workspacePolicyBundleError={workspacePolicyBundleError}
+        onWorkspaceOverrideChange={(capability, override) =>
+          setWorkspacePolicyOverrides((current) => updateWorkspacePolicyOverride(current, capability, override))
+        }
+        onWorkspaceScopeRulesChange={setWorkspaceScopeRules}
+        onWorkspacePolicyProfilesChange={setWorkspacePolicyProfiles}
+        onWorkspacePresetApply={(preset) => {
+          const normalizedPreset = normalizedWorkspacePolicyPreset(preset);
+          setWorkspacePolicyOverrides(normalizedPreset.overrides);
+          setWorkspaceScopeRules(normalizedPreset.scopeRules);
+        }}
+        onWorkspacePolicyImport={(policy) => {
+          setWorkspacePolicyOverrides(policy.overrides);
+          setWorkspaceScopeRules(policy.scopeRules);
+        }}
+        onWorkspacePolicyBundleReload={() => void refreshWorkspacePolicyBundle()}
+        loading={capabilityPolicyLoading}
+        error={capabilityPolicyError}
+        onRefresh={() => void refreshCapabilityPolicies()}
+      />
 
       <label className="mcp-config-field">
         <span>MCP servers</span>
-        <textarea
-          value={mcpServersText}
-          onChange={(event) => setMcpServersText(event.target.value)}
-          spellCheck={false}
-          rows={8}
-        />
-        <small className="field-note">
-          JSON object keyed by server name. Each server supports command, args, env, and disabled.
-        </small>
+        <textarea value={mcpServersText} onChange={(event) => setMcpServersText(event.target.value)} spellCheck={false} rows={8} />
+        <small className="field-note">JSON object keyed by server name. Each server supports command, args, env, and disabled.</small>
       </label>
 
       <section className="skills-settings-section" ref={skillsSectionRef} aria-label="Skills">
         <div className="settings-section-heading">
           <div>
             <strong>Skills</strong>
-            <span title={skillsRoot}>{skills.length} installed · {skillsRoot || "Global skills directory"}</span>
+            <span title={skillsRoot}>
+              {skills.length} installed · {skillsRoot || "Global skills directory"}
+            </span>
           </div>
           <button className="secondary-command" type="button" onClick={() => void refreshSkills()}>
             <RefreshCw size={15} />
@@ -4010,7 +7581,11 @@ function SettingsView({
           </label>
           <label>
             <span>Description</span>
-            <input value={skillDescription} onChange={(event) => setSkillDescription(event.target.value)} placeholder="When this skill should be used" />
+            <input
+              value={skillDescription}
+              onChange={(event) => setSkillDescription(event.target.value)}
+              placeholder="When this skill should be used"
+            />
           </label>
           <label className="skill-instructions-field">
             <span>Instructions</span>
@@ -4035,6 +7610,117 @@ function SettingsView({
         {skillStatus ? <div className="success-strip">{skillStatus}</div> : null}
       </section>
 
+      <section className="skills-settings-section" aria-label="Task worktrees">
+        <div className="settings-section-heading">
+          <div>
+            <strong>Task worktrees</strong>
+            <span>{taskWorktreeInventorySummary(worktreeInventory)}</span>
+          </div>
+          <button
+            className="secondary-command"
+            type="button"
+            onClick={() => void refreshTaskWorktrees(true)}
+            disabled={worktreeInventoryLoading}
+          >
+            <RefreshCw size={15} />
+            {worktreeInventoryLoading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+
+        <div className="settings-worktree-list">
+          {worktreeInventory.length === 0 ? (
+            <div className="settings-skill-empty">No task worktrees recorded yet.</div>
+          ) : (
+            worktreeInventory.map((item) => {
+              const busyKey = `${item.sessionId}:${item.taskRunId}:open`;
+              return (
+                <article key={`${item.sessionId}:${item.taskRunId}`} className="settings-worktree-row">
+                  <div className="settings-worktree-main">
+                    <div>
+                      <strong>{item.branch ?? "Task worktree"}</strong>
+                      <span>{worktreeInventoryStatusLabel(item)}</span>
+                    </div>
+                    <p>{item.promptPreview || item.sessionTitle}</p>
+                    {item.path ? <small title={item.path}>{item.path}</small> : null}
+                  </div>
+                  <div className="settings-worktree-meta">
+                    <span>{item.changedFiles === undefined ? "diff unknown" : `${item.changedFiles} changed`}</span>
+                    {item.verificationStatus ? (
+                      <span
+                        title={item.verificationSummary}
+                      >{`verification ${verificationStatusLabel(item.verificationStatus).toLowerCase()}`}</span>
+                    ) : null}
+                    <span>{formatDateTime(item.updatedAt)}</span>
+                  </div>
+                  <div className="settings-worktree-actions">
+                    <button
+                      className="secondary-command"
+                      type="button"
+                      onClick={() => void openInventoryWorktree(item)}
+                      disabled={!item.canOpen || worktreeInventoryBusy === busyKey}
+                      title={item.canOpen ? "Open this task worktree folder" : "Task worktree folder is unavailable"}
+                    >
+                      <FolderOpen size={15} />
+                      {worktreeInventoryBusy === busyKey ? "Opening" : "Open"}
+                    </button>
+                    {item.canPreparePullRequest ? (
+                      <button
+                        className="secondary-command"
+                        type="button"
+                        onClick={() => void runInventoryWorktreeAction(item, "prepare_pr")}
+                        disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:prepare_pr`}
+                        title="Prepare a pull request draft for this task worktree"
+                      >
+                        <GitPullRequest size={15} />
+                        {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:prepare_pr` ? "Preparing" : "PR draft"}
+                      </button>
+                    ) : null}
+                    {item.canCreatePullRequest ? (
+                      <button
+                        className="secondary-command"
+                        type="button"
+                        onClick={() => void runInventoryWorktreeAction(item, "create_pr")}
+                        disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:create_pr`}
+                        title="Push this task branch and create a draft pull request"
+                      >
+                        <GitPullRequest size={15} />
+                        {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:create_pr` ? "Creating" : "Create PR"}
+                      </button>
+                    ) : null}
+                    {item.canDiscard ? (
+                      <button
+                        className="secondary-command danger-command"
+                        type="button"
+                        onClick={() => void runInventoryWorktreeAction(item, "discard")}
+                        disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:discard`}
+                        title="Discard this task worktree and task branch"
+                      >
+                        <Trash2 size={15} />
+                        {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:discard` ? "Discarding" : "Discard"}
+                      </button>
+                    ) : null}
+                    {item.canCleanup ? (
+                      <button
+                        className="secondary-command"
+                        type="button"
+                        onClick={() => void runInventoryWorktreeAction(item, "cleanup")}
+                        disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:cleanup`}
+                        title="Clean up this merged task worktree and task branch"
+                      >
+                        <Scissors size={15} />
+                        {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:cleanup` ? "Cleaning" : "Clean up"}
+                      </button>
+                    ) : null}
+                  </div>
+                </article>
+              );
+            })
+          )}
+        </div>
+        {worktreeInventoryError ? <div className="error-strip">{worktreeInventoryError}</div> : null}
+        {worktreeInventoryStatus ? <div className="success-strip">{worktreeInventoryStatus}</div> : null}
+      </section>
+
       {error ? <div className="error-strip">{error}</div> : null}
       {doctorError ? <div className="error-strip">{doctorError}</div> : null}
 
@@ -4055,6 +7741,7 @@ function SettingsView({
           currentModel={model}
           baseUrl={baseUrl}
           apiKey={apiKey}
+          providerId={selectedProvider?.id}
           onSelect={(nextModel) => {
             updateSelectedProvider({ model: nextModel });
             setModelDialogOpen(false);
@@ -4062,8 +7749,666 @@ function SettingsView({
           onClose={() => setModelDialogOpen(false)}
         />
       ) : null}
+      {browserTaskModelDialogOpen ? (
+        <ModelPickerDialog
+          currentModel={browserTaskEffectiveModel}
+          baseUrl={browserTaskBaseUrl}
+          apiKey={browserTaskApiKey}
+          providerId={browserTaskProvider?.id}
+          includeAuto={false}
+          title="Select browser task model"
+          onSelect={(nextModel) => {
+            // Pin the concrete model the user picked. Collapsing it to "" when it happens to match
+            // the current chat model would turn the choice into a *relative* "follow the chat model"
+            // reference, so any later chat-model change would silently drag the browser task model
+            // along. The user must fall back to the chat model explicitly (the reset button below or
+            // the "Same as chat model" provider option), never as a side effect of the two coinciding.
+            setBrowserTaskModelId(nextModel);
+            setBrowserTaskModelDialogOpen(false);
+          }}
+          onClose={() => setBrowserTaskModelDialogOpen(false)}
+        />
+      ) : null}
     </section>
   );
+}
+
+function CapabilityPolicyPanel({
+  activeTrustMode,
+  policies,
+  source,
+  workspaceRoot,
+  workspaceOverrides,
+  workspaceScopeRules,
+  workspacePolicyProfiles,
+  workspacePolicyBundle,
+  workspacePolicyBundleLoading,
+  workspacePolicyBundleError,
+  onWorkspaceOverrideChange,
+  onWorkspaceScopeRulesChange,
+  onWorkspacePolicyProfilesChange,
+  onWorkspacePresetApply,
+  onWorkspacePolicyImport,
+  onWorkspacePolicyBundleReload,
+  loading,
+  error,
+  onRefresh
+}: {
+  activeTrustMode: TrustMode;
+  policies: CapabilityPolicySummary[];
+  source: CapabilityPolicyResult["source"];
+  workspaceRoot: string;
+  workspaceOverrides: WorkspaceCapabilityPolicyOverrides;
+  workspaceScopeRules: WorkspaceScopePolicyRules;
+  workspacePolicyProfiles: WorkspacePolicyProfiles;
+  workspacePolicyBundle: WorkspacePolicyBundleResult | null;
+  workspacePolicyBundleLoading: boolean;
+  workspacePolicyBundleError: string | null;
+  onWorkspaceOverrideChange: (capability: WorkspacePolicyCapability, override: CapabilityPolicyOverrideEffect | "inherit") => void;
+  onWorkspaceScopeRulesChange: (rules: WorkspaceScopePolicyRules) => void;
+  onWorkspacePolicyProfilesChange: (profiles: WorkspacePolicyProfiles) => void;
+  onWorkspacePresetApply: (preset: WorkspacePolicyPreset) => void;
+  onWorkspacePolicyImport: (policy: WorkspacePolicyTransferPayload) => void;
+  onWorkspacePolicyBundleReload: () => void;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const [profileName, setProfileName] = useState("");
+  const [selectedProfileName, setSelectedProfileName] = useState("");
+  const [profileStatus, setProfileStatus] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [teamBundleStatus, setTeamBundleStatus] = useState<string | null>(null);
+  const [teamBundleError, setTeamBundleError] = useState<string | null>(null);
+  const [transferText, setTransferText] = useState("");
+  const [transferStatus, setTransferStatus] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
+  const activeScopeItems = scopePolicySummaryItems(workspaceScopeRules);
+  const profileEntries = Object.entries(normalizeWorkspacePolicyProfiles(workspacePolicyProfiles));
+  const selectedProfile = selectedProfileName ? workspacePolicyProfiles[selectedProfileName] : undefined;
+  const selectedProfileValue = selectedProfile ? selectedProfileName : "";
+  const activePresetId = WORKSPACE_POLICY_PRESETS.find((preset) =>
+    workspacePolicyPresetMatches(preset, workspaceOverrides, workspaceScopeRules)
+  )?.id;
+  const teamBundle = workspacePolicyBundle?.bundle ?? null;
+  const teamBundleProblem = workspacePolicyBundleError ?? workspacePolicyBundle?.error ?? null;
+
+  function reloadWorkspacePolicyBundle() {
+    setTeamBundleStatus(null);
+    setTeamBundleError(null);
+    onWorkspacePolicyBundleReload();
+  }
+
+  function applyWorkspacePolicyBundle() {
+    setTeamBundleStatus(null);
+    setTeamBundleError(null);
+    if (!teamBundle) {
+      setTeamBundleError(teamBundleProblem || `No team bundle found at ${WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH}.`);
+      return;
+    }
+    const policy = workspacePolicyTransferPayload(teamBundle.overrides, teamBundle.scopeRules);
+    onWorkspacePolicyImport(policy);
+    setTeamBundleStatus(`Applied "${teamBundle.name}". Save settings to persist workspace changes.`);
+  }
+
+  function saveWorkspacePolicyProfile() {
+    const name = normalizeWorkspacePolicyProfileName(profileName);
+    setProfileStatus(null);
+    setProfileError(null);
+    if (!name) {
+      setProfileError("Enter a profile name before saving.");
+      return;
+    }
+    const policy = workspacePolicyTransferPayload(workspaceOverrides, workspaceScopeRules);
+    onWorkspacePolicyProfilesChange(
+      normalizeWorkspacePolicyProfiles({
+        ...workspacePolicyProfiles,
+        [name]: {
+          overrides: policy.overrides,
+          scopeRules: policy.scopeRules
+        }
+      })
+    );
+    setProfileName(name);
+    setSelectedProfileName(name);
+    setProfileStatus(`Saved "${name}" as a profile. Save settings to persist it.`);
+  }
+
+  function applyWorkspacePolicyProfile() {
+    setProfileStatus(null);
+    setProfileError(null);
+    if (!selectedProfile) {
+      setProfileError("Choose a profile before applying.");
+      return;
+    }
+    const policy = workspacePolicyTransferPayload(selectedProfile.overrides, selectedProfile.scopeRules);
+    onWorkspacePolicyImport(policy);
+    setProfileStatus(`Applied "${selectedProfileName}". Save settings to persist workspace changes.`);
+  }
+
+  function deleteWorkspacePolicyProfile() {
+    setProfileStatus(null);
+    setProfileError(null);
+    if (!selectedProfile) {
+      setProfileError("Choose a profile before deleting.");
+      return;
+    }
+    const next = { ...workspacePolicyProfiles };
+    delete next[selectedProfileName];
+    onWorkspacePolicyProfilesChange(normalizeWorkspacePolicyProfiles(next));
+    setSelectedProfileName("");
+    setProfileStatus(`Deleted "${selectedProfileName}". Save settings to persist it.`);
+  }
+
+  async function copyWorkspacePolicyJson() {
+    const text = serializeWorkspacePolicyTransfer(workspaceOverrides, workspaceScopeRules);
+    setTransferText(text);
+    setTransferError(null);
+    try {
+      await writeClipboardText(text);
+      setTransferStatus("Workspace policy JSON copied.");
+    } catch (err) {
+      setTransferStatus(null);
+      setTransferError(`Workspace policy JSON is ready below, but clipboard copy failed: ${formatError(err)}`);
+    }
+  }
+
+  function applyWorkspacePolicyJson() {
+    setTransferStatus(null);
+    setTransferError(null);
+    try {
+      const policy = parseWorkspacePolicyTransfer(transferText);
+      onWorkspacePolicyImport(policy);
+      setTransferText(serializeWorkspacePolicyTransfer(policy.overrides, policy.scopeRules));
+      setTransferStatus("Workspace policy JSON imported. Save settings to persist it.");
+    } catch (err) {
+      setTransferError(formatError(err));
+    }
+  }
+
+  return (
+    <section className="skills-settings-section policy-settings-section" aria-label="Capability policy">
+      <div className="settings-section-heading">
+        <div>
+          <strong>Capability policy</strong>
+          <span>{capabilityPolicySummary(policies, activeTrustMode, source, loading)}</span>
+        </div>
+        <button className="secondary-command" type="button" onClick={onRefresh} disabled={loading}>
+          <RefreshCw size={15} />
+          {loading ? "Refreshing" : "Refresh"}
+        </button>
+      </div>
+
+      {error ? <div className="error-strip">{error}</div> : null}
+
+      <div className="workspace-policy-box">
+        <div className="workspace-policy-heading">
+          <div>
+            <strong>Workspace overrides</strong>
+            <span title={workspaceRoot}>{workspaceRoot}</span>
+          </div>
+          <p>Tighten this workspace without changing the built-in {trustModeLabel(activeTrustMode)} posture.</p>
+        </div>
+        <div className="workspace-preset-grid" aria-label="Workspace policy presets">
+          {WORKSPACE_POLICY_PRESETS.map((preset) => {
+            const selected = preset.id === activePresetId;
+            return (
+              <button
+                key={preset.id}
+                className={`workspace-preset-button${selected ? " active" : ""}`}
+                type="button"
+                onClick={() => onWorkspacePresetApply(preset)}
+                aria-pressed={selected}
+              >
+                <span className="workspace-preset-icon">
+                  <Shield size={14} />
+                </span>
+                <span className="workspace-preset-copy">
+                  <strong>{preset.label}</strong>
+                  <small>{preset.description}</small>
+                </span>
+                {selected ? <Check size={14} className="workspace-preset-check" /> : null}
+              </button>
+            );
+          })}
+        </div>
+        <div className={`workspace-policy-team-bundle${teamBundleProblem ? " has-error" : teamBundle ? " has-bundle" : ""}`}>
+          <div className="workspace-policy-team-copy">
+            <strong>Team bundle</strong>
+            <small title={workspacePolicyBundle?.path ?? WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH}>
+              {workspacePolicyBundleLoading
+                ? "Checking workspace bundle"
+                : teamBundle
+                  ? `${teamBundle.name} · ${workspacePolicyBundle?.path ?? teamBundle.sourcePath}`
+                  : teamBundleProblem
+                    ? `Invalid ${WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH}`
+                    : `No ${WORKSPACE_POLICY_BUNDLE_RELATIVE_PATH}`}
+            </small>
+            {teamBundle?.description ? <p>{teamBundle.description}</p> : null}
+          </div>
+          <div className="workspace-policy-team-actions">
+            <button
+              className="secondary-command"
+              type="button"
+              onClick={reloadWorkspacePolicyBundle}
+              disabled={workspacePolicyBundleLoading}
+            >
+              <RefreshCw size={14} />
+              {workspacePolicyBundleLoading ? "Checking" : "Reload"}
+            </button>
+            <button className="secondary-command" type="button" onClick={applyWorkspacePolicyBundle} disabled={!teamBundle}>
+              <FileText size={14} />
+              Apply
+            </button>
+          </div>
+          {teamBundleStatus ? <small className="workspace-policy-team-status">{teamBundleStatus}</small> : null}
+          {teamBundleProblem || teamBundleError ? (
+            <small className="workspace-policy-team-error">{teamBundleError ?? teamBundleProblem}</small>
+          ) : null}
+        </div>
+        <div className="workspace-policy-profiles">
+          <div className="workspace-policy-profile-save">
+            <label>
+              <span>Policy profile</span>
+              <input
+                value={profileName}
+                onChange={(event) => {
+                  setProfileName(event.target.value);
+                  setProfileStatus(null);
+                  setProfileError(null);
+                }}
+                placeholder="Sensitive repo"
+              />
+            </label>
+            <button className="secondary-command" type="button" onClick={saveWorkspacePolicyProfile}>
+              <Save size={14} />
+              Save profile
+            </button>
+          </div>
+          <div className="workspace-policy-profile-actions">
+            <select
+              value={selectedProfileValue}
+              onChange={(event) => {
+                setSelectedProfileName(event.target.value);
+                setProfileName(event.target.value || profileName);
+                setProfileStatus(null);
+                setProfileError(null);
+              }}
+            >
+              <option value="">No saved profile</option>
+              {profileEntries.map(([name]) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            <button className="secondary-command" type="button" onClick={applyWorkspacePolicyProfile} disabled={!selectedProfile}>
+              <FileText size={14} />
+              Apply
+            </button>
+            <button
+              className="secondary-command danger-command"
+              type="button"
+              onClick={deleteWorkspacePolicyProfile}
+              disabled={!selectedProfile}
+            >
+              <Trash2 size={14} />
+              Delete
+            </button>
+          </div>
+          {profileStatus ? <small className="workspace-policy-profile-status">{profileStatus}</small> : null}
+          {profileError ? <small className="workspace-policy-profile-error">{profileError}</small> : null}
+        </div>
+        <div className="workspace-policy-transfer">
+          <div className="workspace-policy-transfer-head">
+            <strong>Workspace policy JSON</strong>
+            <div className="workspace-policy-transfer-actions">
+              <button className="secondary-command" type="button" onClick={() => void copyWorkspacePolicyJson()}>
+                <Copy size={14} />
+                Copy JSON
+              </button>
+              <button className="secondary-command" type="button" onClick={applyWorkspacePolicyJson} disabled={!transferText.trim()}>
+                <FileText size={14} />
+                Apply JSON
+              </button>
+            </div>
+          </div>
+          <textarea
+            value={transferText}
+            onChange={(event) => {
+              setTransferText(event.target.value);
+              setTransferStatus(null);
+              setTransferError(null);
+            }}
+            spellCheck={false}
+            rows={4}
+            placeholder='{"kind":"arivu.workspacePolicy","version":1,"overrides":{},"scopeRules":{}}'
+          />
+          {transferStatus ? <small className="workspace-policy-transfer-status">{transferStatus}</small> : null}
+          {transferError ? <small className="workspace-policy-transfer-error">{transferError}</small> : null}
+        </div>
+        <div className="workspace-policy-grid">
+          {WORKSPACE_POLICY_CAPABILITIES.map((capability) => {
+            const override = workspaceOverrides[capability] ?? "inherit";
+            const policy = policies.find((entry) => entry.capability === capability);
+            return (
+              <label key={capability} className="workspace-policy-row">
+                <span>{capabilityLabel(capability)}</span>
+                <select
+                  value={override}
+                  onChange={(event) =>
+                    onWorkspaceOverrideChange(capability, event.target.value as CapabilityPolicyOverrideEffect | "inherit")
+                  }
+                >
+                  <option value="inherit">Inherit</option>
+                  <option value="prompt">Require approval</option>
+                  <option value="deny">Block</option>
+                </select>
+                <small>{workspaceOverrideNote(policy, activeTrustMode, override)}</small>
+              </label>
+            );
+          })}
+        </div>
+        <small>Overrides only make this workspace stricter: they cannot turn a built-in approval or block into allow.</small>
+        {activeScopeItems.length > 0 ? (
+          <div className="workspace-scope-summary" aria-label="Active workspace scope rules">
+            {activeScopeItems.map((item) => (
+              <span key={item.label}>
+                <strong>{item.label}</strong>
+                {item.value}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        <div className="workspace-scope-grid">
+          <label className="workspace-scope-field">
+            <span>Blocked path prefixes</span>
+            <textarea
+              value={scopeListToText(workspaceScopeRules.blockedPathPrefixes)}
+              onChange={(event) =>
+                onWorkspaceScopeRulesChange({
+                  ...workspaceScopeRules,
+                  blockedPathPrefixes: scopeTextToList(event.target.value)
+                })
+              }
+              placeholder={[".env", "secrets", "private"].join("\n")}
+              rows={4}
+            />
+            <small>One workspace-relative prefix per line. Matching reads, writes, and patches are blocked.</small>
+          </label>
+          <label className="workspace-scope-field">
+            <span>Allowed network domains</span>
+            <textarea
+              value={scopeListToText(workspaceScopeRules.allowedNetworkDomains)}
+              onChange={(event) =>
+                onWorkspaceScopeRulesChange({
+                  ...workspaceScopeRules,
+                  allowedNetworkDomains: scopeTextToList(event.target.value)
+                })
+              }
+              placeholder={["api.tavily.com", "www.bing.com"].join("\n")}
+              rows={4}
+            />
+            <small>Optional allowlist. When set, network tools are denied unless the destination host matches.</small>
+          </label>
+          <label className="workspace-scope-field">
+            <span>Allowed MCP servers</span>
+            <textarea
+              value={scopeListToText(workspaceScopeRules.allowedMcpServers)}
+              onChange={(event) =>
+                onWorkspaceScopeRulesChange({
+                  ...workspaceScopeRules,
+                  allowedMcpServers: scopeTextToList(event.target.value)
+                })
+              }
+              placeholder={["github", "chrome-devtools"].join("\n")}
+              rows={4}
+            />
+            <small>Optional allowlist. When set, MCP list/call tools only use matching configured servers.</small>
+          </label>
+          <label className="workspace-scope-field">
+            <span>Allowed browser target classes</span>
+            <textarea
+              value={scopeListToText(workspaceScopeRules.allowedBrowserTargetClasses)}
+              onChange={(event) =>
+                onWorkspaceScopeRulesChange({
+                  ...workspaceScopeRules,
+                  allowedBrowserTargetClasses: browserTargetClassTextToList(event.target.value)
+                })
+              }
+              placeholder={["background", "local", "public"].join("\n")}
+              rows={4}
+            />
+            <small>Optional allowlist. Valid classes: background, visible, local, file, public.</small>
+          </label>
+        </div>
+      </div>
+
+      <div className="policy-table-wrap">
+        <table className="policy-table">
+          <thead>
+            <tr>
+              <th scope="col">Capability</th>
+              {TRUST_MODE_ORDER.map((mode) => (
+                <th key={mode} scope="col" className={mode === activeTrustMode ? "active-policy-column" : undefined}>
+                  {trustModeLabel(mode)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {policies.length === 0 ? (
+              <tr>
+                <td colSpan={TRUST_MODE_ORDER.length + 1} className="policy-empty">
+                  {loading ? "Loading policy" : "No policy loaded"}
+                </td>
+              </tr>
+            ) : (
+              policies.map((policy) => (
+                <tr key={policy.capability}>
+                  <th scope="row">
+                    <strong>{policy.label}</strong>
+                    <span>{policy.description}</span>
+                    <p className="policy-capability-risk">{policy.risk}</p>
+                    <ul className="policy-example-list" aria-label={`${policy.label} examples`}>
+                      {policy.examples.map((example) => (
+                        <li key={example}>{example}</li>
+                      ))}
+                    </ul>
+                    <small className="policy-default-posture">{policy.defaultPosture}</small>
+                  </th>
+                  {TRUST_MODE_ORDER.map((mode) => (
+                    <PolicyModeCell key={`${policy.capability}:${mode}`} policy={policy} mode={mode} active={mode === activeTrustMode} />
+                  ))}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function PolicyModeCell({ policy, mode, active }: { policy: CapabilityPolicySummary; mode: TrustMode; active: boolean }) {
+  const summary = policy.modes.find((entry) => entry.trustMode === mode);
+  if (!summary) {
+    return <td className={active ? "active-policy-column" : undefined}>-</td>;
+  }
+  return (
+    <td className={active ? "active-policy-column" : undefined}>
+      <div className="policy-cell">
+        <PolicyEffectBadge effect={summary.effect} />
+        <span>{summary.label}</span>
+        <small title={summary.reason}>Why: {summary.reason}</small>
+        {summary.override ? (
+          <small className="policy-override-note">
+            Workspace override: {summary.override === "deny" ? "blocked" : "approval required"}
+          </small>
+        ) : null}
+        {summary.riskyEffect ? (
+          <small className="policy-risk-note" title={summary.riskyReason}>
+            Risky action: {policyEffectLabel(summary.riskyEffect)}
+          </small>
+        ) : null}
+      </div>
+    </td>
+  );
+}
+
+function PolicyEffectBadge({ effect }: { effect: CapabilityPolicyEffect }) {
+  return <span className={`policy-effect-badge ${effect}`}>{policyEffectLabel(effect)}</span>;
+}
+
+function workspacePolicyOverridesFromConfig(
+  policies: WorkspaceCapabilityPolicies,
+  workspaceRoot: string
+): WorkspaceCapabilityPolicyOverrides {
+  return policies[workspaceRoot]?.overrides ?? {};
+}
+
+function workspaceScopeRulesFromConfig(policies: WorkspaceCapabilityPolicies, workspaceRoot: string): WorkspaceScopePolicyRules {
+  return normalizeWorkspaceScopeRules(policies[workspaceRoot]?.scopeRules);
+}
+
+function updateWorkspacePolicyOverride(
+  overrides: WorkspaceCapabilityPolicyOverrides,
+  capability: WorkspacePolicyCapability,
+  override: CapabilityPolicyOverrideEffect | "inherit"
+): WorkspaceCapabilityPolicyOverrides {
+  const next = { ...overrides };
+  if (override === "inherit") {
+    delete next[capability];
+  } else {
+    next[capability] = override;
+  }
+  return next;
+}
+
+function updateWorkspacePoliciesForRoot(
+  policies: WorkspaceCapabilityPolicies,
+  workspaceRoot: string,
+  overrides: WorkspaceCapabilityPolicyOverrides,
+  scopeRules: WorkspaceScopePolicyRules
+): WorkspaceCapabilityPolicies {
+  const next = { ...policies };
+  const normalized = Object.fromEntries(
+    Object.entries(overrides).filter(
+      (entry): entry is [WorkspacePolicyCapability, CapabilityPolicyOverrideEffect] =>
+        WORKSPACE_POLICY_CAPABILITIES.includes(entry[0] as WorkspacePolicyCapability) && (entry[1] === "prompt" || entry[1] === "deny")
+    )
+  );
+  const normalizedScopeRules = normalizeWorkspaceScopeRules(scopeRules);
+  if (Object.keys(normalized).length === 0 && !workspaceScopeRulesHaveEntries(normalizedScopeRules)) {
+    delete next[workspaceRoot];
+  } else {
+    next[workspaceRoot] = { overrides: normalized, scopeRules: normalizedScopeRules };
+  }
+  return next;
+}
+
+function normalizeWorkspaceScopeRules(rules: WorkspaceScopePolicyRules | undefined): WorkspaceScopePolicyRules {
+  return {
+    blockedPathPrefixes: normalizeScopeList(rules?.blockedPathPrefixes),
+    allowedNetworkDomains: normalizeScopeList(rules?.allowedNetworkDomains),
+    allowedMcpServers: normalizeScopeList(rules?.allowedMcpServers),
+    allowedBrowserTargetClasses: normalizeBrowserTargetClassList(rules?.allowedBrowserTargetClasses)
+  };
+}
+
+function workspaceScopeRulesHaveEntries(rules: WorkspaceScopePolicyRules) {
+  return Boolean(
+    rules.blockedPathPrefixes?.length ||
+    rules.allowedNetworkDomains?.length ||
+    rules.allowedMcpServers?.length ||
+    rules.allowedBrowserTargetClasses?.length
+  );
+}
+
+function scopeListToText(values: string[] | undefined) {
+  return (values ?? []).join("\n");
+}
+
+function scopeTextToList(value: string) {
+  return normalizeScopeList(value.split(/\r?\n/g));
+}
+
+function browserTargetClassTextToList(value: string) {
+  return normalizeBrowserTargetClassList(value.split(/\r?\n/g));
+}
+
+function normalizeScopeList(values: string[] | undefined) {
+  return Array.from(new Set((values ?? []).map((entry) => entry.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right));
+}
+
+function normalizeBrowserTargetClassList(values: string[] | undefined): WorkspaceScopePolicyRules["allowedBrowserTargetClasses"] {
+  const normalized = normalizeScopeList(values)
+    .map((entry) => entry.toLowerCase())
+    .filter(
+      (entry): entry is NonNullable<WorkspaceScopePolicyRules["allowedBrowserTargetClasses"]>[number] =>
+        entry === "background" || entry === "visible" || entry === "local" || entry === "file" || entry === "public"
+    );
+  return Array.from(new Set(normalized)).sort((left, right) => left.localeCompare(right));
+}
+
+function capabilityPolicySummary(
+  policies: CapabilityPolicySummary[],
+  activeTrustMode: TrustMode,
+  source: CapabilityPolicyResult["source"],
+  loading: boolean
+) {
+  if (loading && policies.length === 0) {
+    return "Loading policy";
+  }
+  const counts = { allow: 0, prompt: 0, deny: 0 };
+  for (const policy of policies) {
+    const mode = policy.modes.find((entry) => entry.trustMode === activeTrustMode);
+    if (mode) {
+      counts[mode.effect] += 1;
+    }
+  }
+  const sourceLabel = source === "built-in" ? "built-in" : "workspace overrides";
+  return `${trustModeLabel(activeTrustMode)} · ${counts.allow} allowed · ${counts.prompt} approval · ${counts.deny} blocked · ${sourceLabel}`;
+}
+
+function workspaceOverrideNote(
+  policy: CapabilityPolicySummary | undefined,
+  activeTrustMode: TrustMode,
+  override: CapabilityPolicyOverrideEffect | "inherit"
+) {
+  if (override === "deny") {
+    return "Blocked for this workspace.";
+  }
+  if (override === "prompt") {
+    return "Requires approval for this workspace.";
+  }
+  const mode = policy?.modes.find((entry) => entry.trustMode === activeTrustMode);
+  if (!mode) {
+    return "Follows the selected trust mode.";
+  }
+  return `Inherits ${policyEffectLabel(mode.effect).toLowerCase()} from ${trustModeLabel(activeTrustMode)}.`;
+}
+
+function trustModeLabel(mode: TrustMode) {
+  switch (mode) {
+    case "readonly":
+      return "Readonly";
+    case "ask":
+      return "Ask";
+    case "trusted":
+      return "Trusted";
+  }
+}
+
+function policyEffectLabel(effect: CapabilityPolicyEffect) {
+  switch (effect) {
+    case "allow":
+      return "Allow";
+    case "prompt":
+      return "Approval";
+    case "deny":
+      return "Blocked";
+  }
 }
 
 function DoctorReportView({ report }: { report: DoctorReport }) {
@@ -4076,6 +8421,15 @@ function DoctorReportView({ report }: { report: DoctorReport }) {
         </span>
       </div>
       <div className="doctor-checks">
+        {report.capabilityObservations?.map((observation) => (
+          <article key={`${observation.checkId}:${observation.capability}`} className="doctor-check warn">
+            <span className="doctor-status">saved</span>
+            <div>
+              <strong>{doctorCapabilityLabel(observation.capability)}</strong>
+              <p>Saved as Disabled for this provider based on the doctor check.</p>
+            </div>
+          </article>
+        ))}
         {report.checks.map((entry) => (
           <article key={entry.id} className={`doctor-check ${entry.status}`}>
             <span className="doctor-status">{entry.status}</span>
@@ -4091,8 +8445,112 @@ function DoctorReportView({ report }: { report: DoctorReport }) {
   );
 }
 
+function doctorCapabilityLabel(capability: DoctorCapabilityObservation["capability"]) {
+  return capability === "toolCalling" ? "Tool calling" : "Image input";
+}
+
+function FirstRunOnboarding({
+  initialBaseUrl,
+  initialModel,
+  initialTrustMode,
+  onStateUpdated,
+  onDismiss
+}: {
+  initialBaseUrl: string;
+  initialModel: string;
+  initialTrustMode: TrustMode;
+  onStateUpdated: (state: DesktopState) => void;
+  onDismiss: () => void;
+}) {
+  const [baseUrl, setBaseUrl] = useState(initialBaseUrl);
+  const [model, setModel] = useState(initialModel);
+  const [apiKey, setApiKey] = useState("");
+  const [trustMode, setTrustMode] = useState<TrustMode>(initialTrustMode);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<DoctorReport | null>(null);
+
+  const canSubmit = baseUrl.trim().length > 0 && model.trim().length > 0 && apiKey.trim().length > 0 && !busy;
+  const verified = report ? (report.summary.fail ?? 0) === 0 : false;
+
+  async function saveAndVerify() {
+    if (!canSubmit) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const patch = { baseUrl: baseUrl.trim(), model: model.trim(), apiKey: apiKey.trim(), trustMode };
+      const nextState = await window.arivu.saveConfig(patch);
+      onStateUpdated(nextState);
+      const doctorReport = await window.arivu.runDoctor(patch);
+      setReport(doctorReport);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <section className="onboarding-dialog" role="dialog" aria-modal="true" aria-label="Set up Arivu">
+        <header className="onboarding-header">
+          <h2>Welcome to Arivu</h2>
+          <p>Connect an OpenAI-compatible model to get started. You can change this later in Settings.</p>
+        </header>
+        <label>
+          <span>Base URL</span>
+          <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" />
+        </label>
+        <label>
+          <span>Model</span>
+          <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-4.1" />
+        </label>
+        <label>
+          <span>API key</span>
+          <input value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" placeholder="sk-..." />
+        </label>
+        <label>
+          <span>Trust mode</span>
+          <select value={trustMode} onChange={(event) => setTrustMode(event.target.value as TrustMode)}>
+            <option value="ask">ask — approve each action</option>
+            <option value="readonly">readonly — reads only, no writes/commands</option>
+            <option value="trusted">trusted — auto-approve safe actions</option>
+          </select>
+        </label>
+        {error ? <p className="onboarding-error">{error}</p> : null}
+        {report ? (
+          <ul className="onboarding-checks">
+            {report.checks.map((check) => (
+              <li key={check.id} className={`onboarding-check onboarding-check-${check.status}`}>
+                <strong>{check.label}</strong>: {check.message}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="onboarding-actions">
+          <button type="button" className="onboarding-skip" onClick={onDismiss}>
+            Skip for now
+          </button>
+          {verified ? (
+            <button type="button" className="onboarding-primary" onClick={onDismiss}>
+              Start using Arivu
+            </button>
+          ) : (
+            <button type="button" className="onboarding-primary" onClick={() => void saveAndVerify()} disabled={!canSubmit}>
+              {busy ? "Verifying…" : "Save & verify"}
+            </button>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function ApprovalDialog({ approval, onRespond }: { approval: ApprovalRequest; onRespond: (approved: boolean) => void }) {
-  const view = parseApprovalMessage(approval.message);
+  // Prefer the structured request from the main process; fall back to parsing the text message.
+  const view = (approval.request ? approvalViewFromRequest(approval.request) : undefined) ?? parseApprovalMessage(approval.message);
 
   return (
     <div className="modal-backdrop">
@@ -4127,8 +8585,7 @@ function ApprovalContent({ view, fallback }: { view: ApprovalView; fallback: str
     return (
       <div className="approval-detail shell-approval">
         <div className="shell-command-card">
-          <span className="shell-executable">{view.executable}</span>
-          {view.rest ? <span className="shell-rest">{view.rest}</span> : null}
+          <code className="shell-command-text">{view.command}</code>
         </div>
         {view.cwd ? (
           <div className="shell-meta">
@@ -4174,6 +8631,21 @@ function ApprovalContent({ view, fallback }: { view: ApprovalView; fallback: str
     );
   }
 
+  if (view.type === "network") {
+    return (
+      <div className="approval-detail browser-approval">
+        <div className="browser-approval-card">
+          <Globe size={16} />
+          <div>
+            <strong>{view.summary}</strong>
+            <span>{view.destination ?? "Network"}</span>
+          </div>
+        </div>
+        {view.query ? <pre>{view.query}</pre> : null}
+      </div>
+    );
+  }
+
   return <pre>{fallback}</pre>;
 }
 
@@ -4210,48 +8682,6 @@ function SideBySideDiffView({ diff }: { diff: SideBySideDiff }) {
   );
 }
 
-function parseApprovalMessage(message: string): ApprovalView {
-  const shellMatch = /^(Destructive shell command|Shell command):\s*(.*)$/m.exec(message);
-  if (shellMatch) {
-    const command = shellMatch[2].trim();
-    const cwd = /^Working directory:\s*(.*)$/m.exec(message)?.[1]?.trim();
-    const [executable, ...rest] = tokenizeCommand(command);
-    return {
-      type: "shell",
-      destructive: shellMatch[1].startsWith("Destructive"),
-      command,
-      cwd,
-      executable: executable ?? command,
-      rest: rest.join(" "),
-      warnings: detectCommandWarnings(command)
-    };
-  }
-
-  const writeMatch = /^(Destructive write|Write):\s*(.*)$/m.exec(message);
-  if (writeMatch) {
-    return {
-      type: "write",
-      destructive: writeMatch[1].startsWith("Destructive"),
-      summary: writeMatch[2].trim(),
-      diff: parseApprovalDiff(message)
-    };
-  }
-
-  const browserMatch = /^(Browser action|Browser read):\s*(.*)$/m.exec(message);
-  if (browserMatch) {
-    const mode = /^Mode:\s*(visible|background)$/m.exec(message)?.[1] as BrowserMode | undefined;
-    return {
-      type: "browser",
-      destructive: browserMatch[1] === "Browser action",
-      action: browserMatch[2].trim(),
-      target: /^Target:\s*(.*)$/m.exec(message)?.[1]?.trim() ?? "",
-      mode
-    };
-  }
-
-  return { type: "unknown", message };
-}
-
 function approvalSubtitle(view: ApprovalView) {
   if (view.type === "shell") {
     return view.destructive ? "Review this command before it runs." : "Review this command before it runs.";
@@ -4262,104 +8692,10 @@ function approvalSubtitle(view: ApprovalView) {
   if (view.type === "browser") {
     return view.destructive ? "Review this browser action." : "Review this browser read.";
   }
+  if (view.type === "network") {
+    return "Review this network request before it leaves the machine.";
+  }
   return "The agent wants to perform an action that changes state or runs a command.";
-}
-
-function parseApprovalDiff(message: string): SideBySideDiff | undefined {
-  const diffIndex = message.indexOf("\nDiff:\n");
-  if (diffIndex >= 0) {
-    return parseUnifiedSideBySide(message.slice(diffIndex + "\nDiff:\n".length));
-  }
-
-  const originalIndex = message.indexOf("\nOriginal:\n");
-  const proposedIndex = message.lastIndexOf("\nProposed:\n");
-  if (originalIndex < 0 || proposedIndex < 0 || proposedIndex < originalIndex) {
-    return undefined;
-  }
-
-  const path = /^Path:\s*(.*)$/m.exec(message)?.[1]?.trim() ?? "write_file";
-  const original = message.slice(originalIndex + "\nOriginal:\n".length, proposedIndex);
-  const proposed = message.slice(proposedIndex + "\nProposed:\n".length);
-  return buildTextSideBySide(path, original, proposed);
-}
-
-function parseUnifiedSideBySide(diff: string): SideBySideDiff {
-  const lines = diff.replace(/\r\n/g, "\n").split("\n");
-  const result: SideBySideDiff = { title: "patch", rows: [] };
-  let oldNumber = 0;
-  let newNumber = 0;
-
-  for (const line of lines) {
-    if (line.startsWith("+++ ")) {
-      result.title = cleanDiffPath(line.slice(4).trim());
-      continue;
-    }
-    if (line.startsWith("--- ")) {
-      continue;
-    }
-    if (line.startsWith("@@ ")) {
-      const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      oldNumber = Number(match?.[1] ?? 0);
-      newNumber = Number(match?.[2] ?? 0);
-      result.rows.push({ kind: "meta", label: line });
-      continue;
-    }
-    if (line.startsWith("+")) {
-      result.rows.push({ kind: "add", newNumber, right: line.slice(1) });
-      newNumber += 1;
-      continue;
-    }
-    if (line.startsWith("-")) {
-      result.rows.push({ kind: "delete", oldNumber, left: line.slice(1) });
-      oldNumber += 1;
-      continue;
-    }
-    if (line.startsWith(" ")) {
-      const text = line.slice(1);
-      result.rows.push({ kind: "context", oldNumber, newNumber, left: text, right: text });
-      oldNumber += 1;
-      newNumber += 1;
-    }
-  }
-
-  return result;
-}
-
-function buildTextSideBySide(title: string, original: string, proposed: string): SideBySideDiff {
-  const originalLines = splitLines(original);
-  const proposedLines = splitLines(proposed);
-  const count = Math.max(originalLines.length, proposedLines.length);
-  const rows: SideBySideRow[] = [];
-
-  for (let index = 0; index < count; index += 1) {
-    const left = originalLines[index];
-    const right = proposedLines[index];
-    if (left === right) {
-      rows.push({ kind: "context", oldNumber: index + 1, newNumber: index + 1, left, right });
-    } else if (left === undefined) {
-      rows.push({ kind: "add", newNumber: index + 1, right });
-    } else if (right === undefined) {
-      rows.push({ kind: "delete", oldNumber: index + 1, left });
-    } else {
-      rows.push({ kind: "change", oldNumber: index + 1, newNumber: index + 1, left, right });
-    }
-  }
-
-  return { title, rows };
-}
-
-function tokenizeCommand(command: string) {
-  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((part) => part.replace(/^(['"])(.*)\1$/, "$2")) ?? [];
-}
-
-function detectCommandWarnings(command: string) {
-  const checks: Array<[RegExp, string]> = [
-    [/\brm\s+(-[^\s]*r[^\s]*|-rf|-fr)\b/, "rm -rf"],
-    [/\bsudo\b/, "sudo"],
-    [/\b--force\b|\s-f(\s|$)/, "--force"],
-    [/(^|[^>])>\s*[^&]|\b2>\s*/, "redirect"]
-  ];
-  return checks.filter(([pattern]) => pattern.test(command)).map(([, label]) => label);
 }
 
 function PasteReviewDialog({
@@ -4415,13 +8751,7 @@ function PasteReviewDialog({
   );
 }
 
-function WorkspaceScaffoldDialog({
-  onCancel,
-  onCreate
-}: {
-  onCancel: () => void;
-  onCreate: (options: WorkspaceScaffoldOptions) => void;
-}) {
+function WorkspaceScaffoldDialog({ onCancel, onCreate }: { onCancel: () => void; onCreate: (options: WorkspaceScaffoldOptions) => void }) {
   const [options, setOptions] = useState<Required<WorkspaceScaffoldOptions>>({
     initGit: false,
     npmPackage: false,
@@ -4492,6 +8822,9 @@ function providerFormsFromConfig(config: DesktopState["config"]): ProviderFormSt
       name: provider.name,
       baseUrl: provider.baseUrl,
       model: provider.model,
+      toolCalling: provider.toolCalling ?? "auto",
+      imageInput: provider.imageInput ?? "auto",
+      contextWindowTokens: provider.contextWindowTokens,
       apiKey: "",
       apiKeyPresent: provider.apiKeyPresent
     }));
@@ -4504,6 +8837,8 @@ function providerFormsFromConfig(config: DesktopState["config"]): ProviderFormSt
       name: preset?.name ?? "Current provider",
       baseUrl: config.baseUrl,
       model: config.model,
+      toolCalling: config.toolCalling,
+      imageInput: config.imageInput,
       apiKey: "",
       apiKeyPresent: config.apiKeyPresent
     }
@@ -4560,6 +8895,44 @@ function agentLoopStatusLabel(loop: AgentLoopState) {
   return `Loop reached ${loop.maxIterations} iterations`;
 }
 
+function agentLoopRunStatusLabel(status: AgentLoopStatus) {
+  switch (status) {
+    case "running":
+      return "running";
+    case "stopping":
+      return "stopping";
+    case "completed":
+      return "completed";
+    case "stopped":
+      return "stopped";
+    case "blocked":
+      return "blocked";
+    case "failed":
+      return "failed";
+    case "max_iterations":
+      return "max iterations";
+  }
+}
+
+function agentLoopIterationStatusLabel(status: AgentLoopIterationStatus) {
+  switch (status) {
+    case "running":
+      return "Running";
+    case "continued":
+      return "Continued";
+    case "completed":
+      return "Completed";
+    case "stopped":
+      return "Stopped";
+    case "blocked":
+      return "Blocked";
+    case "failed":
+      return "Failed";
+    case "max_iterations":
+      return "Max iterations";
+  }
+}
+
 function sessionModelLabel(session: SessionSummary) {
   if (session.modelMode === "auto" || isAutoModelId(session.model)) {
     return session.selectedModel ? `Auto -> ${session.selectedModel}` : "Auto";
@@ -4588,7 +8961,12 @@ function sessionLoopLabel(loop: AgentLoopState) {
 }
 
 function uniqueProviderId(baseId: string, providers: ProviderFormState[]) {
-  const normalizedBase = baseId.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "provider";
+  const normalizedBase =
+    baseId
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "provider";
   const used = new Set(providers.map((provider) => provider.id));
   if (!used.has(normalizedBase)) {
     return normalizedBase;
@@ -4647,6 +9025,9 @@ function validateProviderForms(
       name,
       baseUrl: normalizeProviderUrl(baseUrl, name),
       model,
+      toolCalling: provider.toolCalling ?? "auto",
+      imageInput: provider.imageInput ?? "auto",
+      ...(provider.contextWindowTokens && provider.contextWindowTokens > 0 ? { contextWindowTokens: provider.contextWindowTokens } : {}),
       ...(provider.apiKey?.trim() ? { apiKey: provider.apiKey.trim() } : {})
     });
   }
@@ -4720,7 +9101,10 @@ function buildSlashCommandEntries({
   availableToolCount,
   availableSkillCount,
   pendingSkillCount,
-  agentLoopEnabled
+  agentPlanModeEnabled,
+  agentLoopEnabled,
+  agentWorktreeEnabled,
+  fileAttachmentCount
 }: {
   state: DesktopState | null;
   busy: boolean;
@@ -4729,7 +9113,10 @@ function buildSlashCommandEntries({
   availableToolCount: number;
   availableSkillCount: number;
   pendingSkillCount: number;
+  agentPlanModeEnabled: boolean;
   agentLoopEnabled: boolean;
+  agentWorktreeEnabled: boolean;
+  fileAttachmentCount: number;
 }): SlashCommandEntry[] {
   return SLASH_COMMANDS.map((command) => {
     if (command.id === "compact") {
@@ -4771,10 +9158,49 @@ function buildSlashCommandEntries({
       };
     }
 
+    if (command.id === "files") {
+      let disabledReason: string | undefined;
+      if (busy) {
+        disabledReason = "Agent is running.";
+      } else if (state?.projectRoot === null) {
+        disabledReason = "Open a workspace before attaching file context.";
+      } else if (fileAttachmentCount >= MAX_CONTEXT_FILE_ATTACHMENTS) {
+        disabledReason = "File context limit reached.";
+      }
+      return {
+        ...command,
+        detail: disabledReason
+          ? undefined
+          : `${formatNumber(fileAttachmentCount)} / ${formatNumber(MAX_CONTEXT_FILE_ATTACHMENTS)} attached`,
+        disabledReason
+      };
+    }
+
     if (command.id === "loop") {
       return {
         ...command,
         detail: agentLoopEnabled ? "Currently armed" : `${DEFAULT_AGENT_LOOP_MAX_ITERATIONS} iteration budget`
+      };
+    }
+
+    if (command.id === "plan") {
+      return {
+        ...command,
+        detail: agentPlanModeEnabled ? "Currently armed" : "Read-only plan before execution"
+      };
+    }
+
+    if (command.id === "worktree") {
+      let disabledReason: string | undefined;
+      if (busy) {
+        disabledReason = "Agent is running.";
+      } else if (state?.projectRoot === null) {
+        disabledReason = "Select a git project before using task worktrees.";
+      }
+      return {
+        ...command,
+        detail: disabledReason ? undefined : agentWorktreeEnabled ? "Currently armed" : "Next prompt gets an isolated branch",
+        disabledReason
       };
     }
 
@@ -4793,24 +9219,30 @@ function buildSessionCommandOutput({
   messages,
   estimatedContextTokens,
   availableToolCount,
-  imageAttachmentCount
+  imageAttachmentCount,
+  fileAttachmentCount
 }: {
   state: DesktopState;
   messages: ChatMessage[];
   estimatedContextTokens: number;
   availableToolCount: number;
   imageAttachmentCount: number;
+  fileAttachmentCount: number;
 }): CommandOutput {
   const nonSystemCount = messages.filter((message) => message.role !== "system").length;
   const remainingTokens = Math.max(0, COMPOSER_TOKEN_BUDGET - estimatedContextTokens);
   const provider = activeProviderForState(state);
+  const latestRun = state.taskRuns?.at(-1);
 
   return {
     title: "Session details",
     subtitle: "Local context estimate; provider context windows are not reported.",
     rows: [
       { label: "Chat ID", value: state.sessionId ?? "Draft chat (not saved yet)" },
-      { label: "Project", value: state.projectRoot === null ? "No project selected" : state.workspace.packageName ?? basename(state.projectRoot) },
+      {
+        label: "Project",
+        value: state.projectRoot === null ? "No project selected" : (state.workspace.packageName ?? basename(state.projectRoot))
+      },
       { label: "Workspace", value: state.workspace.root },
       { label: "Provider", value: provider ? `${provider.name} (${provider.baseUrl})` : state.config.baseUrl },
       { label: "Model", value: modelDisplayName(state.config.model) },
@@ -4818,6 +9250,44 @@ function buildSessionCommandOutput({
         ? [{ label: "Auto picked", value: `${state.modelSelection.model} (${state.modelSelection.providerName})` }]
         : []),
       ...(state.agentLoop ? [{ label: "Agent loop", value: agentLoopStatusLabel(state.agentLoop) }] : []),
+      ...(latestRun
+        ? [
+            {
+              label: "Latest run",
+              value: [
+                taskRunStatusLabel(latestRun.status),
+                latestRun.capabilities.length > 0 ? latestRun.capabilities.map(capabilityLabel).join(", ") : "no tools yet",
+                `${formatNumber(latestRun.approvals?.length ?? 0)} approvals`,
+                `${formatNumber(latestRun.artifacts.length)} artifacts`
+              ].join(" - ")
+            }
+          ]
+        : []),
+      ...(latestRun?.usage
+        ? [
+            {
+              label: "Tokens used",
+              value: `${formatNumber(latestRun.usage.totalTokens)} total (${formatNumber(latestRun.usage.promptTokens)} prompt / ${formatNumber(
+                latestRun.usage.completionTokens
+              )} completion) over ${formatNumber(latestRun.usage.requestCount)} request${latestRun.usage.requestCount === 1 ? "" : "s"}`
+            }
+          ]
+        : []),
+      ...(latestRun?.worktree?.enabled
+        ? [
+            {
+              label: "Task worktree",
+              value: [
+                worktreeStatusLabel(latestRun.worktree.status),
+                latestRun.worktree.branch ?? "branch",
+                worktreeDiffLabel(latestRun.worktree.diff),
+                latestRun.worktree.path ?? latestRun.worktree.error
+              ]
+                .filter(Boolean)
+                .join(" - ")
+            }
+          ]
+        : []),
       { label: "Trust mode", value: state.config.trustMode },
       {
         label: "Context used",
@@ -4826,6 +9296,7 @@ function buildSessionCommandOutput({
       { label: "Context remaining", value: `~${formatNumber(remainingTokens)} tokens` },
       { label: "Messages", value: `${formatNumber(nonSystemCount)} chat, ${formatNumber(messages.length)} total` },
       { label: "Attached images", value: `${formatNumber(imageAttachmentCount)} / ${formatNumber(MAX_IMAGE_ATTACHMENTS)}` },
+      { label: "Attached files", value: `${formatNumber(fileAttachmentCount)} / ${formatNumber(MAX_CONTEXT_FILE_ATTACHMENTS)}` },
       { label: "Tools", value: `${formatNumber(availableToolCount)} available` }
     ]
   };
@@ -4862,9 +9333,7 @@ function skillSummaryFromName(name: string): SkillSummary {
 }
 
 function estimateContextTokens(messages: ChatMessage[]) {
-  const transcript = messages
-    .map((message) => `${message.role}: ${chatContentToText(message.content)}`)
-    .join("\n\n");
+  const transcript = messages.map((message) => `${message.role}: ${chatContentToText(message.content)}`).join("\n\n");
   return estimateTokenCount(transcript);
 }
 
@@ -4881,8 +9350,10 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
       projectsByRoot.set(session.projectRoot, {
         projectRoot: session.projectRoot,
         name: basename(session.projectRoot),
+        projectRootExists: session.projectRootExists !== false,
         latestSessionId: session.id,
         updatedAt: session.updatedAt,
+        pinnedAt: session.pinnedAt,
         chatCount: 1,
         sessions: [session]
       });
@@ -4891,37 +9362,68 @@ function deriveProjects(sessions: SessionSummary[], state: DesktopState | null):
 
     existing.chatCount += 1;
     existing.sessions.push(session);
+    if (session.projectRootExists === false) {
+      existing.projectRootExists = false;
+    }
+    if (session.pinnedAt && (!existing.pinnedAt || session.pinnedAt > existing.pinnedAt)) {
+      existing.pinnedAt = session.pinnedAt;
+    }
     if (!existing.updatedAt || session.updatedAt > existing.updatedAt) {
       existing.latestSessionId = session.id;
       existing.updatedAt = session.updatedAt;
     }
   }
 
-  const projects = Array.from(projectsByRoot.values()).sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
+  const projects = Array.from(projectsByRoot.values()).sort(compareProjectsForDisplay);
   for (const project of projects) {
-    project.sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    project.sessions.sort(compareSessionsForDisplay);
   }
 
   if (!state || state.projectRoot === null) {
     return projects;
   }
 
-  const activeProject = projectsByRoot.get(state.projectRoot) ?? {
+  const existingActiveProject = projectsByRoot.get(state.projectRoot);
+  const activeProject = existingActiveProject ?? {
     projectRoot: state.projectRoot,
     name: state.workspace.packageName ?? basename(state.workspace.root),
+    projectRootExists: true,
     chatCount: 0,
     sessions: []
   };
   activeProject.name = state.workspace.packageName ?? basename(state.workspace.root);
 
-  return [
-    activeProject,
-    ...projects.filter((project) => project.projectRoot !== activeProject.projectRoot)
-  ];
+  return [activeProject, ...projects.filter((project) => project.projectRoot !== activeProject.projectRoot)];
 }
 
-function createPromptContent(text: string, images: ImageAttachment[]): ChatContent {
-  const trimmed = text.trim();
+function compareProjectsForDisplay(left: ProjectSummary, right: ProjectSummary) {
+  if (left.pinnedAt || right.pinnedAt) {
+    if (!left.pinnedAt) {
+      return 1;
+    }
+    if (!right.pinnedAt) {
+      return -1;
+    }
+    return right.pinnedAt.localeCompare(left.pinnedAt);
+  }
+  return (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "");
+}
+
+function compareSessionsForDisplay(left: SessionSummary, right: SessionSummary) {
+  if (left.pinnedAt || right.pinnedAt) {
+    if (!left.pinnedAt) {
+      return 1;
+    }
+    if (!right.pinnedAt) {
+      return -1;
+    }
+    return right.pinnedAt.localeCompare(left.pinnedAt);
+  }
+  return right.updatedAt.localeCompare(left.updatedAt);
+}
+
+function createPromptContent(text: string, images: ImageAttachment[], files: ContextFileAttachment[] = []): ChatContent {
+  const trimmed = promptTextWithFileContext(text, files);
   const parts: ChatContentPart[] = [];
   if (trimmed) {
     parts.push({ type: "text", text: trimmed });
@@ -4946,19 +9448,48 @@ function createPromptContent(text: string, images: ImageAttachment[]): ChatConte
 }
 
 function imageFilesFromClipboard(clipboard: DataTransfer) {
-  const files = Array.from(clipboard.files).filter((file) => SUPPORTED_IMAGE_TYPES.has(file.type));
+  return imageFilesFromDataTransfer(clipboard);
+}
+
+function imageFilesFromDataTransfer(dataTransfer: DataTransfer) {
+  const files = Array.from(dataTransfer.files).filter(isSupportedImageFile);
   if (files.length > 0) {
     return files;
   }
 
-  return Array.from(clipboard.items)
+  return Array.from(dataTransfer.items)
     .filter((item) => item.kind === "file" && SUPPORTED_IMAGE_TYPES.has(item.type))
     .map((item) => item.getAsFile())
-    .filter((file): file is File => Boolean(file));
+    .filter((file): file is File => Boolean(file && isSupportedImageFile(file)));
+}
+
+function hasPotentialImageTransfer(dataTransfer: DataTransfer) {
+  return (
+    Array.from(dataTransfer.files).some(isSupportedImageFile) ||
+    Array.from(dataTransfer.items).some((item) => item.kind === "file" && (item.type === "" || SUPPORTED_IMAGE_TYPES.has(item.type)))
+  );
+}
+
+function hasFileTransfer(dataTransfer: DataTransfer) {
+  return dataTransfer.files.length > 0 || Array.from(dataTransfer.items).some((item) => item.kind === "file");
+}
+
+function isSupportedImageFile(file: File) {
+  return Boolean(imageMimeTypeForFile(file));
+}
+
+function imageMimeTypeForFile(file: File) {
+  const type = file.type.toLowerCase();
+  if (SUPPORTED_IMAGE_TYPES.has(type)) {
+    return type;
+  }
+  const extension = /\.([^.]+)$/.exec(file.name)?.[1]?.toLowerCase();
+  return extension ? SUPPORTED_IMAGE_EXTENSIONS[extension] : undefined;
 }
 
 async function fileToImageAttachment(file: File): Promise<ImageAttachment> {
-  if (!SUPPORTED_IMAGE_TYPES.has(file.type)) {
+  const mimeType = imageMimeTypeForFile(file);
+  if (!mimeType) {
     throw new Error(`${file.name || "Image"} must be a PNG, JPEG, WebP, or GIF file.`);
   }
   if (file.size > MAX_IMAGE_BYTES) {
@@ -4968,11 +9499,15 @@ async function fileToImageAttachment(file: File): Promise<ImageAttachment> {
   return {
     id: randomId(),
     name: file.name || `pasted-image-${Date.now()}`,
-    mimeType: file.type,
+    mimeType,
     size: file.size,
-    dataUrl: await readFileAsDataUrl(file),
+    dataUrl: normalizeImageDataUrlMime(await readFileAsDataUrl(file), mimeType),
     detail: "auto"
   };
+}
+
+function normalizeImageDataUrlMime(dataUrl: string, mimeType: string) {
+  return dataUrl.startsWith("data:;base64,") ? dataUrl.replace("data:;base64,", `data:${mimeType};base64,`) : dataUrl;
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -5102,6 +9637,14 @@ function mergeImageAttachments(current: ImageAttachment[], next: ImageAttachment
   return Array.from(byId.values()).slice(0, MAX_IMAGE_ATTACHMENTS);
 }
 
+function mergeFileAttachments(current: ContextFileAttachment[], next: ContextFileAttachment[]) {
+  const byPath = new Map(current.map((file) => [file.path, file]));
+  for (const file of next) {
+    byPath.set(file.path, file);
+  }
+  return Array.from(byPath.values()).slice(0, MAX_CONTEXT_FILE_ATTACHMENTS);
+}
+
 function mimeTypeFromDataUrl(dataUrl: string) {
   return /^data:([^;,]+);base64,/i.exec(dataUrl)?.[1] ?? "image";
 }
@@ -5120,6 +9663,24 @@ function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null
   const systemItems: ActivityItem[] = [];
   const groups: ActivityGroup[] = [];
   const groupsByUserMessageIndex = new Map<number, ActivityGroup>();
+  const taskRuns = state?.taskRuns ?? [];
+  const taskRunsById = new Map(taskRuns.map((run) => [run.id, run]));
+  const taskRunsByUserMessageIndex = new Map<number, AgentTaskRun[]>();
+  for (const run of taskRuns) {
+    const runs = taskRunsByUserMessageIndex.get(run.userMessageIndex) ?? [];
+    runs.push(run);
+    taskRunsByUserMessageIndex.set(run.userMessageIndex, runs);
+  }
+  const latestRunForUserMessage = (index: number) => taskRunsByUserMessageIndex.get(index)?.at(-1);
+  const sourceRunFor = (run: AgentTaskRun | undefined) => {
+    const sourceRunId = run?.worktree?.continuedFromTaskRunId;
+    return sourceRunId ? taskRunsById.get(sourceRunId) : undefined;
+  };
+  const planSourceRunFor = (run: AgentTaskRun | undefined) => {
+    const sourceRunId = run?.worktree?.plannedFromTaskRunId;
+    return sourceRunId ? taskRunsById.get(sourceRunId) : undefined;
+  };
+  const worktreeAttemptRunsFor = (run: AgentTaskRun | undefined) => buildWorktreeAttemptRuns(run, taskRunsById);
   const completedToolCallIds = new Set(
     messages.flatMap((message) => (message.role === "tool" && message.toolCallId ? [message.toolCallId] : []))
   );
@@ -5176,8 +9737,12 @@ function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null
         title: queryActivityTitle(message.content),
         detail: chatContentToText(message.content),
         items: [],
-        status: "done"
+        status: "done",
+        run: latestRunForUserMessage(index)
       };
+      group.sourceRun = sourceRunFor(group.run);
+      group.planSourceRun = planSourceRunFor(group.run);
+      group.worktreeAttemptRuns = worktreeAttemptRunsFor(group.run);
       currentGroup = group;
       groups.push(group);
       groupsByUserMessageIndex.set(index, group);
@@ -5188,32 +9753,69 @@ function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null
       const group = activeGroup();
       for (const call of message.toolCalls) {
         const complete = completedToolCallIds.has(call.id);
+        const policy = activityPolicyForToolActivity(group.run, call.id, call.name);
         group.items.push({
           id: `call-${index}-${call.id}`,
           kind: "call",
+          toolCallId: call.id,
           title: call.name,
           detail: safeJson(call.arguments),
           summary: summarizeToolCall(call),
-          status: complete ? "done" : currentSessionRunning ? "running" : "waiting"
+          status: complete ? "done" : currentSessionRunning ? "running" : "waiting",
+          policy
         });
       }
     }
     if (message.role === "tool") {
       const group = activeGroup();
       const toolResult = buildToolResultActivity(message);
+      const policy = message.name ? activityPolicyForToolActivity(group.run, message.toolCallId, message.name) : undefined;
       group.items.push({
         id: `tool-${index}-${message.toolCallId ?? message.name}`,
         kind: "result",
+        toolCallId: message.toolCallId,
         title: message.name ?? "tool",
         detail: toolResult.detail,
         summary: toolResult.summary,
-        imagePreview: toolResult.imagePreview
+        imagePreview: toolResult.imagePreview,
+        policy
       });
     }
   });
 
+  const groupedRunIds = new Set(groups.flatMap((group) => (group.run ? [group.run.id] : [])));
   for (const group of groups) {
-    group.status = deriveActivityGroupStatus(group.items);
+    if (!group.run) {
+      continue;
+    }
+    if (group.items.length === 0) {
+      group.items.push(...activityItemsFromTaskRun(group.run));
+    } else {
+      group.items.unshift(...approvalActivityItemsFromTaskRun(group.run));
+    }
+  }
+  for (const run of taskRuns) {
+    if (groupedRunIds.has(run.id)) {
+      continue;
+    }
+    groups.push({
+      id: `activity-group-run-${run.id}`,
+      userMessageIndex: run.userMessageIndex,
+      title: run.promptPreview || "Restored run",
+      detail: run.promptPreview,
+      items: activityItemsFromTaskRun(run),
+      status: activityStatusForTaskRun(run),
+      run,
+      sourceRun: sourceRunFor(run),
+      planSourceRun: planSourceRunFor(run),
+      worktreeAttemptRuns: worktreeAttemptRunsFor(run)
+    });
+  }
+
+  for (const group of groups) {
+    group.status = group.run
+      ? mergeActivityGroupStatus(group.run, deriveActivityGroupStatus(group.items))
+      : deriveActivityGroupStatus(group.items);
   }
 
   if (currentSessionRunning) {
@@ -5239,9 +9841,644 @@ function deriveActivityModel(messages: ChatMessage[], state: DesktopState | null
   };
 }
 
+function buildWorktreeAttemptRuns(run: AgentTaskRun | undefined, runsById: Map<string, AgentTaskRun>) {
+  if (!run?.worktree?.enabled) {
+    return [];
+  }
+
+  const reversed: AgentTaskRun[] = [];
+  const seen = new Set<string>();
+  let current: AgentTaskRun | undefined = run;
+  while (current?.worktree?.enabled && !seen.has(current.id)) {
+    seen.add(current.id);
+    reversed.push(current);
+    const previousId: string | undefined = current.worktree.continuedFromTaskRunId;
+    current = previousId ? runsById.get(previousId) : undefined;
+  }
+  return reversed.reverse();
+}
+
+function activityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
+  const items: ActivityItem[] = [...approvalActivityItemsFromTaskRun(run)];
+  for (const tool of run.tools) {
+    const artifacts =
+      tool.artifactIds
+        ?.map((artifactId) => run.artifacts.find((candidate) => candidate.id === artifactId))
+        .filter((candidate): candidate is AgentTaskRunArtifact => Boolean(candidate)) ?? [];
+    const screenshotArtifact = artifacts.find((candidate) => candidate.kind === "browser_screenshot" && Boolean(candidate.path));
+    const commandArtifact = artifacts.find((candidate) => candidate.kind === "command_output");
+    const patchArtifact = artifacts.find((candidate) => candidate.kind === "patch");
+    const fileChangeArtifact = artifacts.find((candidate) => candidate.kind === "file_change");
+    const artifact = commandArtifact ?? patchArtifact ?? fileChangeArtifact ?? screenshotArtifact ?? artifacts[0];
+    const resultDetail = commandArtifact
+      ? commandArtifactDetail(commandArtifact)
+      : patchArtifact
+        ? patchArtifactDetail(patchArtifact)
+        : fileChangeArtifact
+          ? fileChangeArtifactDetail(fileChangeArtifact)
+          : (tool.resultPreview ?? artifact?.summary ?? "");
+    const resultSummary =
+      commandArtifactSummary(commandArtifact) ??
+      patchArtifactSummary(patchArtifact) ??
+      fileChangeArtifactSummary(fileChangeArtifact) ??
+      artifact?.summary;
+    const resultStatus =
+      tool.status === "failed" ||
+      (commandArtifact?.exitCode !== undefined && commandArtifact.exitCode !== 0) ||
+      commandArtifact?.testReports?.some((report) => report.status === "failed")
+        ? "failed"
+        : "done";
+    const imagePreview = screenshotArtifact?.path
+      ? {
+          path: screenshotArtifact.path,
+          width: screenshotArtifact.width,
+          height: screenshotArtifact.height,
+          caption: screenshotArtifact.summary ?? "Browser screenshot"
+        }
+      : undefined;
+    const diffPreview = patchArtifact?.diff
+      ? patchArtifactDiffPreview(patchArtifact)
+      : fileChangeArtifact?.content !== undefined
+        ? fileChangeArtifactDiffPreview(fileChangeArtifact)
+        : undefined;
+    const policy = activityPolicyForRunTool(run, tool);
+
+    items.push({
+      id: `run-call-${run.id}-${tool.toolCallId}`,
+      kind: "call",
+      toolCallId: tool.toolCallId,
+      title: tool.name,
+      detail: safeJson(tool.arguments ?? {}),
+      summary: capabilityLabel(tool.capability),
+      status: tool.status === "done" ? "done" : tool.status === "failed" ? "failed" : "running",
+      policy
+    });
+    if (tool.resultPreview || artifact) {
+      items.push({
+        id: `run-result-${run.id}-${tool.toolCallId}`,
+        kind: "result",
+        toolCallId: tool.toolCallId,
+        title: tool.name,
+        detail: resultDetail,
+        summary: resultSummary,
+        status: resultStatus,
+        imagePreview,
+        diffPreview,
+        evidenceLinks: commandArtifact ? commandArtifactEvidenceLinks(run.id, commandArtifact) : undefined,
+        remediationPrompt: commandArtifact ? buildReportRemediationPrompt(commandArtifact) : undefined,
+        rollbackPrompt: buildEditRollbackPrompt(run, patchArtifact, fileChangeArtifact),
+        policy
+      });
+    }
+  }
+  return items;
+}
+
+function approvalActivityItemsFromTaskRun(run: AgentTaskRun): ActivityItem[] {
+  return (run.approvals ?? []).map((approval) => ({
+    id: `run-approval-${run.id}-${approval.id}`,
+    kind: "approval" as const,
+    title: approvalTitle(approval),
+    detail: approvalDetail(approval),
+    summary: approvalSummary(approval),
+    status: approvalActivityStatus(approval.status),
+    diffPreview: approvalChangePreviewDiffPreview(approval.changePreview),
+    policy: activityPolicyFromApproval(approval)
+  }));
+}
+
+function activityPolicyForToolActivity(run: AgentTaskRun | undefined, toolCallId: string | undefined, name: string): ActivityPolicyDetail {
+  const tool = taskRunToolForActivity(run, toolCallId, name);
+  if (run && tool) {
+    return activityPolicyForRunTool(run, tool);
+  }
+  return inferredActivityPolicyForTool(name);
+}
+
+function taskRunToolForActivity(run: AgentTaskRun | undefined, toolCallId: string | undefined, name: string) {
+  if (!run) {
+    return undefined;
+  }
+  if (toolCallId) {
+    const byId = run.tools.find((tool) => tool.toolCallId === toolCallId);
+    if (byId) {
+      return byId;
+    }
+  }
+  return run.tools.find((tool) => tool.name === name);
+}
+
+function activityPolicyForRunTool(run: AgentTaskRun, tool: AgentTaskRunToolCall): ActivityPolicyDetail {
+  const approval = matchingApprovalForTool(run, tool);
+  if (approval) {
+    return activityPolicyFromApproval(approval);
+  }
+  return {
+    capability: tool.capability,
+    capabilityLabel: capabilityLabel(tool.capability),
+    source: "tool",
+    label: "Recorded capability",
+    reason: "This tool call has a saved capability record, but no matching approval audit was recorded on the task run.",
+    summary: `Tool ${tool.name} was classified as ${capabilityLabel(tool.capability)}.`
+  };
+}
+
+function matchingApprovalForTool(run: AgentTaskRun, tool: AgentTaskRunToolCall) {
+  const approvals = (run.approvals ?? []).filter((approval) => approval.capability === tool.capability);
+  if (approvals.length === 0) {
+    return undefined;
+  }
+  return approvals.slice().sort((left, right) => {
+    const leftRank = approvalMatchRank(left.status);
+    const rightRank = approvalMatchRank(right.status);
+    if (leftRank !== rightRank) {
+      return rightRank - leftRank;
+    }
+    return approvalTimestamp(right).localeCompare(approvalTimestamp(left));
+  })[0];
+}
+
+function approvalMatchRank(status: AgentTaskRunApprovalStatus) {
+  if (status === "allowed" || status === "approved" || status === "blocked" || status === "denied") {
+    return 2;
+  }
+  return 1;
+}
+
+function approvalTimestamp(approval: AgentTaskRunApproval) {
+  return approval.updatedAt ?? approval.decidedAt ?? approval.requestedAt ?? approval.createdAt;
+}
+
+function activityPolicyFromApproval(approval: AgentTaskRunApproval): ActivityPolicyDetail {
+  return {
+    capability: approval.capability,
+    capabilityLabel: capabilityLabel(approval.capability),
+    source: "approval",
+    label: approval.label,
+    reason: approval.reason,
+    effect: approval.effect,
+    status: approval.status,
+    trustMode: approval.trustMode,
+    risky: approval.risky,
+    override: approval.override,
+    scope: approval.scope,
+    summary: approval.summary
+  };
+}
+
+function inferredActivityPolicyForTool(name: string): ActivityPolicyDetail {
+  const capability = capabilityForToolName(name);
+  return {
+    capability,
+    capabilityLabel: capabilityLabel(capability),
+    source: "inferred",
+    label: "Inferred capability",
+    reason: "This row was restored from transcript tool protocol, so Arivu inferred the capability from the tool name.",
+    summary: `Tool ${name} maps to ${capabilityLabel(capability)}.`
+  };
+}
+
+function approvalTitle(approval: AgentTaskRunApproval) {
+  return `${approvalActionLabel(approval.actionType)} ${approvalStatusLabel(approval.status).toLowerCase()}`;
+}
+
+function approvalSummary(approval: AgentTaskRunApproval) {
+  return `${approvalStatusLabel(approval.status)}: ${capabilityLabel(approval.capability)} - ${approval.summary}`;
+}
+
+function approvalDetail(approval: AgentTaskRunApproval) {
+  const lines = [
+    `status: ${approvalStatusLabel(approval.status)}`,
+    `action: ${approval.actionType}`,
+    `capability: ${capabilityLabel(approval.capability)}`,
+    `trust mode: ${trustModeLabel(approval.trustMode)}`,
+    `policy: ${approval.effect}${approval.override ? ` (workspace override: ${approval.override})` : ""}`,
+    `risk: ${approval.risky ? "risky" : "standard"}`,
+    approval.scope ? `scope: ${approvalScopeDetail(approval.scope)}` : undefined,
+    `reason: ${approval.reason}`,
+    approval.requestedAt ? `requested: ${formatDateTime(approval.requestedAt)}` : undefined,
+    approval.decidedAt ? `decided: ${formatDateTime(approval.decidedAt)}` : undefined,
+    `summary: ${approval.summary}`,
+    approval.changePreview ? `change preview:\n${approvalChangePreviewDetail(approval.changePreview)}` : undefined,
+    approval.message ? `prompt:\n${approval.message}` : undefined
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n");
+}
+
+function approvalChangePreviewDetail(preview: AgentTaskRunApprovalChangePreview) {
+  const lines = [
+    `kind: ${preview.kind}`,
+    `title: ${preview.title}`,
+    preview.summary ? `summary: ${preview.summary}` : undefined,
+    preview.path ? `path: ${preview.path}` : undefined,
+    preview.writeMode ? `mode: ${preview.writeMode}` : undefined,
+    preview.changedPaths?.length ? `changedPaths:\n${preview.changedPaths.map((changedPath) => `- ${changedPath}`).join("\n")}` : undefined,
+    preview.additions !== undefined || preview.deletions !== undefined
+      ? `stats: +${preview.additions ?? 0} -${preview.deletions ?? 0}`
+      : undefined,
+    preview.lineCount !== undefined ? `lines: ${preview.lineCount}` : undefined,
+    preview.bytes !== undefined ? `bytes: ${preview.bytes}` : undefined,
+    preview.diffTruncated ? "diff: truncated" : undefined,
+    preview.contentTruncated ? "content: truncated" : undefined,
+    preview.originalTruncated ? "original: truncated" : undefined
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n");
+}
+
+function approvalChangePreviewDiffPreview(preview?: AgentTaskRunApprovalChangePreview): DiffPreview | undefined {
+  if (!preview) {
+    return undefined;
+  }
+  if (preview.kind === "patch" && preview.diff) {
+    return {
+      ...parseUnifiedDiffPreview(preview.diff),
+      title: preview.diffTruncated ? "Proposed patch (truncated)" : "Proposed patch"
+    };
+  }
+  if (preview.kind === "file_change" && preview.content !== undefined) {
+    const title = preview.path
+      ? `${preview.writeMode === "replace" ? "Proposed replacement" : "Proposed file"} ${preview.path}`
+      : "Proposed file write";
+    return {
+      title: preview.contentTruncated ? `${title} (truncated)` : title,
+      lines: splitLines(preview.content).map((text, index) => ({
+        kind: "add",
+        newNumber: index + 1,
+        text
+      }))
+    };
+  }
+  return undefined;
+}
+
+function approvalScopeDetail(scope: AgentTaskRunApprovalScope) {
+  const pieces = [scope.label, scope.value].filter(Boolean);
+  if (scope.detail) {
+    pieces.push(scope.detail);
+  }
+  return pieces.join(" - ");
+}
+
+function approvalActivityStatus(status: AgentTaskRunApprovalStatus): ActivityItem["status"] {
+  if (status === "requested") {
+    return "waiting";
+  }
+  if (status === "denied" || status === "blocked") {
+    return "failed";
+  }
+  return "done";
+}
+
+function approvalStatusLabel(status: AgentTaskRunApprovalStatus) {
+  switch (status) {
+    case "allowed":
+      return "Allowed";
+    case "requested":
+      return "Requested";
+    case "approved":
+      return "Approved";
+    case "denied":
+      return "Denied";
+    case "blocked":
+      return "Blocked";
+  }
+}
+
+function approvalActionLabel(actionType: AgentTaskRunApproval["actionType"]) {
+  switch (actionType) {
+    case "read":
+      return "Read approval";
+    case "write":
+      return "Write approval";
+    case "shell":
+      return "Command approval";
+    case "mcp":
+      return "MCP approval";
+    case "network":
+      return "Network approval";
+    case "browser":
+      return "Browser approval";
+  }
+}
+
+function commandArtifactSummary(artifact?: AgentTaskRunArtifact) {
+  if (!artifact || artifact.kind !== "command_output") {
+    return undefined;
+  }
+  const parts = [
+    artifact.timedOut ? "Timed out" : undefined,
+    artifact.exitCode === undefined ? undefined : `Exit code ${artifact.exitCode}`,
+    artifact.commandMode ? `Mode ${artifact.commandMode}` : undefined,
+    artifact.commandRisk ? `Risk ${artifact.commandRisk}` : undefined,
+    artifact.timeoutMs === undefined ? undefined : `Timeout ${formatDurationMs(artifact.timeoutMs)}`,
+    artifact.signal === undefined ? undefined : `Signal ${artifact.signal}`,
+    artifact.durationMs === undefined ? undefined : formatDurationMs(artifact.durationMs),
+    testReportSummary(artifact.testReports) ??
+      (artifact.reportPaths?.length
+        ? `${artifact.reportPaths.length} report path${artifact.reportPaths.length === 1 ? "" : "s"}`
+        : undefined),
+    diagnosticSummary(artifact.diagnostics)
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" - ") : artifact.summary;
+}
+
+function commandArtifactDetail(artifact: AgentTaskRunArtifact) {
+  const metadata = [
+    artifact.command === undefined ? undefined : `command: ${artifact.command}`,
+    artifact.commandMode === undefined ? undefined : `commandMode: ${artifact.commandMode}`,
+    artifact.commandRisk === undefined ? undefined : `commandRisk: ${artifact.commandRisk}`,
+    artifact.commandAnalysis === undefined ? undefined : `commandAnalysis: ${artifact.commandAnalysis}`,
+    artifact.executionProfile === undefined ? undefined : `executionProfile: ${artifact.executionProfile}`,
+    artifact.executionIsolation === undefined ? undefined : `executionIsolation: ${artifact.executionIsolation}`,
+    artifact.workingDirectory === undefined ? undefined : `workingDirectory: ${artifact.workingDirectory}`,
+    artifact.timeoutMs === undefined ? undefined : `timeoutMs: ${artifact.timeoutMs}`,
+    artifact.timedOut === undefined ? undefined : `timedOut: ${artifact.timedOut}`,
+    artifact.signal === undefined ? undefined : `signal: ${artifact.signal}`,
+    artifact.exitCode === undefined ? undefined : `exitCode: ${artifact.exitCode}`,
+    artifact.durationMs === undefined ? undefined : `duration: ${formatDurationMs(artifact.durationMs)}`
+  ].filter((part): part is string => Boolean(part));
+  const sections = metadata.length > 0 ? [metadata.join("\n")] : [];
+
+  if (artifact.testReports?.length) {
+    sections.push(`test reports:\n${artifact.testReports.map(formatTestReportDetail).join("\n")}`);
+  }
+  const parsedReportPaths = new Set(artifact.testReports?.map((report) => report.path) ?? []);
+  const unparsedReportPaths = artifact.reportPaths?.filter((path) => !parsedReportPaths.has(path)) ?? [];
+  if (unparsedReportPaths.length) {
+    sections.push(`report paths:\n${unparsedReportPaths.map((path) => `- ${path}`).join("\n")}`);
+  }
+  if (artifact.diagnostics?.length) {
+    sections.push(`diagnostics:\n${artifact.diagnostics.map(formatDiagnosticLine).join("\n")}`);
+  }
+  if (artifact.stdout !== undefined) {
+    sections.push(`stdout${artifact.stdoutTruncated ? " (truncated)" : ""}:\n${artifact.stdout || "(empty)"}`);
+  }
+  if (artifact.stderr !== undefined) {
+    sections.push(`stderr${artifact.stderrTruncated ? " (truncated)" : ""}:\n${artifact.stderr || "(empty)"}`);
+  }
+
+  return sections.length > 0 ? sections.join("\n\n") : (artifact.summary ?? "");
+}
+
+function patchArtifactSummary(artifact?: AgentTaskRunArtifact) {
+  if (!artifact || artifact.kind !== "patch") {
+    return undefined;
+  }
+  const stats = [
+    artifact.changedPaths?.length ? `${artifact.changedPaths.length} file${artifact.changedPaths.length === 1 ? "" : "s"}` : undefined,
+    artifact.additions ? `+${artifact.additions}` : undefined,
+    artifact.deletions ? `-${artifact.deletions}` : undefined,
+    artifact.diffTruncated ? "truncated" : undefined
+  ].filter((part): part is string => Boolean(part));
+  return stats.length > 0 ? `${artifact.summary ?? "Patch applied"} - ${stats.join(" ")}` : artifact.summary;
+}
+
+function patchArtifactDetail(artifact: AgentTaskRunArtifact) {
+  const metadata = [
+    artifact.changedPaths?.length ? `changedPaths:\n${artifact.changedPaths.map((path) => `- ${path}`).join("\n")}` : undefined,
+    artifact.additions !== undefined || artifact.deletions !== undefined
+      ? `stats: +${artifact.additions ?? 0} -${artifact.deletions ?? 0}`
+      : undefined,
+    artifact.diffTruncated ? "diff: truncated" : undefined
+  ].filter((part): part is string => Boolean(part));
+  return metadata.length > 0 ? metadata.join("\n\n") : (artifact.summary ?? "");
+}
+
+function patchArtifactDiffPreview(artifact: AgentTaskRunArtifact): DiffPreview | undefined {
+  if (!artifact.diff) {
+    return undefined;
+  }
+  return {
+    ...parseUnifiedDiffPreview(artifact.diff),
+    title: artifact.diffTruncated ? "Applied patch (truncated)" : "Applied patch"
+  };
+}
+
+function buildEditRollbackPrompt(run: AgentTaskRun, patchArtifact?: AgentTaskRunArtifact, fileChangeArtifact?: AgentTaskRunArtifact) {
+  const artifact = patchArtifact ?? fileChangeArtifact;
+  if (!artifact || (artifact.kind !== "patch" && artifact.kind !== "file_change")) {
+    return undefined;
+  }
+
+  const paths = editArtifactPaths(artifact);
+  const intro =
+    artifact.kind === "patch"
+      ? `Review and revert the direct patch artifact from Arivu task run ${run.id}.`
+      : `Review and revert the direct file-change artifact from Arivu task run ${run.id}.`;
+  const lines = [
+    intro,
+    "Before editing, inspect the current files and preserve any later user or agent changes that are unrelated to this artifact.",
+    "Prefer the smallest safe reverse patch. If the change cannot be reverted cleanly, explain what blocks it and ask before doing anything destructive.",
+    run.promptPreview ? `Original request: ${run.promptPreview}` : undefined,
+    artifact.summary ? `Artifact summary: ${artifact.summary}` : undefined,
+    paths.length ? `Changed path${paths.length === 1 ? "" : "s"}:\n${paths.map((filePath) => `- ${filePath}`).join("\n")}` : undefined,
+    artifact.kind === "patch" && (artifact.additions !== undefined || artifact.deletions !== undefined)
+      ? `Patch stats: +${artifact.additions ?? 0} -${artifact.deletions ?? 0}`
+      : undefined,
+    artifact.kind === "file_change" && artifact.writeMode
+      ? `File-change mode: ${artifact.writeMode}${artifact.lineCount !== undefined ? `, ${artifact.lineCount} lines` : ""}`
+      : undefined,
+    "",
+    editArtifactEvidenceSection(artifact),
+    "",
+    "After reverting, run the first focused verification that fits the affected files and summarize the result."
+  ].filter((line): line is string => line !== undefined);
+  return lines.join("\n");
+}
+
+function editArtifactPaths(artifact: AgentTaskRunArtifact) {
+  if (artifact.kind === "patch") {
+    return artifact.changedPaths ?? [];
+  }
+  return artifact.path ? [artifact.path] : [];
+}
+
+function editArtifactEvidenceSection(artifact: AgentTaskRunArtifact) {
+  if (artifact.kind === "patch" && artifact.diff) {
+    const suffix = artifact.diffTruncated ? " (truncated)" : "";
+    return `Applied diff evidence${suffix}:\n\`\`\`diff\n${artifact.diff}\n\`\`\``;
+  }
+  if (artifact.kind === "file_change" && artifact.content !== undefined) {
+    const suffix = artifact.contentTruncated ? " (truncated)" : "";
+    return `Written content evidence${suffix}:\n\`\`\`\n${artifact.content}\n\`\`\``;
+  }
+  return "No bounded diff/content evidence was saved on this artifact. Use the changed paths and current git state to identify the smallest safe revert.";
+}
+
+function fileChangeArtifactSummary(artifact?: AgentTaskRunArtifact) {
+  if (!artifact || artifact.kind !== "file_change") {
+    return undefined;
+  }
+  const stats = [
+    artifact.lineCount !== undefined ? `${artifact.lineCount} line${artifact.lineCount === 1 ? "" : "s"}` : undefined,
+    artifact.contentTruncated ? "truncated" : undefined
+  ].filter((part): part is string => Boolean(part));
+  return stats.length > 0 ? `${artifact.summary ?? "File changed"} - ${stats.join(" ")}` : artifact.summary;
+}
+
+function fileChangeArtifactDetail(artifact: AgentTaskRunArtifact) {
+  const metadata = [
+    artifact.path ? `path: ${artifact.path}` : undefined,
+    artifact.writeMode ? `mode: ${artifact.writeMode}` : undefined,
+    artifact.lineCount !== undefined ? `lines: ${artifact.lineCount}` : undefined,
+    artifact.contentTruncated ? "content: truncated" : undefined
+  ].filter((part): part is string => Boolean(part));
+  return metadata.length > 0 ? metadata.join("\n") : (artifact.summary ?? "");
+}
+
+function fileChangeArtifactDiffPreview(artifact: AgentTaskRunArtifact): DiffPreview | undefined {
+  if (artifact.content === undefined) {
+    return undefined;
+  }
+  const title = artifact.path ? `${artifact.writeMode === "replace" ? "Replaced" : "Created"} ${artifact.path}` : "File change";
+  return {
+    title: artifact.contentTruncated ? `${title} (truncated)` : title,
+    lines: splitLines(artifact.content).map((text, index) => ({
+      kind: "add",
+      newNumber: index + 1,
+      text
+    }))
+  };
+}
+
+function commandArtifactEvidenceLinks(taskRunId: string, artifact: AgentTaskRunArtifact) {
+  if (artifact.kind !== "command_output") {
+    return undefined;
+  }
+
+  const links: ActivityEvidenceLink[] = [];
+  const seen = new Set<string>();
+  const addLink = (kind: ActivityEvidenceLink["kind"], path: string | undefined, line?: number) => {
+    if (!path || links.length >= MAX_ACTIVITY_EVIDENCE_LINKS) {
+      return;
+    }
+    const key = `${kind}:${path}:${line ?? ""}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    const suffix = line ? `:${line}` : "";
+    const name = basename(path);
+    links.push({
+      id: `${taskRunId}:${artifact.id}:${key}`,
+      kind,
+      taskRunId,
+      artifactId: artifact.id,
+      path,
+      line,
+      label: kind === "report" ? `Open ${name}` : `Open ${name}${suffix}`,
+      title: kind === "report" ? `Open report ${path}` : `Open evidence ${path}${suffix}`
+    });
+  };
+
+  for (const reportPath of artifact.reportPaths ?? []) {
+    addLink("report", reportPath);
+  }
+  for (const report of artifact.testReports ?? []) {
+    addLink("report", report.path);
+    for (const failure of report.failedTests ?? []) {
+      addLink("source", failure.file, failure.line);
+    }
+    for (const finding of report.findingDetails ?? []) {
+      addLink("source", finding.path, finding.line);
+    }
+  }
+  for (const diagnostic of artifact.diagnostics ?? []) {
+    addLink("diagnostic", diagnostic.path, diagnostic.line);
+  }
+
+  return links.length > 0 ? links : undefined;
+}
+
+function diagnosticSummary(diagnostics?: AgentTaskRunDiagnostic[]) {
+  if (!diagnostics?.length) {
+    return undefined;
+  }
+  const errorCount = diagnostics.filter((diagnostic) => diagnostic.severity === "error").length;
+  return errorCount > 0
+    ? `${diagnostics.length} diagnostic${diagnostics.length === 1 ? "" : "s"} (${errorCount} error${errorCount === 1 ? "" : "s"})`
+    : `${diagnostics.length} diagnostic${diagnostics.length === 1 ? "" : "s"}`;
+}
+
+function testReportSummary(reports?: AgentTaskRunTestReport[]) {
+  if (!reports?.length) {
+    return undefined;
+  }
+  const failedReports = reports.filter((report) => report.status === "failed").length;
+  const first = reports[0];
+  const suffix = reports.length > 1 ? ` + ${reports.length - 1} more` : "";
+  const status = failedReports > 0 ? `${failedReports} failed report${failedReports === 1 ? "" : "s"}` : undefined;
+  return `${first.summary}${suffix}${status ? ` (${status})` : ""}`;
+}
+
+function formatTestReportLine(report: AgentTaskRunTestReport) {
+  const kind = report.kind.toUpperCase();
+  return `- ${report.path}: ${kind} ${report.summary} (${report.status})`;
+}
+
+function formatTestReportDetail(report: AgentTaskRunTestReport) {
+  const lines = [formatTestReportLine(report)];
+  if (report.failedTests?.length) {
+    lines.push(...report.failedTests.map((failure) => `  failed: ${formatFailedTestLine(failure)}`));
+  }
+  if (report.findingDetails?.length) {
+    lines.push(...report.findingDetails.map((finding) => `  finding: ${formatFindingLine(finding)}`));
+  }
+  return lines.join("\n");
+}
+
+function formatFailedTestLine(failure: NonNullable<AgentTaskRunTestReport["failedTests"]>[number]) {
+  const label = [failure.classname, failure.name].filter(Boolean).join(".");
+  const location = failure.file ? ` ${failure.file}${failure.line ? `:${failure.line}` : ""}` : "";
+  const message = failure.message ? ` - ${failure.message}` : "";
+  return `${label || failure.name}${location}${message}`;
+}
+
+function formatFindingLine(finding: NonNullable<AgentTaskRunTestReport["findingDetails"]>[number]) {
+  const rule = finding.ruleId ? `${finding.ruleId}` : "finding";
+  const level = finding.level ? ` ${finding.level}` : "";
+  const location = finding.path
+    ? ` ${finding.path}${finding.line ? `:${finding.line}${finding.column ? `:${finding.column}` : ""}` : ""}`
+    : "";
+  const message = finding.message ? ` - ${finding.message}` : "";
+  return `${rule}${level}${location}${message}`;
+}
+
+function formatDiagnosticLine(diagnostic: AgentTaskRunDiagnostic) {
+  const code = diagnostic.code ? `${diagnostic.code} ` : "";
+  const location = diagnostic.path
+    ? ` ${diagnostic.path}${diagnostic.line ? `:${diagnostic.line}${diagnostic.column ? `:${diagnostic.column}` : ""}` : ""}`
+    : "";
+  return `- ${diagnostic.source} ${diagnostic.severity}${location} - ${code}${diagnostic.message}`;
+}
+
+function mergeActivityGroupStatus(run: AgentTaskRun, itemStatus: ActivityGroupStatus): ActivityGroupStatus {
+  const runStatus = activityStatusForTaskRun(run);
+  if (runStatus === "running" || runStatus === "failed") {
+    return runStatus;
+  }
+  if (itemStatus === "running" || itemStatus === "failed" || itemStatus === "waiting") {
+    return itemStatus;
+  }
+  return runStatus;
+}
+
+function activityStatusForTaskRun(run: AgentTaskRun): ActivityGroupStatus {
+  if (run.status === "queued" || run.status === "running") {
+    return "running";
+  }
+  if (run.status === "failed" || run.status === "blocked") {
+    return "failed";
+  }
+  return "done";
+}
+
 function deriveActivityGroupStatus(items: ActivityItem[]): ActivityGroupStatus {
   if (items.some((item) => item.status === "running")) {
     return "running";
+  }
+  if (items.some((item) => item.status === "failed")) {
+    return "failed";
   }
   if (items.some((item) => item.status === "waiting")) {
     return "waiting";
@@ -5255,28 +10492,495 @@ function queryActivityTitle(content: ChatContent) {
 }
 
 function toolRunSummaryLabel(group: ActivityGroup) {
-  const count = group.items.filter((item) => item.kind !== "system").length;
+  const label = toolActivityCountLabel(group.items);
   if (group.status === "running") {
-    return `Running ${toolEventCountLabel(count)}`;
+    return `${label} running`;
+  }
+  if (group.status === "failed") {
+    return `${label} failed`;
   }
   if (group.status === "waiting") {
-    return `Waiting on ${toolEventCountLabel(count)}`;
+    return `${label} waiting`;
   }
-  return `Ran ${toolEventCountLabel(count)}`;
+  return `${label} done`;
 }
 
-function toolEventCountLabel(count: number) {
-  return `${count} tool ${count === 1 ? "event" : "events"}`;
+function toolActivityCountLabel(items: ActivityItem[]) {
+  const entries = toolRunEntriesFromItems(items);
+  const toolCount = entries.filter((entry) => entry.kind === "tool").length;
+  if (toolCount > 0) {
+    return `${toolCount} tool ${toolCount === 1 ? "step" : "steps"}`;
+  }
+  return `${entries.length} activity ${entries.length === 1 ? "step" : "steps"}`;
 }
 
-function toolRunKindLabel(item: ActivityItem) {
-  if (item.kind === "call") {
-    return "Call";
+function activityGroupEyebrow(group: ActivityGroup) {
+  if (group.run) {
+    return `Query tools - ${shortRunId(group.run.id)}`;
   }
-  if (item.kind === "result") {
-    return "Result";
+  if (group.userMessageIndex !== null) {
+    return "Query tools";
   }
-  return "Info";
+  return "Session tools";
+}
+
+function toolRunEntriesFromItems(items: ActivityItem[]): ToolRunEntry[] {
+  const entries: ToolRunEntry[] = [];
+  const byToolCallId = new Map<string, ToolRunEntry>();
+  for (const item of items) {
+    if (item.kind === "system") {
+      continue;
+    }
+    if ((item.kind === "call" || item.kind === "result") && item.toolCallId) {
+      const existing = byToolCallId.get(item.toolCallId);
+      if (existing) {
+        if (item.kind === "call") {
+          existing.call = item;
+        } else {
+          existing.result = item;
+        }
+        existing.title = existing.call?.title ?? existing.result?.title ?? existing.title;
+        existing.status = mergeToolRunEntryStatus(existing.call, existing.result);
+        existing.policy = existing.call?.policy ?? existing.result?.policy;
+        existing.imagePreview = existing.result?.imagePreview ?? existing.call?.imagePreview;
+        continue;
+      }
+
+      const entry: ToolRunEntry = {
+        id: `tool-entry-${item.toolCallId}`,
+        kind: "tool",
+        title: item.title,
+        status: mergeToolRunEntryStatus(item.kind === "call" ? item : undefined, item.kind === "result" ? item : undefined),
+        call: item.kind === "call" ? item : undefined,
+        result: item.kind === "result" ? item : undefined,
+        policy: item.policy,
+        imagePreview: item.imagePreview
+      };
+      byToolCallId.set(item.toolCallId, entry);
+      entries.push(entry);
+      continue;
+    }
+
+    entries.push({
+      id: `tool-entry-${item.id}`,
+      kind: item.kind === "approval" ? "approval" : "event",
+      title: item.title,
+      status: item.status,
+      item,
+      policy: item.policy,
+      imagePreview: item.imagePreview
+    });
+  }
+  return entries;
+}
+
+function mergeToolRunEntryStatus(call: ActivityItem | undefined, result: ActivityItem | undefined): ActivityItem["status"] {
+  if (result?.status === "failed" || call?.status === "failed") {
+    return "failed";
+  }
+  if (result) {
+    return result.status ?? "done";
+  }
+  return call?.status;
+}
+
+function toolRunEntryKindLabel(entry: ToolRunEntry) {
+  if (entry.kind === "tool") {
+    return entry.result ? "Tool" : "Call";
+  }
+  if (entry.kind === "approval") {
+    return "Approval";
+  }
+  return "Event";
+}
+
+function capabilityLabel(capability: AgentTaskRunCapability) {
+  switch (capability) {
+    case "read_repo":
+      return "Read";
+    case "write_workspace":
+      return "Write";
+    case "run_command":
+      return "Command";
+    case "network_fetch":
+      return "Network";
+    case "browser_control":
+      return "Browser";
+    case "mcp_call":
+      return "MCP";
+    case "skill_context":
+      return "Skill";
+    case "local_context":
+      return "Local context";
+    default:
+      return "Unknown";
+  }
+}
+
+function taskRunStatusLabel(status: AgentTaskRunStatus) {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "running":
+      return "Running";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "stopped":
+      return "Stopped";
+    case "blocked":
+      return "Blocked";
+    case "max_iterations":
+      return "Max iterations";
+    default:
+      return status;
+  }
+}
+
+function verificationStatusLabel(status: AgentTaskRunVerification["status"]) {
+  switch (status) {
+    case "passed":
+      return "Passed";
+    case "failed":
+      return "Failed";
+    case "unknown":
+      return "Unknown";
+  }
+}
+
+function verificationMetaLabel(verification: AgentTaskRunVerification) {
+  if (verification.status === "unknown") {
+    return "Verification unknown";
+  }
+  return `Verification ${verificationStatusLabel(verification.status).toLowerCase()}`;
+}
+
+function planItemStatusLabel(status: NonNullable<AgentTaskRun["plan"]>["items"][number]["status"]) {
+  switch (status) {
+    case "completed":
+      return "Done";
+    case "in_progress":
+      return "Doing";
+    case "pending":
+      return "Next";
+    default:
+      return "Step";
+  }
+}
+
+function planReviewStatusLabel(status: NonNullable<AgentTaskRun["planReview"]>["status"]) {
+  switch (status) {
+    case "approved":
+      return "Approved";
+    case "revision_requested":
+      return "Revision requested";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return "Plan review";
+  }
+}
+
+function taskWorktreeActionsForRun(run: AgentTaskRun) {
+  const worktree = run.worktree;
+  if (!worktree?.enabled) {
+    return [];
+  }
+
+  const verificationBlocked = run.verification?.status === "failed";
+  const verificationBlockedReason = verificationBlocked ? "Resolve failed verification before promoting this task worktree" : undefined;
+  const conflictBlockedReason = worktree.conflict ? "Resolve or abort the task worktree conflict before promoting this branch" : undefined;
+  const promotionBlocked = verificationBlocked || Boolean(worktree.conflict);
+  const promotionBlockedReason = conflictBlockedReason ?? verificationBlockedReason;
+  const actions: Array<{
+    id: TaskWorktreeAction;
+    label: string;
+    title: string;
+    icon: ReactNode;
+    disabled?: boolean;
+    disabledReason?: string;
+  }> = [];
+  if (worktree.path && !["discarded", "cleaned"].includes(worktree.status)) {
+    actions.push({
+      id: "open",
+      label: "Open",
+      title: "Open this task worktree folder",
+      icon: <FolderOpen size={12} />
+    });
+  }
+  if (worktree.status === "ready") {
+    actions.push({
+      id: "refresh",
+      label: "Refresh",
+      title: "Refresh task worktree diff",
+      icon: <RefreshCw size={12} />
+    });
+    if (!["queued", "running"].includes(run.status)) {
+      actions.push({
+        id: "preview",
+        label: "Preview",
+        title: worktree.conflict
+          ? "Resolve or abort conflicts before generating a patch preview"
+          : "Generate a patch preview before merging",
+        icon: <FileText size={12} />,
+        disabled: Boolean(worktree.conflict),
+        disabledReason: conflictBlockedReason
+      });
+      actions.push({
+        id: "sync",
+        label: "Sync",
+        title: worktree.conflict
+          ? "Conflict resolution is already in progress"
+          : "Sync this task branch with the current original checkout",
+        icon: <GitBranch size={12} />,
+        disabled: Boolean(worktree.conflict),
+        disabledReason: conflictBlockedReason
+      });
+      const canMerge = Boolean(worktree.patchPreview) || worktree.diff?.hasChanges === false;
+      if (worktree.patchPreview && !worktree.pullRequest?.url) {
+        actions.push({
+          id: "prepare_pr",
+          label: "PR draft",
+          title: "Prepare a pull request draft for this task worktree",
+          icon: <GitPullRequest size={12} />,
+          disabled: promotionBlocked,
+          disabledReason: promotionBlockedReason
+        });
+      }
+      if (worktree.pullRequest?.remoteName && worktree.pullRequest.baseBranch && !worktree.pullRequest.url) {
+        actions.push({
+          id: "create_pr",
+          label: "Create PR",
+          title: "Push this task branch and create a draft pull request",
+          icon: <GitPullRequest size={12} />,
+          disabled: promotionBlocked,
+          disabledReason: promotionBlockedReason
+        });
+      }
+      actions.push({
+        id: "discard",
+        label: "Discard",
+        title: "Delete this task worktree and its task branch",
+        icon: <Trash2 size={12} />
+      });
+      if (canMerge) {
+        actions.splice(2, 0, {
+          id: "merge",
+          label: "Merge",
+          title: "Fast-forward merge this previewed task worktree into the original checkout",
+          icon: <Check size={12} />,
+          disabled: promotionBlocked,
+          disabledReason: promotionBlockedReason
+        });
+      }
+    }
+  } else if (worktree.status === "merged") {
+    actions.push({
+      id: "cleanup",
+      label: "Clean up",
+      title: "Remove the merged task worktree and task branch",
+      icon: <Scissors size={12} />
+    });
+  } else if (worktree.status === "failed" && worktree.path && worktree.branch) {
+    actions.push({
+      id: "discard",
+      label: "Discard",
+      title: "Delete this failed task worktree and its task branch",
+      icon: <Trash2 size={12} />
+    });
+  }
+  return actions;
+}
+
+function taskWorktreeVerificationGate(run: AgentTaskRun, sourceRun?: AgentTaskRun) {
+  const verification = run.verification;
+  const worktree = run.worktree;
+  if (!verification) {
+    return {
+      status: "unknown",
+      message: "No verification summary yet. Preview remains available; run checks before PR or merge."
+    };
+  }
+  if (verification.status === "failed") {
+    return {
+      status: "failed",
+      message: `Promotion blocked: ${verification.summary}`
+    };
+  }
+  if (verification.status === "unknown") {
+    return {
+      status: "unknown",
+      message: verification.summary
+    };
+  }
+  if (verification.status === "passed" && worktree?.enabled && worktree.status === "ready") {
+    const intro =
+      worktree.continuedFromTaskRunId || sourceRun?.verification?.status === "failed" ? "Repair verified" : "Verification passed";
+    if (worktree.pullRequest?.url) {
+      return {
+        status: "passed",
+        message: `${intro}: draft PR created. Continue review in GitHub or clean up after merge.`
+      };
+    }
+    if (worktree.pullRequest?.remoteName && worktree.pullRequest.baseBranch) {
+      return {
+        status: "passed",
+        message: `${intro}: PR draft is prepared. Create PR is available.`
+      };
+    }
+    if (worktree.patchPreview) {
+      return {
+        status: "passed",
+        message: `${intro}: patch preview is ready. PR draft or merge can proceed.`
+      };
+    }
+    if (worktree.diff?.hasChanges === false) {
+      return {
+        status: "passed",
+        message: `${intro}: no worktree changes are currently recorded. Refresh if the branch changed.`
+      };
+    }
+    return {
+      status: "passed",
+      message: `${intro}: generate a patch preview before PR draft or merge.`
+    };
+  }
+  return undefined;
+}
+
+function worktreeStatusLabel(status: AgentTaskRunWorktreeStatus) {
+  switch (status) {
+    case "creating":
+      return "Creating";
+    case "ready":
+      return "Ready";
+    case "failed":
+      return "Failed";
+    case "merged":
+      return "Merged";
+    case "discarded":
+      return "Discarded";
+    case "cleaned":
+      return "Cleaned";
+    default:
+      return status;
+  }
+}
+
+function taskWorktreeInventorySummary(items: TaskWorktreeInventoryItem[]) {
+  const present = items.filter((item) => item.folderExists).length;
+  if (items.length === 0) {
+    return "No recorded task worktrees";
+  }
+  return `${items.length} recorded, ${present} present`;
+}
+
+function worktreeInventoryStatusLabel(item: TaskWorktreeInventoryItem) {
+  const folder = item.folderExists ? "present" : "missing";
+  const pr = item.pullRequestUrl ? " - PR created" : item.pullRequestPreparedAt ? " - PR draft" : "";
+  return `${worktreeStatusLabel(item.worktreeStatus)} - ${folder}${pr} - ${item.sessionTitle}`;
+}
+
+function confirmInventoryWorktreeAction(item: TaskWorktreeInventoryItem, action: TaskWorktreeAction) {
+  const label = item.branch ?? "this task worktree";
+  const missingNote = item.folderExists
+    ? ""
+    : "\n\nThe recorded folder is missing; Arivu will prune the worktree record and delete the task branch where possible.";
+  if (action === "discard") {
+    return window.confirm(
+      `Discard ${label}? This deletes the managed task worktree and its task branch. The original checkout stays unchanged.${missingNote}`
+    );
+  }
+  if (action === "cleanup") {
+    return window.confirm(`Clean up ${label}? This removes the merged task worktree and its task branch.${missingNote}`);
+  }
+  if (action === "create_pr") {
+    return confirmCreatePullRequest({ title: item.pullRequestTitle ?? label, branch: item.branch ?? label });
+  }
+  return true;
+}
+
+function confirmCreatePullRequest(pullRequest: Pick<AgentTaskRunWorktreePullRequest, "title" | "branch"> | undefined) {
+  const label = pullRequest?.title ?? pullRequest?.branch ?? "this task worktree";
+  return window.confirm(`Create a draft pull request for ${label}? Arivu will push the task branch and run GitHub CLI.`);
+}
+
+function worktreeDiffLabel(diff: AgentTaskRunWorktreeDiff | undefined) {
+  if (!diff) {
+    return undefined;
+  }
+  if (!diff.hasChanges) {
+    return "No changes";
+  }
+  const stats = [diff.insertions ? `+${diff.insertions}` : "", diff.deletions ? `-${diff.deletions}` : ""].filter(Boolean);
+  return `${diff.files} file${diff.files === 1 ? "" : "s"}${stats.length ? ` ${stats.join(" ")}` : ""}`;
+}
+
+function worktreePatchDiffPreview(preview: AgentTaskRunWorktreePatchPreview | undefined): DiffPreview | null {
+  if (!preview?.text.trim()) {
+    return null;
+  }
+  return {
+    ...parseUnifiedDiffPreview(preview.text),
+    title: preview.truncated ? "Task patch preview (truncated)" : "Task patch preview"
+  };
+}
+
+function taskWorktreeActionStatus(action: TaskWorktreeAction) {
+  switch (action) {
+    case "open":
+      return "Task worktree opened";
+    case "refresh":
+      return "Task worktree refreshed";
+    case "preview":
+      return "Task worktree patch previewed";
+    case "merge":
+      return "Task worktree merged";
+    case "discard":
+      return "Task worktree discarded";
+    case "cleanup":
+      return "Task worktree cleaned up";
+    case "prepare_pr":
+      return "Task worktree PR draft prepared";
+    case "create_pr":
+      return "Task worktree PR created";
+    case "refresh_pr":
+      return "Task worktree PR status refreshed";
+    case "fetch_pr_check_logs":
+      return "Task worktree PR check evidence saved";
+    case "sync":
+      return "Task worktree synced";
+    case "continue_conflict":
+      return "Task worktree conflict continued";
+    case "abort_conflict":
+      return "Task worktree conflict aborted";
+    case "open_conflict_file":
+      return "Task worktree conflict file opened";
+    default:
+      return "Task worktree updated";
+  }
+}
+
+function taskRunPlanActionStatus(action: TaskRunPlanAction) {
+  switch (action) {
+    case "approve":
+      return "Plan approved";
+    case "request_revision":
+      return "Plan revision requested";
+    case "cancel":
+      return "Plan cancelled";
+    default:
+      return "Plan review updated";
+  }
+}
+
+function formatPrStatusToken(value: string) {
+  return value
+    .toLowerCase()
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .join(" ");
 }
 
 function toolRunDetailPreview(item: ActivityItem) {
@@ -5303,6 +11007,12 @@ function summarizeToolCall(call: ToolCall) {
 function summarizeBrowserToolCall(name: string, args: Record<string, unknown>) {
   const mode = stringValue(args.mode) ?? "active";
   const tabLabel = browserTabLabel(args);
+  if (name === "browser_state") {
+    return "Inspect browser tabs and active page state.";
+  }
+  if (name === "browser_select_tab") {
+    return `Select browser tab ${stringValue(args.tabId) ?? "tab"}.`;
+  }
   if (name === "browser_open") {
     if (args.newTab === true) {
       return `Open ${stringValue(args.url) ?? "URL"} in a new ${mode} browser tab.`;
@@ -5393,6 +11103,10 @@ function buildToolResultActivity(message: ChatMessage): Pick<ActivityItem, "deta
 
 function browserActionLabel(action: string) {
   switch (action) {
+    case "state":
+      return "Read browser state";
+    case "select_tab":
+      return "Selected tab";
     case "open":
       return "Opened page";
     case "screenshot":
@@ -5470,6 +11184,10 @@ function applyStreamEventToMessages(messages: ChatMessage[], event: AgentStreamE
     const { next, index } = ensureAssistantDraft(messages);
     next[index] = upsertToolCall(next[index], event.call);
     return next;
+  }
+
+  if (event.type === "browser_task_progress") {
+    return messages;
   }
 
   const existingIndex = messages.findIndex((message) => message.role === "tool" && message.toolCallId === event.toolCallId);
@@ -5567,6 +11285,16 @@ function parseMcpServersText(value: string): McpServersConfig {
   return servers;
 }
 
+/** Parses a numeric settings field: undefined for blank/invalid/negative input. */
+function parseOptionalInt(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -5622,67 +11350,4 @@ function savePersistedUiState(state: PersistedUiState) {
   } catch {
     // Local storage can be unavailable in hardened browser contexts.
   }
-}
-
-function formatError(error: unknown) {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
-
-async function writeClipboardText(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.inset = "0 auto auto 0";
-  textarea.style.width = "1px";
-  textarea.style.height = "1px";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {
-    if (!document.execCommand("copy")) {
-      throw new Error("Copy failed.");
-    }
-  } finally {
-    document.body.removeChild(textarea);
-  }
-}
-
-function basename(value: string) {
-  return value.split(/[\\/]/).filter(Boolean).at(-1) ?? value;
-}
-
-function formatDateTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short"
-  }).format(date);
-}
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat().format(value);
-}
-
-function formatBytes(bytes: number) {
-  return `${Math.round(bytes / 1024 / 1024)} MB`;
-}
-
-function capitalize(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
 }

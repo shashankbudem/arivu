@@ -1,4 +1,4 @@
-import type { AppConfig } from "../config.js";
+import type { AppConfig, ProviderImageInputMode, ProviderToolCallingMode } from "../config.js";
 import { chatContentToText, type ChatContent } from "./content.js";
 import type { AgentSession } from "./types.js";
 
@@ -12,6 +12,8 @@ export type ModelProviderCandidate = {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  toolCalling?: ProviderToolCallingMode;
+  imageInput?: ProviderImageInputMode;
   active: boolean;
   models?: string[];
 };
@@ -21,6 +23,8 @@ export type ModelSelection = {
   model: string;
   baseUrl: string;
   apiKey?: string;
+  toolCalling?: ProviderToolCallingMode;
+  imageInput?: ProviderImageInputMode;
   providerId?: string;
   providerName: string;
   task: AutoModelTask;
@@ -81,9 +85,12 @@ const PROVIDER_PROFILES: ProviderProfile[] = [
   }
 ];
 
-const CODING_RE = /\b(code|coding|repo|repository|file|files|function|class|component|typescript|javascript|react|node|electron|python|api|bug|fix|implement|build|test|failing|error|stack trace|diff|patch|refactor|debug|compile|typecheck|lint)\b/i;
-const REASONING_RE = /\b(deep|careful|carefully|reason|reasoning|analy[sz]e|architecture|design|plan|strategy|trade[- ]?off|root cause|security|review|complex|think through)\b/i;
-const BACKGROUND_RE = /\b(take your time|background|exhaustive|maximum|best possible|slow is ok|slow is fine|thorough|large model|heaviest|ultra)\b/i;
+const CODING_RE =
+  /\b(code|coding|repo|repository|file|files|function|class|component|typescript|javascript|react|node|electron|python|api|bug|fix|implement|build|test|failing|error|stack trace|diff|patch|refactor|debug|compile|typecheck|lint)\b/i;
+const REASONING_RE =
+  /\b(deep|careful|carefully|reason|reasoning|analy[sz]e|architecture|design|plan|strategy|trade[- ]?off|root cause|security|review|complex|think through)\b/i;
+const BACKGROUND_RE =
+  /\b(take your time|background|exhaustive|maximum|best possible|slow is ok|slow is fine|thorough|large model|heaviest|ultra)\b/i;
 const FAST_RE = /\b(quick|short|brief|simple|summari[sz]e|rewrite|grammar|translate|one[- ]?liner|tl;dr)\b/i;
 const CURRENT_RE = /\b(latest|today|current|now|recent|news|price|weather|score|schedule)\b/i;
 
@@ -100,6 +107,8 @@ export function providerCandidatesFromConfig(config: AppConfig): ModelProviderCa
         baseUrl: config.baseUrl,
         model: config.model,
         apiKey: config.apiKey,
+        toolCalling: config.toolCalling,
+        imageInput: config.imageInput,
         active: true
       }
     ];
@@ -113,6 +122,8 @@ export function providerCandidatesFromConfig(config: AppConfig): ModelProviderCa
       baseUrl: provider.baseUrl,
       model: provider.model,
       apiKey: provider.apiKey || (active ? config.apiKey : undefined),
+      toolCalling: provider.toolCalling,
+      imageInput: provider.imageInput,
       active
     };
   });
@@ -134,6 +145,8 @@ export function resolveModelForPrompt(
       model: config.model,
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
+      toolCalling: active?.toolCalling ?? config.toolCalling,
+      imageInput: active?.imageInput ?? config.imageInput,
       providerId: active?.id,
       providerName: active?.name ?? "OpenAI-compatible",
       task: "general",
@@ -145,7 +158,9 @@ export function resolveModelForPrompt(
   const provider = chooseProviderForTask(providers, task);
   const model = chooseModelForProvider(provider, task);
   if (!model) {
-    throw new Error(`Auto model selection could not find a concrete model for ${provider.name}. Select a model manually for this provider.`);
+    throw new Error(
+      `Auto model selection could not find a concrete model for ${provider.name}. Select a model manually for this provider.`
+    );
   }
 
   return {
@@ -153,6 +168,8 @@ export function resolveModelForPrompt(
     model,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
+    toolCalling: provider.toolCalling,
+    imageInput: provider.imageInput,
     providerId: provider.id,
     providerName: provider.name,
     task,
@@ -206,6 +223,13 @@ function providerScore(provider: ModelProviderCandidate, task: AutoModelTask): n
   if (provider.apiKey) {
     score += 2;
   }
+  if (task === "vision") {
+    if (provider.imageInput === "disabled") {
+      score -= 80;
+    } else if (provider.imageInput === "enabled") {
+      score += 12;
+    }
+  }
   if (!isAutoModel(provider.model)) {
     score += 1;
   }
@@ -219,7 +243,7 @@ function chooseModelForProvider(provider: ModelProviderCandidate, task: AutoMode
   const profile = profileForProvider(provider);
   const preferred = [
     ...(profile?.models[task] ?? []),
-    ...(task === "general" ? [] : profile?.models.general ?? []),
+    ...(task === "general" ? [] : (profile?.models.general ?? [])),
     ...(!isAutoModel(provider.model) ? [provider.model] : [])
   ];
   const uniquePreferred = Array.from(new Set(preferred.filter(Boolean)));
@@ -243,7 +267,11 @@ function chooseModelForProvider(provider: ModelProviderCandidate, task: AutoMode
     return provider.models.find(modelLooksFast) ?? (!isAutoModel(provider.model) ? provider.model : provider.models[0]);
   }
   if (task === "background") {
-    return provider.models.find(modelLooksLarge) ?? provider.models.find(modelLooksReasoningCapable) ?? (!isAutoModel(provider.model) ? provider.model : provider.models[0]);
+    return (
+      provider.models.find(modelLooksLarge) ??
+      provider.models.find(modelLooksReasoningCapable) ??
+      (!isAutoModel(provider.model) ? provider.model : provider.models[0])
+    );
   }
   if (task === "reasoning") {
     return provider.models.find(modelLooksReasoningCapable) ?? (!isAutoModel(provider.model) ? provider.model : provider.models[0]);

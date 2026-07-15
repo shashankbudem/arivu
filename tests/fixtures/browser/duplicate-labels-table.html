@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Duplicate labels table</title>
+  </head>
+  <body>
+    <table>
+      <tbody>
+        <tr data-row="0">
+          <td>Row A</td>
+          <td><button onclick="mark(0)">Edit</button></td>
+        </tr>
+        <tr data-row="1">
+          <td>Row B</td>
+          <td><button onclick="mark(1)">Edit</button></td>
+        </tr>
+        <tr data-row="2">
+          <td>Row C</td>
+          <td><button onclick="mark(2)">Edit</button></td>
+        </tr>
+      </tbody>
+    </table>
+    <div id="result">none</div>
+    <script>
+      function mark(row) {
+        document.getElementById("result").textContent = "clicked-row-" + row;
+      }
+    </script>
+  </body>
+</html>

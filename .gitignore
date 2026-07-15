@@ -1,6 +1,12 @@
 node_modules/
 dist/
 dist-desktop/
+# Keep generated build output ignored while tracking Electron Builder resources.
+build/*
+!build/notarize.cjs
+!build/entitlements.mac.plist
+!build/icon.png
+release/
 coverage/
 .agents/
 .DS_Store

@@ -10,9 +10,20 @@ import {
   type BrowserMode,
   type BrowserState,
   type BrowserTargetState,
+  type BrowserTaskModelConfig,
   type BrowserToolController,
   type BrowserToolResult
 } from "../../src/tools/browserControl.js";
+import { runBrowserTask } from "./browserTaskSupervisor.js";
+import {
+  boundIndexedContent,
+  clickElementByIndex,
+  freshPageSnapshot,
+  indexedPageState,
+  inputTextByIndex,
+  scrollPage,
+  selectOptionByIndex
+} from "./pageControllerRuntime.js";
 
 type BrowserStateListener = (state: BrowserState) => void;
 
@@ -23,7 +34,9 @@ type BrowserTargetRecord = Omit<BrowserTargetState, "activeTabId" | "tabs"> & {
 };
 
 type BrowserTabRecord = BrowserTargetRecord & {
-  view: BrowserView;
+  contents: WebContents;
+  view?: BrowserView;
+  popupWindow?: BrowserWindow;
 };
 
 type BrowserImageSize = {
@@ -58,6 +71,10 @@ type BrowserFrameInspection =
     });
 
 const MAX_CONSOLE_LOGS = 300;
+// Budget for the serialized element list in snapshot/screenshot results. Without it a busy
+// page (e.g. ServiceNow) can push a single tool result past the request auto-compaction
+// threshold, which strips native tool protocol and derails tool calling on the next turn.
+const MAX_VISUAL_ELEMENTS_JSON_CHARS = 48_000;
 const DEFAULT_BACKGROUND_BOUNDS = { width: 1280, height: 800 };
 const VISIBLE_CHROME_HEIGHT = 96;
 const VISIBLE_START_PAGE_TITLE = "Arivu Browser";
@@ -206,6 +223,19 @@ export class DesktopBrowserController implements BrowserToolController {
     return this.getState();
   }
 
+  async selectTab(args: { tabId: string }): Promise<BrowserToolResult> {
+    const target = this.selectVisibleTabById(args.tabId);
+    this.emitState();
+    return this.resultForMode(
+      "visible",
+      {
+        activeTabId: this.activeVisibleTabId,
+        tabs: this.publicVisibleTarget().tabs ?? []
+      },
+      target
+    );
+  }
+
   closeVisibleTab(tabId: string) {
     this.closeVisibleTabById(tabId);
     this.emitState();
@@ -250,20 +280,25 @@ export class DesktopBrowserController implements BrowserToolController {
     await mkdir(screenshotDir, { recursive: true });
     const screenshotPath = path.join(screenshotDir, `arivu-browser-${mode}-${target.id}-${Date.now()}.png`);
     await writeFile(screenshotPath, image.toPNG());
+    target.lastScreenshotAt = new Date().toISOString();
     target.lastScreenshotPath = screenshotPath;
     target.lastScreenshotSize = size;
     target.lastViewport = visual.viewport;
     this.emitState();
-    return this.resultForMode(mode, {
-      screenshotPath,
-      size,
-      viewport: visual.viewport,
-      paint: {
-        preInspect: preInspectPaint,
-        preCapture: preCapturePaint
+    return this.resultForMode(
+      mode,
+      {
+        screenshotPath,
+        size,
+        viewport: visual.viewport,
+        paint: {
+          preInspect: preInspectPaint,
+          preCapture: preCapturePaint
+        },
+        visual
       },
-      visual
-    }, target);
+      target
+    );
   }
 
   async snapshot(args: { mode?: BrowserMode; tabId?: string; maxLength?: number }): Promise<BrowserToolResult> {
@@ -273,6 +308,16 @@ export class DesktopBrowserController implements BrowserToolController {
     assertPageLoaded(contents, mode);
     const maxLength = clampNumber(args.maxLength ?? 12_000, 1_000, 20_000);
     const snapshot = await this.inspectPage(mode, contents, maxLength);
+    const indexed = await indexedPageState(contents).catch(() => undefined);
+    if (indexed) {
+      const bounded = boundIndexedContent(indexed.content);
+      (snapshot as Record<string, unknown>).elementsTree = bounded.text;
+      if (bounded.truncated) {
+        (snapshot as Record<string, unknown>).elementsTreeTruncated = true;
+      }
+    }
+    target.lastSnapshotAt = new Date().toISOString();
+    this.emitState();
     return this.resultForMode(mode, { snapshot }, target);
   }
 
@@ -282,24 +327,38 @@ export class DesktopBrowserController implements BrowserToolController {
     const { target } = this.browserContextForMode(mode, args.tabId);
     const allowedLevels = new Set((args.levels ?? []).map((level) => level.toLowerCase()));
     const limit = clampNumber(args.limit ?? 50, 1, 100);
-    const logs = target.logs
-      .filter((entry) => allowedLevels.size === 0 || allowedLevels.has(entry.level))
-      .slice(-limit);
+    const logs = target.logs.filter((entry) => allowedLevels.size === 0 || allowedLevels.has(entry.level)).slice(-limit);
     return this.resultForMode(mode, { logs }, target);
   }
 
-  async click(args: { target: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult> {
+  async click(args: { target?: string; index?: number; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult> {
     const mode = this.targetForMode(args.mode);
     this.rememberMode(mode);
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
     assertPageLoaded(contents, mode);
-    const result = await this.executeAcrossFrames(contents, clickScript(args.target));
+    let result: BrowserToolResult | undefined;
+    if (args.index !== undefined) {
+      const indexedResult = await clickElementByIndex(contents, args.index);
+      if (indexedResult) {
+        result = indexedResult;
+      }
+    }
+    if (!result) {
+      result = await this.executeAcrossFrames(contents, clickScript(args.target ?? ""));
+    }
+    result = await this.withFreshSnapshot(contents, result);
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
     return this.resultForMode(mode, result, target);
   }
 
-  async clickAt(args: { x: number; y: number; mode?: BrowserMode; tabId?: string; coordinateSpace?: "css" | "image" }): Promise<BrowserToolResult> {
+  async clickAt(args: {
+    x: number;
+    y: number;
+    mode?: BrowserMode;
+    tabId?: string;
+    coordinateSpace?: "css" | "image";
+  }): Promise<BrowserToolResult> {
     const mode = this.targetForMode(args.mode);
     this.rememberMode(mode);
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
@@ -313,26 +372,135 @@ export class DesktopBrowserController implements BrowserToolController {
     await delay(120);
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
-    return this.resultForMode(mode, {
-      ok: true,
-      x: point.x,
-      y: point.y,
-      coordinateSpace: "css",
-      requested: {
-        x: args.x,
-        y: args.y,
-        coordinateSpace: args.coordinateSpace ?? "css"
+    return this.resultForMode(
+      mode,
+      {
+        ok: true,
+        x: point.x,
+        y: point.y,
+        coordinateSpace: "css",
+        requested: {
+          x: args.x,
+          y: args.y,
+          coordinateSpace: args.coordinateSpace ?? "css"
+        },
+        matched
       },
-      matched
-    }, target);
+      target
+    );
   }
 
-  async type(args: { target: string; text: string; mode?: BrowserMode; tabId?: string; submit?: boolean }): Promise<BrowserToolResult> {
+  async type(args: {
+    target?: string;
+    index?: number;
+    text: string;
+    mode?: BrowserMode;
+    tabId?: string;
+    submit?: boolean;
+  }): Promise<BrowserToolResult> {
     const mode = this.targetForMode(args.mode);
     this.rememberMode(mode);
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
     assertPageLoaded(contents, mode);
-    const result = await this.executeAcrossFrames(contents, typeScript(args.target, args.text, Boolean(args.submit)));
+    let result: BrowserToolResult | undefined;
+    if (args.index !== undefined && !args.submit) {
+      const indexedResult = await inputTextByIndex(contents, args.index, args.text);
+      if (indexedResult) {
+        result = indexedResult;
+      }
+    }
+    if (!result) {
+      result = await this.executeAcrossFrames(contents, typeScript(args.target ?? "", args.text, Boolean(args.submit)));
+    }
+    result = await this.withFreshSnapshot(contents, result);
+    this.updateTargetFromContents(mode, contents, target);
+    this.emitState();
+    return this.resultForMode(mode, result, target);
+  }
+
+  async scroll(args: {
+    direction: "up" | "down" | "left" | "right";
+    pixels?: number;
+    numPages?: number;
+    index?: number;
+    mode?: BrowserMode;
+    tabId?: string;
+  }): Promise<BrowserToolResult> {
+    const mode = this.targetForMode(args.mode);
+    this.rememberMode(mode);
+    const { contents, target } = this.browserContextForMode(mode, args.tabId);
+    assertPageLoaded(contents, mode);
+    const horizontal = args.direction === "left" || args.direction === "right";
+    const scrollResult = await scrollPage(contents, {
+      horizontal,
+      down: args.direction === "down",
+      right: args.direction === "right",
+      pixels: args.pixels,
+      numPages: args.numPages,
+      index: args.index
+    });
+    let result: BrowserToolResult = scrollResult ?? { ok: false, message: "The scroll engine failed to load on this page." };
+    result = await this.withFreshSnapshot(contents, result);
+    this.updateTargetFromContents(mode, contents, target);
+    this.emitState();
+    return this.resultForMode(mode, result, target);
+  }
+
+  async selectOption(args: { index: number; optionText: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult> {
+    const mode = this.targetForMode(args.mode);
+    this.rememberMode(mode);
+    const { contents, target } = this.browserContextForMode(mode, args.tabId);
+    assertPageLoaded(contents, mode);
+    const selectResult = await selectOptionByIndex(contents, args.index, args.optionText);
+    let result: BrowserToolResult = selectResult ?? { ok: false, message: "The select engine failed to load on this page." };
+    result = await this.withFreshSnapshot(contents, result);
+    this.updateTargetFromContents(mode, contents, target);
+    this.emitState();
+    return this.resultForMode(mode, result, target);
+  }
+
+  private async withFreshSnapshot(contents: WebContents, result: BrowserToolResult): Promise<BrowserToolResult> {
+    const fields = await freshPageSnapshot(contents);
+    return fields ? { ...result, ...fields } : result;
+  }
+
+  async task(args: {
+    instruction: string;
+    mode?: BrowserMode;
+    tabId?: string;
+    maxSteps?: number;
+    timeoutMs?: number;
+    allowedDomains?: string[];
+    allowJavaScript?: boolean;
+    allowSensitiveActions?: boolean;
+    modelConfig: BrowserTaskModelConfig;
+    signal?: AbortSignal;
+    onProgress?: (progress: { stepIndex: number; summary: string }) => void;
+  }): Promise<BrowserToolResult> {
+    const mode = this.targetForMode(args.mode);
+    this.rememberMode(mode);
+    const { contents, target } = this.browserContextForMode(mode, args.tabId);
+    assertPageLoaded(contents, mode);
+    const taskResult = await runBrowserTask(
+      contents,
+      {
+        instruction: args.instruction,
+        maxSteps: args.maxSteps,
+        timeoutMs: args.timeoutMs,
+        allowedDomains: args.allowedDomains,
+        allowJavaScript: args.allowJavaScript,
+        allowSensitiveActions: args.allowSensitiveActions,
+        visible: mode === "visible"
+      },
+      args.modelConfig,
+      args.signal,
+      args.onProgress
+    );
+    // Attach a bounded post-task page snapshot (the same helper the click/type/scroll/select
+    // tools use) so the main agent can verify the delegated outcome from text instead of
+    // spending a whole extra turn on a heavier browser_screenshot. Never throws:
+    // withFreshSnapshot returns the result unchanged if the page-controller can't load here.
+    const result = await this.withFreshSnapshot(contents, taskResult);
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
     return this.resultForMode(mode, result, target);
@@ -347,7 +515,7 @@ export class DesktopBrowserController implements BrowserToolController {
       const target = this.ensureVisibleTab(tabId);
       return {
         target,
-        contents: target.view.webContents
+        contents: target.contents
       };
     }
     return {
@@ -383,19 +551,20 @@ export class DesktopBrowserController implements BrowserToolController {
       successful.map((frame) => String((frame.snapshot as Record<string, unknown>).text ?? "")),
       maxLength
     );
-    const elements = successful
-      .flatMap((frame) => {
-        const snapshot = frame.snapshot as Record<string, unknown>;
-        const entries = Array.isArray(snapshot.elements) ? snapshot.elements : [];
-        return entries.filter(isRecord).map((entry) => ({
-          ...entry,
-          frameIndex: frame.index,
-          frameUrl: frame.url,
-          frameName: frame.name,
-          mainFrame: frame.mainFrame
-        }));
-      })
-      .slice(0, 320);
+    // Elements carry only frameIndex (the frames summary maps index -> url/name/origin);
+    // stamping the full frame URL on every element once inflated a single ServiceNow
+    // screenshot result to ~195K chars, forcing request auto-compaction on the first model
+    // call, which textified the tool protocol and broke native tool calling downstream.
+    const allElements = successful.flatMap((frame) => {
+      const snapshot = frame.snapshot as Record<string, unknown>;
+      const entries = Array.isArray(snapshot.elements) ? snapshot.elements : [];
+      return entries.filter(isRecord).map((entry) => ({
+        ...entry,
+        frameIndex: frame.index,
+        mainFrame: frame.mainFrame
+      }));
+    });
+    const elements = capElementsBySerializedSize(allElements.slice(0, 320), MAX_VISUAL_ELEMENTS_JSON_CHARS);
     const mainSnapshot = successful.find((frame) => frame.mainFrame)?.snapshot as Record<string, unknown> | undefined;
     const viewport = isRecord(mainSnapshot?.viewport) ? (mainSnapshot.viewport as BrowserViewport) : undefined;
     const frameSummaries = frameResults.map((frame) => {
@@ -419,11 +588,12 @@ export class DesktopBrowserController implements BrowserToolController {
       inspectedFrameCount: frameResults.length,
       textLength: text.length,
       elementCount: elements.length,
+      ...(allElements.length > elements.length ? { elementsTruncated: allElements.length - elements.length } : {}),
       empty: text.length === 0 && elements.length === 0,
       note:
         text.length === 0 && elements.length === 0
-          ? "No accessible text or elements were found. Capture a screenshot and use browser_click_at if visible content is present."
-          : "Coordinates are CSS viewport pixels. Use browser_click_at with an element center when selector clicks fail."
+          ? "No accessible text or elements were found. If visible content is present, delegate interaction to browser_task."
+          : "Coordinates are CSS viewport pixels."
     };
     const accessibility = await this.accessibilitySnapshot(contents);
 
@@ -638,13 +808,29 @@ export class DesktopBrowserController implements BrowserToolController {
         return { action: "deny" };
       }
       try {
-        const normalizedUrl = normalizeBrowserUrl(url);
-        this.createVisibleTab({ url: normalizedUrl, activate: true });
+        assertAllowedPopupUrl(url);
       } catch (error) {
         target.lastError = error instanceof Error ? error.message : String(error);
         this.emitState();
+        return { action: "deny" };
       }
-      return { action: "deny" };
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          show: false,
+          autoHideMenuBar: true,
+          backgroundColor: "#11100f",
+          webPreferences: browserWebPreferences("visible")
+        }
+      };
+    });
+    contents.on("did-create-window", (popupWindow, details) => {
+      if (mode === "visible") {
+        // Electron's BrowserView-backed createWindow path stalls window.open in current
+        // releases. Keep the native child window alive, but register its WebContents as a
+        // normal visible target so Arivu can select, inspect, and close it by tab id.
+        this.registerVisiblePopupWindow(popupWindow, details.disposition);
+      }
     });
     contents.on("will-navigate", (event, url) => {
       if (isVisibleStartPageUrl(url)) {
@@ -718,12 +904,23 @@ export class DesktopBrowserController implements BrowserToolController {
       url: target.url,
       title: target.title,
       loading: target.loading,
+      activeTabId: this.activeVisibleTabId,
       ...result
     };
   }
 
   private async captureTargetPage(mode: BrowserMode, contents: WebContents) {
-    void mode;
+    // A visible BrowserView has a reliable native surface once prepareForScreenshot has
+    // selected and attached it. CDP Page.captureScreenshot can retain stale compositor tiles
+    // after switching away from a native popup window, producing a partly black image even
+    // though the page is painted. Prefer the attached surface for visible tabs and keep CDP
+    // as the fallback; hidden/background contents still need CDP first.
+    if (mode === "visible") {
+      const surfaceImage = await contents.capturePage();
+      if (!surfaceImage.isEmpty()) {
+        return surfaceImage;
+      }
+    }
     const debuggerImage = await capturePageWithDebugger(contents);
     if (debuggerImage && !debuggerImage.isEmpty()) {
       return debuggerImage;
@@ -767,6 +964,7 @@ export class DesktopBrowserController implements BrowserToolController {
     const target: BrowserTabRecord = {
       ...initialTarget("visible", id),
       title: VISIBLE_START_PAGE_TITLE,
+      contents: view.webContents,
       view
     };
     this.visibleTabs.set(id, target);
@@ -791,14 +989,48 @@ export class DesktopBrowserController implements BrowserToolController {
     return target;
   }
 
+  private registerVisiblePopupWindow(
+    popupWindow: BrowserWindow,
+    disposition: "default" | "foreground-tab" | "background-tab" | "new-window" | "other"
+  ) {
+    const id = `tab-${this.nextVisibleTabNumber++}`;
+    const target: BrowserTabRecord = {
+      ...initialTarget("visible", id),
+      contents: popupWindow.webContents,
+      popupWindow
+    };
+    this.visibleTabs.set(id, target);
+    this.visibleTabOrder.push(id);
+    this.configureWebContents("visible", target, popupWindow.webContents);
+    popupWindow.on("closed", () => this.forgetVisiblePopupTab(id));
+    popupWindow.webContents.once("destroyed", () => this.forgetVisiblePopupTab(id));
+    if (disposition !== "background-tab") {
+      this.activeVisibleTabId = id;
+    }
+    popupWindow.maximize();
+    if (disposition === "background-tab") {
+      popupWindow.hide();
+    } else {
+      popupWindow.show();
+      popupWindow.focus();
+    }
+    this.updateTargetFromContents("visible", popupWindow.webContents, target);
+    this.emitState();
+  }
+
   private selectVisibleTabById(tabId: string) {
     const target = this.visibleTabs.get(tabId);
     if (!target) {
       throw new Error(`Unknown visible browser tab: ${tabId}`);
     }
+    if (target.contents.isDestroyed()) {
+      this.closeVisibleTabById(tabId);
+      this.emitState();
+      throw new Error(`Visible browser tab closed before it could be selected: ${tabId}`);
+    }
     this.activeVisibleTabId = tabId;
     this.rememberMode("visible");
-    this.updateTargetFromContents("visible", target.view.webContents, target);
+    this.updateTargetFromContents("visible", target.contents, target);
     this.attachActiveVisibleView();
     return target;
   }
@@ -809,17 +1041,23 @@ export class DesktopBrowserController implements BrowserToolController {
       throw new Error(`Unknown visible browser tab: ${tabId}`);
     }
     const window = this.visibleWindow;
-    if (window && !window.isDestroyed()) {
+    if (target.view && window && !window.isDestroyed()) {
       try {
         window.removeBrowserView(target.view);
-      } catch {}
+      } catch {
+        // The view may already be detached; closing continues regardless.
+      }
     }
     this.visibleTabs.delete(tabId);
     const orderIndex = this.visibleTabOrder.indexOf(tabId);
     if (orderIndex >= 0) {
       this.visibleTabOrder.splice(orderIndex, 1);
     }
-    target.view.webContents.close({ waitForBeforeUnload: false });
+    if (target.popupWindow && !target.popupWindow.isDestroyed()) {
+      target.popupWindow.destroy();
+    } else if (!target.contents.isDestroyed()) {
+      target.contents.close({ waitForBeforeUnload: false });
+    }
     if (this.activeVisibleTabId === tabId) {
       const nextTabId = this.visibleTabOrder[Math.max(0, orderIndex - 1)] ?? this.visibleTabOrder[0];
       this.activeVisibleTabId = nextTabId;
@@ -831,11 +1069,38 @@ export class DesktopBrowserController implements BrowserToolController {
     this.attachActiveVisibleView();
   }
 
+  private forgetVisiblePopupTab(tabId: string) {
+    const target = this.visibleTabs.get(tabId);
+    if (!target?.popupWindow) {
+      return;
+    }
+    this.visibleTabs.delete(tabId);
+    const orderIndex = this.visibleTabOrder.indexOf(tabId);
+    if (orderIndex >= 0) {
+      this.visibleTabOrder.splice(orderIndex, 1);
+    }
+    if (this.activeVisibleTabId === tabId) {
+      this.activeVisibleTabId = this.visibleTabOrder[Math.max(0, orderIndex - 1)] ?? this.visibleTabOrder[0];
+    }
+    if (this.visibleTabOrder.length === 0 && this.visibleWindow && !this.visibleWindow.isDestroyed()) {
+      this.createVisibleTab({ activate: true });
+      return;
+    }
+    this.attachActiveVisibleView();
+    this.emitState();
+  }
+
   private resetVisibleTabs() {
     for (const target of this.visibleTabs.values()) {
       try {
-        target.view.webContents.close({ waitForBeforeUnload: false });
-      } catch {}
+        if (target.popupWindow && !target.popupWindow.isDestroyed()) {
+          target.popupWindow.destroy();
+        } else if (!target.contents.isDestroyed()) {
+          target.contents.close({ waitForBeforeUnload: false });
+        }
+      } catch {
+        // The tab's webContents may already be destroyed; reset continues regardless.
+      }
     }
     this.visibleTabs.clear();
     this.visibleTabOrder.splice(0);
@@ -848,11 +1113,25 @@ export class DesktopBrowserController implements BrowserToolController {
     if (!window || window.isDestroyed() || !active) {
       return;
     }
+    for (const target of this.visibleTabs.values()) {
+      if (target.popupWindow && !target.popupWindow.isDestroyed() && target !== active) {
+        target.popupWindow.hide();
+      }
+    }
     const attached = new Set(window.getBrowserViews());
     for (const view of attached) {
-      if (view !== active.view) {
+      if (!active.view || view !== active.view) {
         window.removeBrowserView(view);
       }
+    }
+    if (active.popupWindow && !active.popupWindow.isDestroyed()) {
+      active.popupWindow.maximize();
+      active.popupWindow.show();
+      active.popupWindow.focus();
+      return;
+    }
+    if (!active.view) {
+      return;
     }
     if (!attached.has(active.view)) {
       window.addBrowserView(active.view);
@@ -865,7 +1144,7 @@ export class DesktopBrowserController implements BrowserToolController {
   private updateVisibleViewLayout() {
     const window = this.visibleWindow;
     const active = this.activeVisibleTab();
-    if (!window || window.isDestroyed() || !active) {
+    if (!window || window.isDestroyed() || !active?.view) {
       return;
     }
     const [width, height] = window.getContentSize();
@@ -1552,6 +1831,23 @@ function visibleStartPageHtml() {
 </html>`;
 }
 
+/**
+ * Keeps elements (in document order, so earlier/on-screen elements win) until their combined
+ * serialized size reaches the budget. Element index positions stay stable for the kept prefix.
+ */
+function capElementsBySerializedSize<T>(elements: T[], budgetChars: number): T[] {
+  let used = 0;
+  let kept = 0;
+  for (const element of elements) {
+    used += JSON.stringify(element).length + 1;
+    if (used > budgetChars) {
+      break;
+    }
+    kept += 1;
+  }
+  return kept === elements.length ? elements : elements.slice(0, kept);
+}
+
 function initialTarget(mode: BrowserMode, id: string = mode): BrowserTargetRecord {
   return {
     id,
@@ -1575,6 +1871,8 @@ function publicTarget(target: BrowserTargetRecord): BrowserTargetState {
     canGoBack: target.canGoBack,
     canGoForward: target.canGoForward,
     ...(target.lastError ? { lastError: target.lastError } : {}),
+    ...(target.lastSnapshotAt ? { lastSnapshotAt: target.lastSnapshotAt } : {}),
+    ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
     ...(target.lastScreenshotPath ? { lastScreenshotPath: target.lastScreenshotPath } : {})
   };
 }
@@ -1588,6 +1886,8 @@ function publicTab(target: BrowserTabRecord) {
     canGoBack: target.canGoBack,
     canGoForward: target.canGoForward,
     ...(target.lastError ? { lastError: target.lastError } : {}),
+    ...(target.lastSnapshotAt ? { lastSnapshotAt: target.lastSnapshotAt } : {}),
+    ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
     ...(target.lastScreenshotPath ? { lastScreenshotPath: target.lastScreenshotPath } : {})
   };
 }
@@ -1601,6 +1901,13 @@ function browserWebPreferences(mode: BrowserMode): WebPreferences {
     offscreen: mode === "background",
     partition: BROWSER_PARTITION
   };
+}
+
+function assertAllowedPopupUrl(url: string) {
+  if (url === "about:blank" || url.startsWith("about:blank#") || url.startsWith("about:blank?")) {
+    return;
+  }
+  normalizeBrowserUrl(url);
 }
 
 function browserShellWebPreferences(): WebPreferences {

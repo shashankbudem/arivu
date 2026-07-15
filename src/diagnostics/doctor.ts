@@ -1,4 +1,4 @@
-import type { AppConfig } from "../config.js";
+import type { AppConfig, ProviderCapabilityName } from "../config.js";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -12,17 +12,31 @@ export type DoctorCheck = {
   detail?: string;
 };
 
+export type DoctorCapabilityObservation = {
+  capability: ProviderCapabilityName;
+  value: "disabled";
+  source: "doctor";
+  checkId: string;
+  status: DoctorStatus;
+  detail?: string;
+};
+
 export type DoctorReport = {
   generatedAt: string;
   checks: DoctorCheck[];
   summary: Record<DoctorStatus, number>;
+  capabilityObservations?: DoctorCapabilityObservation[];
 };
 
 type DoctorOptions = {
   fetcher?: FetchLike;
 };
 
+const MAX_DIAGNOSTIC_BODY_BYTES = 64 * 1024;
+const DIAGNOSTIC_FETCH_TIMEOUT_MS = 15_000;
+
 type DoctorConfig = Pick<AppConfig, "apiKey" | "tavilyApiKey" | "baseUrl" | "model" | "trustMode"> &
+  Partial<Pick<AppConfig, "toolCalling">> &
   Partial<Pick<AppConfig, "mcpServers">>;
 
 type ChatJson = {
@@ -37,6 +51,7 @@ type ChatJson = {
 export async function runDoctor(config: DoctorConfig, options: DoctorOptions = {}): Promise<DoctorReport> {
   const fetcher = options.fetcher ?? fetch;
   const checks: DoctorCheck[] = [];
+  const capabilityObservations: DoctorCapabilityObservation[] = [];
   const apiKey = config.apiKey?.trim();
 
   checks.push(
@@ -59,7 +74,15 @@ export async function runDoctor(config: DoctorConfig, options: DoctorOptions = {
     checks.push(checkSelectedModel(config.model, models));
     checks.push(await checkBasicChat(config, fetcher));
     checks.push(await checkStreaming(config, fetcher));
-    checks.push(await checkToolCalling(config, fetcher));
+    if (config.toolCalling === "disabled") {
+      checks.push(check("tool-calling", "Tool calling", "skip", "Skipped because this provider is configured for plain chat."));
+    } else {
+      const toolCalling = await checkToolCalling(config, fetcher);
+      checks.push(toolCalling.check);
+      if (toolCalling.observation) {
+        capabilityObservations.push(toolCalling.observation);
+      }
+    }
   }
 
   checks.push(await checkTavily(config, fetcher));
@@ -67,7 +90,8 @@ export async function runDoctor(config: DoctorConfig, options: DoctorOptions = {
   return {
     generatedAt: new Date().toISOString(),
     checks,
-    summary: summarize(checks)
+    summary: summarize(checks),
+    ...(capabilityObservations.length > 0 ? { capabilityObservations } : {})
   };
 }
 
@@ -77,10 +101,10 @@ function check(id: string, label: string, status: DoctorStatus, message: string,
 
 async function checkModels(config: DoctorConfig, fetcher: FetchLike): Promise<{ check: DoctorCheck; models?: string[] }> {
   try {
-    const response = await fetcher(`${trimBaseUrl(config.baseUrl)}/models`, {
+    const response = await fetchWithTimeout(fetcher, `${trimBaseUrl(config.baseUrl)}/models`, {
       headers: headers(config.apiKey)
     });
-    const text = await response.text();
+    const text = await readResponseText(response);
     if (!response.ok) {
       return {
         check: check("models", "Models endpoint", "fail", `Model list request failed (${response.status}).`, truncate(text, 500))
@@ -130,7 +154,7 @@ async function checkBasicChat(config: DoctorConfig, fetcher: FetchLike): Promise
 
 async function checkStreaming(config: DoctorConfig, fetcher: FetchLike): Promise<DoctorCheck> {
   try {
-    const response = await fetcher(`${trimBaseUrl(config.baseUrl)}/chat/completions`, {
+    const response = await fetchWithTimeout(fetcher, `${trimBaseUrl(config.baseUrl)}/chat/completions`, {
       method: "POST",
       headers: headers(config.apiKey),
       body: JSON.stringify({
@@ -141,8 +165,14 @@ async function checkStreaming(config: DoctorConfig, fetcher: FetchLike): Promise
       })
     });
     if (!response.ok) {
-      const text = await response.text();
-      return check("streaming", "Streaming", "warn", `Streaming request failed (${response.status}); batch fallback may be used.`, truncate(text, 500));
+      const text = await readResponseText(response);
+      return check(
+        "streaming",
+        "Streaming",
+        "warn",
+        `Streaming request failed (${response.status}); batch fallback may be used.`,
+        truncate(text, 500)
+      );
     }
 
     const contentType = response.headers.get("content-type") ?? "";
@@ -155,7 +185,10 @@ async function checkStreaming(config: DoctorConfig, fetcher: FetchLike): Promise
   }
 }
 
-async function checkToolCalling(config: DoctorConfig, fetcher: FetchLike): Promise<DoctorCheck> {
+async function checkToolCalling(
+  config: DoctorConfig,
+  fetcher: FetchLike
+): Promise<{ check: DoctorCheck; observation?: DoctorCapabilityObservation }> {
   const response = await postChat(config, fetcher, {
     model: config.model,
     messages: [{ role: "user", content: "Call diagnostic_ping with message ok." }],
@@ -187,14 +220,35 @@ async function checkToolCalling(config: DoctorConfig, fetcher: FetchLike): Promi
 
   if (!response.ok) {
     const status = unsupportedTools(response.text) ? "warn" : "fail";
-    const message = status === "warn" ? "Endpoint appears not to support tool calling; Markdown fallback will be used." : `Tool-call check failed (${response.status}).`;
-    return check("tool-calling", "Tool calling", status, message, truncate(response.text, 500));
+    const message =
+      status === "warn"
+        ? "Endpoint appears not to support tool calling; Markdown fallback will be used."
+        : `Tool-call check failed (${response.status}).`;
+    const detail = truncate(response.text, 500);
+    return {
+      check: check("tool-calling", "Tool calling", status, message, detail),
+      ...(status === "warn"
+        ? {
+            observation: {
+              capability: "toolCalling" as const,
+              value: "disabled" as const,
+              source: "doctor" as const,
+              checkId: "tool-calling",
+              status,
+              detail
+            }
+          }
+        : {})
+    };
   }
 
   const toolCalls = response.json?.choices?.[0]?.message?.tool_calls ?? [];
-  return toolCalls.length > 0
-    ? check("tool-calling", "Tool calling", "pass", "Endpoint returned a tool call.")
-    : check("tool-calling", "Tool calling", "warn", "Request succeeded but no tool call was returned; Markdown fallback may be needed.");
+  return {
+    check:
+      toolCalls.length > 0
+        ? check("tool-calling", "Tool calling", "pass", "Endpoint returned a tool call.")
+        : check("tool-calling", "Tool calling", "warn", "Request succeeded but no tool call was returned; Markdown fallback may be needed.")
+  };
 }
 
 async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<DoctorCheck> {
@@ -204,7 +258,7 @@ async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<Do
   }
 
   try {
-    const response = await fetcher("https://api.tavily.com/search", {
+    const response = await fetchWithTimeout(fetcher, "https://api.tavily.com/search", {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -222,7 +276,7 @@ async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<Do
         include_usage: true
       })
     });
-    const text = await response.text();
+    const text = await readResponseText(response);
     return response.ok
       ? check("tavily", "Tavily", "pass", "Tavily search endpoint accepted the key.")
       : check("tavily", "Tavily", "fail", `Tavily request failed (${response.status}).`, truncate(text, 500));
@@ -233,12 +287,12 @@ async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<Do
 
 async function postChat(config: DoctorConfig, fetcher: FetchLike, body: Record<string, unknown>) {
   try {
-    const response = await fetcher(`${trimBaseUrl(config.baseUrl)}/chat/completions`, {
+    const response = await fetchWithTimeout(fetcher, `${trimBaseUrl(config.baseUrl)}/chat/completions`, {
       method: "POST",
       headers: headers(config.apiKey),
       body: JSON.stringify(body)
     });
-    const text = await response.text();
+    const text = await readResponseText(response);
     return {
       ok: response.ok,
       status: response.status,
@@ -260,6 +314,19 @@ function headers(apiKey: string | undefined): Record<string, string> {
     Authorization: `Bearer ${apiKey ?? ""}`,
     "Content-Type": "application/json"
   };
+}
+
+async function fetchWithTimeout(fetcher: FetchLike, input: string, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DIAGNOSTIC_FETCH_TIMEOUT_MS);
+  try {
+    return await fetcher(input, {
+      ...init,
+      signal: init.signal ?? controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function summarize(checks: DoctorCheck[]): Record<DoctorStatus, number> {
@@ -286,6 +353,40 @@ function parseJson<T>(text: string): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+async function readResponseText(response: Response, maxBytes = MAX_DIAGNOSTIC_BODY_BYTES) {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return truncate(await response.text(), maxBytes);
+  }
+
+  const decoder = new TextDecoder();
+  let output = "";
+  let bytesRead = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    const remaining = maxBytes - bytesRead;
+    if (value.byteLength > remaining) {
+      if (remaining > 0) {
+        output += decoder.decode(value.slice(0, remaining), { stream: true });
+      }
+      await reader.cancel();
+      output += decoder.decode();
+      return `${output}\n[truncated]`;
+    }
+
+    bytesRead += value.byteLength;
+    output += decoder.decode(value, { stream: true });
+  }
+
+  output += decoder.decode();
+  return output;
 }
 
 function truncate(value: string, max: number) {
