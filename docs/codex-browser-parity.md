@@ -23,7 +23,7 @@ requires desktop smoke and interaction verification before the project is consid
 - [x] Isolated persistent browser session shared by visible and agent-owned background tabs.
 - [x] Restore visible tabs across application restarts.
 - [x] Tab overflow menu and keyboard tab cycling.
-- [ ] Explicit transfer/adoption UI between task-owned and background browser-agent tabs.
+- [x] Explicit transfer/adoption UI between task-owned and background browser-agent tabs.
 
 ## Page tools
 
@@ -32,7 +32,7 @@ requires desktop smoke and interaction verification before the project is consid
 - [x] Print.
 - [x] Capture visible viewport to clipboard.
 - [x] Responsive/device toolbar with presets, custom dimensions, rotate, and resizable viewport bounds.
-- [ ] Scaled device preview when the requested viewport is larger than the browser window.
+- [x] Scaled device preview when the requested viewport is larger than the browser window.
 - [x] Full-page screenshot option.
 
 ## Menus and site controls
@@ -49,25 +49,31 @@ requires desktop smoke and interaction verification before the project is consid
 - [x] Download progress/history tracking, reveal completed files, open Downloads folder, clear history.
 - [x] Configurable download location and “ask where to save” behavior.
 - [x] Browser history viewer and deletion controls.
-- [ ] Import cookies and passwords from supported browser profiles.
-- [ ] Password manager and contact/autofill manager.
-- [ ] Extension manager and install/remove/configure flows.
+- [x] Import cookies, passwords, and autofill data from supported exports.
+- [x] Password manager and contact/autofill manager.
+- [x] Extension manager and install/remove/configure flows for unpacked extensions.
+
+Profile import accepts Chrome-compatible password CSV files and Arivu JSON exports containing
+cookies, credentials, and autofill profiles. Saved passwords are encrypted with Electron
+`safeStorage`; they are never persisted as plaintext. Electron does not expose Chrome Web Store
+installation, so extension management deliberately supports unpacked extension folders and their
+options pages.
 
 ## Codex collaboration surfaces
 
-- [ ] Browse/comment mode toggle and element-targeted comments.
-- [ ] Region screenshot comments.
-- [ ] Design adjustment editor (text, color, typography, border, size, layout, gap, spacing).
-- [ ] Multiple pending annotations, original/preview hold state, discard, and send to Arivu composer.
-- [ ] Floating composer inside the expanded browser surface.
+- [x] Browse/comment mode toggle and element-targeted comments.
+- [x] Region screenshot comments.
+- [x] Design adjustment editor (text, color, typography, border, size, layout, gap, spacing).
+- [x] Multiple pending annotations, original/preview hold state, discard, and send to Arivu composer.
+- [x] Review composer inside the expanded browser surface.
 - [x] Visible browser-agent cursor, border treatment, and live activity/step panel.
-- [ ] Browser screenshot/URL copy notifications and comment handoff into task artifacts.
+- [x] Browser screenshot/URL copy notifications and comment handoff into task artifacts.
 
 ## Quality and accessibility
 
 - [x] Accessible labels on shell controls, find controls, and device controls.
 - [x] Responsive compact toolbar behavior.
-- [ ] Light theme parity.
+- [x] Light theme parity.
 - [x] Reduced-motion and forced-colors/high-contrast shell behavior.
-- [ ] Full keyboard-only interaction audit.
+- [x] Full keyboard-only interaction audit.
 - [x] Visual comparison plus native Electron interaction smoke tests on macOS.

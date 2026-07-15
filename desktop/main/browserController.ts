@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import {
   BrowserView,
@@ -33,7 +34,20 @@ import {
   type BrowserToolResult
 } from "../../src/tools/browserControl.js";
 import { runBrowserTask } from "./browserTaskSupervisor.js";
+import {
+  BROWSER_ANNOTATION_CONSOLE_PREFIX,
+  applyBrowserDesignPatchScript,
+  browserAutofillScript,
+  discardBrowserDesignPatchScript,
+  installBrowserAnnotationScript,
+  normalizeBrowserDesignPatch,
+  type BrowserAnnotationMode,
+  type BrowserAnnotationSelection,
+  type BrowserDesignPatch,
+  type BrowserPendingAnnotation
+} from "./browserCollaboration.js";
 import { codexBrowserShellHtml } from "./codexBrowserShell.js";
+import { BrowserProfileStore, type BrowserImportedCookie } from "./browserProfileStore.js";
 import {
   boundIndexedContent,
   clickElementByIndex,
@@ -72,6 +86,14 @@ type BrowserViewport = {
   scrollX: number;
   scrollY: number;
   devicePixelRatio: number;
+};
+
+type BrowserDeviceViewport = {
+  enabled: boolean;
+  preset: string;
+  width: number;
+  height: number;
+  scale: number;
 };
 
 type BrowserFrameMeta = {
@@ -153,9 +175,20 @@ export class DesktopBrowserController implements BrowserToolController {
   private findQuery = "";
   private findMatches = 0;
   private findActiveMatch = 0;
-  private deviceViewport = { enabled: false, preset: "responsive", width: 390, height: 844 };
+  private deviceViewport: BrowserDeviceViewport = { enabled: false, preset: "responsive", width: 390, height: 844, scale: 1 };
+  private annotationMode: BrowserAnnotationMode = "browse";
+  private readonly pendingAnnotations: BrowserPendingAnnotation[] = [];
+  private activeAnnotationId: string | undefined;
+  private nextAnnotationNumber = 1;
+  private collaborationHandoff: { id: number; prompt: string; screenshotPaths: string[] } | undefined;
+  private nextHandoffId = 1;
+  private profileStore: BrowserProfileStore | undefined;
+  private readonly loadedExtensionPaths = new Map<string, string>();
   private shellNotice: { id: number; message: string; error?: boolean } | undefined;
   private nextShellNoticeId = 1;
+  private visibleShellRenderInFlight = false;
+  private visibleShellRenderPending = false;
+  private visibleShellReady = false;
   private readonly configuredBrowserSessions = new WeakSet<Session>();
   private readonly browserDownloads: BrowserDownloadRecord[] = [];
   private readonly browserHistory: BrowserHistoryRecord[] = [];
@@ -198,7 +231,13 @@ export class DesktopBrowserController implements BrowserToolController {
       defaultMode: this.defaultMode,
       activeMode: this.activeMode,
       visible: this.publicVisibleTarget(),
-      background: publicTarget(this.targets.background)
+      background: publicTarget(this.targets.background),
+      collaboration: {
+        mode: this.annotationMode,
+        pendingCount: this.pendingAnnotations.length,
+        activeAnnotationId: this.activeAnnotationId,
+        handoff: this.collaborationHandoff
+      }
     };
   }
 
@@ -304,6 +343,14 @@ export class DesktopBrowserController implements BrowserToolController {
     this.selectVisibleTabById(tabId);
     this.emitState();
     return this.getState();
+  }
+
+  getVisibleTabWebContents(tabId: string) {
+    const tab = this.visibleTabs.get(tabId);
+    if (!tab || tab.contents.isDestroyed()) {
+      throw new Error(`Unknown visible browser tab: ${tabId}`);
+    }
+    return tab.contents;
   }
 
   async selectTab(args: { tabId: string }): Promise<BrowserToolResult> {
@@ -817,6 +864,9 @@ export class DesktopBrowserController implements BrowserToolController {
       autoHideMenuBar: true,
       webPreferences: browserShellWebPreferences()
     });
+    // Electron installs an owner-window listener for every BrowserView. A normal tab set can
+    // exceed Node's default of ten without representing an application listener leak.
+    window.setMaxListeners(100);
     this.visibleWindow = window;
     this.configureVisibleShell(window);
     this.ensureVisibleShellPage(window.webContents);
@@ -841,6 +891,9 @@ export class DesktopBrowserController implements BrowserToolController {
     window.on("unmaximize", () => this.updateVisibleViewLayout());
     window.on("closed", () => {
       this.visibleWindow = undefined;
+      this.visibleShellRenderInFlight = false;
+      this.visibleShellRenderPending = false;
+      this.visibleShellReady = false;
       this.resetVisibleTabs();
       this.targets.visible = initialTarget("visible");
       if (this.activeMode === "visible") {
@@ -885,7 +938,10 @@ export class DesktopBrowserController implements BrowserToolController {
       event.preventDefault();
       void this.handleVisibleShellCommand(url);
     });
-    contents.on("did-finish-load", () => this.renderVisibleShellState());
+    contents.on("did-finish-load", () => {
+      this.visibleShellReady = true;
+      this.renderVisibleShellState();
+    });
     contents.on("before-input-event", (event, input) => {
       if (this.handleBrowserKeyboardInput(input)) {
         event.preventDefault();
@@ -932,6 +988,15 @@ export class DesktopBrowserController implements BrowserToolController {
       }
       if (isVisibleStartPageUrl(url) || isVisibleLoadErrorPageUrl(url) || isVisibleSettingsPageUrl(url)) {
         return;
+      }
+      if (url.startsWith("chrome-extension://")) {
+        try {
+          if (contents.session.extensions.getExtension(new URL(url).hostname)) {
+            return;
+          }
+        } catch {
+          // Fall through to the normal navigation guard.
+        }
       }
       try {
         normalizeBrowserUrl(url);
@@ -1023,6 +1088,10 @@ export class DesktopBrowserController implements BrowserToolController {
       }
     });
     contents.on("console-message", (details) => {
+      if (mode === "visible" && details.message.startsWith(BROWSER_ANNOTATION_CONSOLE_PREFIX)) {
+        void this.handleBrowserAnnotationSelection(target, contents, details.message.slice(BROWSER_ANNOTATION_CONSOLE_PREFIX.length));
+        return;
+      }
       const level = normalizeConsoleLevel(details.level);
       const entry: BrowserConsoleEntry = {
         level,
@@ -1035,6 +1104,305 @@ export class DesktopBrowserController implements BrowserToolController {
       target.logs = [...target.logs, entry].slice(-MAX_CONSOLE_LOGS);
       this.emitState();
     });
+  }
+
+  private async handleBrowserAnnotationSelection(target: BrowserTargetRecord, contents: WebContents, rawPayload: string) {
+    let selection: BrowserAnnotationSelection;
+    try {
+      selection = JSON.parse(rawPayload) as BrowserAnnotationSelection;
+    } catch {
+      this.notifyBrowserShell("The browser selection could not be read.", true);
+      return;
+    }
+    if (
+      !selection ||
+      !["element", "region"].includes(selection.kind) ||
+      !selection.rect ||
+      ![selection.rect.x, selection.rect.y, selection.rect.width, selection.rect.height].every(Number.isFinite)
+    ) {
+      this.notifyBrowserShell("The browser selection was incomplete.", true);
+      return;
+    }
+    const id = `annotation-${this.nextAnnotationNumber++}`;
+    const screenshotPath = await this.captureAnnotationRegion(contents, id, selection.rect).catch(() => undefined);
+    const annotation: BrowserPendingAnnotation = {
+      ...selection,
+      id,
+      tabId: target.id,
+      url: target.url,
+      title: target.title,
+      comment: "",
+      createdAt: new Date().toISOString(),
+      screenshotPath
+    };
+    this.pendingAnnotations.push(annotation);
+    this.activeAnnotationId = id;
+    this.annotationMode = "browse";
+    await contents.executeJavaScript(installBrowserAnnotationScript("browse"), true).catch(() => undefined);
+    this.notifyBrowserShell(
+      selection.kind === "region" ? "Region captured. Add a note before sending." : "Element selected. Add a note or preview adjustments."
+    );
+    this.emitState();
+  }
+
+  private async captureAnnotationRegion(contents: WebContents, id: string, rect: { x: number; y: number; width: number; height: number }) {
+    const directory =
+      process.env.ARIVU_BROWSER_SMOKE === "1" || process.env.ARIVU_DESKTOP_SMOKE === "1"
+        ? os.tmpdir()
+        : path.join(appDataDir(), "browser-annotations");
+    await mkdir(directory, { recursive: true });
+    const image = await contents.capturePage({
+      x: Math.max(0, Math.floor(rect.x)),
+      y: Math.max(0, Math.floor(rect.y)),
+      width: Math.max(1, Math.ceil(rect.width)),
+      height: Math.max(1, Math.ceil(rect.height))
+    });
+    if (image.isEmpty()) {
+      return undefined;
+    }
+    const screenshotPath = path.join(directory, `${id}.png`);
+    await writeFile(screenshotPath, image.toPNG());
+    return screenshotPath;
+  }
+
+  private async setBrowserAnnotationMode(mode: BrowserAnnotationMode) {
+    const active = this.activeVisibleTab();
+    this.annotationMode = mode;
+    if (active && !active.contents.isDestroyed() && active.url && !active.url.startsWith("arivu://")) {
+      await active.contents.executeJavaScript(installBrowserAnnotationScript(mode), true);
+    }
+    this.emitState();
+  }
+
+  private activeAnnotation() {
+    return this.pendingAnnotations.find((annotation) => annotation.id === this.activeAnnotationId);
+  }
+
+  private async applyActiveAnnotationDesign(patch: BrowserDesignPatch) {
+    const annotation = this.activeAnnotation();
+    const tab = annotation ? this.visibleTabs.get(annotation.tabId) : undefined;
+    if (!annotation?.selector || !tab || tab.contents.isDestroyed()) {
+      throw new Error("Select an element before changing its design.");
+    }
+    annotation.designPatch = { ...annotation.designPatch, ...patch };
+    await tab.contents.executeJavaScript(applyBrowserDesignPatchScript(annotation.selector, annotation.designPatch), true);
+    this.emitState();
+  }
+
+  private async discardBrowserAnnotation(id: string) {
+    const index = this.pendingAnnotations.findIndex((annotation) => annotation.id === id);
+    if (index < 0) return;
+    const [annotation] = this.pendingAnnotations.splice(index, 1);
+    const tab = this.visibleTabs.get(annotation.tabId);
+    if (annotation.selector && annotation.designPatch && tab && !tab.contents.isDestroyed()) {
+      await tab.contents.executeJavaScript(discardBrowserDesignPatchScript(annotation.selector), true).catch(() => undefined);
+    }
+    this.activeAnnotationId = this.pendingAnnotations.at(-1)?.id;
+    this.emitState();
+  }
+
+  private sendBrowserAnnotationsToArivu() {
+    if (this.pendingAnnotations.length === 0) {
+      this.notifyBrowserShell("Add at least one browser comment before sending.", true);
+      return;
+    }
+    const lines = this.pendingAnnotations.map((annotation, index) => {
+      const target = annotation.selector ? `element ${annotation.selector}` : "captured region";
+      const note = annotation.comment.trim() || "Review this selection.";
+      const adjustments =
+        annotation.designPatch && Object.keys(annotation.designPatch).length > 0
+          ? ` Suggested design: ${JSON.stringify(annotation.designPatch)}.`
+          : "";
+      return `${index + 1}. ${note} On ${annotation.url}, ${target}.${adjustments}`;
+    });
+    this.collaborationHandoff = {
+      id: this.nextHandoffId++,
+      prompt: `Browser review notes:\n${lines.join("\n")}`,
+      screenshotPaths: this.pendingAnnotations.flatMap((annotation) => (annotation.screenshotPath ? [annotation.screenshotPath] : []))
+    };
+    this.notifyBrowserShell(
+      `${this.pendingAnnotations.length} browser note${this.pendingAnnotations.length === 1 ? "" : "s"} added to the Arivu composer.`
+    );
+    this.emitState();
+  }
+
+  private browserProfileStore() {
+    if (!this.profileStore) {
+      const smokeMode = process.env.ARIVU_BROWSER_SMOKE === "1" || process.env.ARIVU_DESKTOP_SMOKE === "1";
+      const profilePath = smokeMode
+        ? path.join(os.tmpdir(), `arivu-browser-smoke-profile-${process.pid}.json`)
+        : path.join(appDataDir(), "browser-profile.json");
+      mkdirSync(path.dirname(profilePath), { recursive: true });
+      this.profileStore = new BrowserProfileStore(profilePath);
+    }
+    return this.profileStore;
+  }
+
+  private async importBrowserProfileData() {
+    const window = this.visibleWindow;
+    if (!window || window.isDestroyed()) return;
+    const result = await dialog.showOpenDialog(window, {
+      title: "Import browser profile data",
+      properties: ["openFile"],
+      filters: [
+        { name: "Browser exports", extensions: ["json", "csv"] },
+        { name: "All files", extensions: ["*"] }
+      ]
+    });
+    const filePath = result.filePaths[0];
+    if (result.canceled || !filePath) return;
+    const imported = this.browserProfileStore().importFile(filePath);
+    const browserSession = this.activeVisibleTab()?.contents.session;
+    let cookieCount = 0;
+    if (browserSession) {
+      for (const cookie of imported.cookies) {
+        if (await this.importBrowserCookie(browserSession, cookie)) cookieCount += 1;
+      }
+    }
+    this.notifyBrowserShell(
+      `Imported ${imported.credentials.length} password${imported.credentials.length === 1 ? "" : "s"}, ${imported.autofillProfiles.length} autofill profile${imported.autofillProfiles.length === 1 ? "" : "s"}, and ${cookieCount} cookie${cookieCount === 1 ? "" : "s"}.`
+    );
+    this.refreshBrowserSettingsTabs();
+  }
+
+  private async importBrowserCookie(browserSession: Session, cookie: BrowserImportedCookie) {
+    const domain = cookie.domain?.replace(/^\./, "");
+    const url = cookie.url || (domain ? `${cookie.secure === false ? "http" : "https"}://${domain}${cookie.path || "/"}` : undefined);
+    if (!url || !cookie.name) return false;
+    try {
+      await browserSession.cookies.set({
+        url,
+        name: cookie.name,
+        value: cookie.value,
+        ...(cookie.domain ? { domain: cookie.domain } : {}),
+        ...(cookie.path ? { path: cookie.path } : {}),
+        ...(cookie.secure !== undefined ? { secure: cookie.secure } : {}),
+        ...(cookie.httpOnly !== undefined ? { httpOnly: cookie.httpOnly } : {}),
+        ...(cookie.expirationDate !== undefined ? { expirationDate: cookie.expirationDate } : {}),
+        ...(cookie.sameSite ? { sameSite: cookie.sameSite } : {})
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private addBrowserCredential(params: URLSearchParams) {
+    this.browserProfileStore().addCredential({
+      origin: params.get("origin") ?? this.activeVisibleTab()?.url ?? "",
+      username: params.get("username") ?? "",
+      password: params.get("password") ?? "",
+      label: params.get("label") || undefined
+    });
+    this.notifyBrowserShell("Password saved securely.");
+    this.refreshBrowserSettingsTabs();
+  }
+
+  private addBrowserAutofillProfile(params: URLSearchParams) {
+    this.browserProfileStore().addAutofillProfile({
+      label: params.get("label") ?? "",
+      fullName: params.get("fullName") || undefined,
+      email: params.get("email") || undefined,
+      phone: params.get("phone") || undefined,
+      addressLine1: params.get("addressLine1") || undefined,
+      addressLine2: params.get("addressLine2") || undefined,
+      city: params.get("city") || undefined,
+      region: params.get("region") || undefined,
+      postalCode: params.get("postalCode") || undefined,
+      country: params.get("country") || undefined
+    });
+    this.notifyBrowserShell("Autofill profile saved.");
+    this.refreshBrowserSettingsTabs();
+  }
+
+  private async autofillActivePage(profileId?: string) {
+    const active = this.activeVisibleTab();
+    if (!active) return;
+    const store = this.browserProfileStore();
+    const profiles = store.autofillProfiles();
+    const profile = profiles.find((entry) => entry.id === profileId) ?? profiles[0];
+    const credential = store.credentialForUrl(active.url);
+    if (!profile && !credential) {
+      this.notifyBrowserShell("No matching password or autofill profile is saved.", true);
+      return;
+    }
+    const result = (await active.contents.executeJavaScript(browserAutofillScript(profile, credential), true)) as { count?: number };
+    this.notifyBrowserShell(
+      result.count
+        ? `Filled ${result.count} field${result.count === 1 ? "" : "s"}. Review before submitting.`
+        : "No matching fields were found.",
+      !result.count
+    );
+  }
+
+  private async chooseBrowserExtension() {
+    const window = this.visibleWindow;
+    const active = this.activeVisibleTab();
+    if (!window || !active) return;
+    const result = await dialog.showOpenDialog(window, { title: "Load unpacked browser extension", properties: ["openDirectory"] });
+    const extensionPath = result.filePaths[0];
+    if (result.canceled || !extensionPath) return;
+    const extension = await active.contents.session.extensions.loadExtension(extensionPath, { allowFileAccess: true });
+    this.loadedExtensionPaths.set(extension.id, extensionPath);
+    this.browserProfileStore().addExtensionPath(extensionPath);
+    this.notifyBrowserShell(`${extension.name} loaded.`);
+    this.refreshBrowserSettingsTabs();
+  }
+
+  private removeBrowserExtension(extensionId: string) {
+    const active = this.activeVisibleTab();
+    if (!active) return;
+    const extensionPath = this.loadedExtensionPaths.get(extensionId);
+    active.contents.session.extensions.removeExtension(extensionId);
+    this.loadedExtensionPaths.delete(extensionId);
+    if (extensionPath) this.browserProfileStore().removeExtensionPath(extensionPath);
+    this.notifyBrowserShell("Extension removed.");
+    this.refreshBrowserSettingsTabs();
+  }
+
+  private openBrowserExtensionOptions(rawUrl: string) {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "chrome-extension:") {
+      throw new Error("Invalid extension options URL.");
+    }
+    const target = this.createVisibleTab({ activate: true, deferLoad: true });
+    void target.contents.loadURL(parsed.toString()).catch((error: unknown) => {
+      target.lastError = error instanceof Error ? error.message : String(error);
+      this.emitState();
+    });
+  }
+
+  private async restoreBrowserExtensions(browserSession: Session) {
+    for (const extensionPath of this.browserProfileStore().extensionPaths()) {
+      if (!existsSync(extensionPath)) continue;
+      try {
+        const extension = await browserSession.extensions.loadExtension(extensionPath, { allowFileAccess: true });
+        this.loadedExtensionPaths.set(extension.id, extensionPath);
+      } catch {
+        // Keep the path saved so a temporarily unavailable volume can recover next launch.
+      }
+    }
+    this.emitState();
+  }
+
+  private adoptBackgroundAgentTab() {
+    const background = this.targets.background;
+    if (!background.url) {
+      this.notifyBrowserShell("The background agent does not have an open page yet.", true);
+      return;
+    }
+    this.createVisibleTab({ url: background.url, activate: true });
+    this.notifyBrowserShell("Agent page adopted as a visible tab.");
+  }
+
+  private async sendActiveTabToAgent() {
+    const active = this.activeVisibleTab();
+    if (!active?.url) {
+      this.notifyBrowserShell("Open a page before sending it to the background agent.", true);
+      return;
+    }
+    await this.open({ url: active.url, mode: "background" });
+    this.notifyBrowserShell("Current page is now available to the background agent.");
   }
 
   private updateTargetFromContents(mode: BrowserMode, contents: WebContents, target: BrowserTargetRecord) {
@@ -1074,9 +1442,18 @@ export class DesktopBrowserController implements BrowserToolController {
     // though the page is painted. Prefer the attached surface for visible tabs and keep CDP
     // as the fallback; hidden/background contents still need CDP first.
     if (mode === "visible") {
-      const surfaceImage = await contents.capturePage();
-      if (!surfaceImage.isEmpty()) {
-        return surfaceImage;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const surfaceImage = await contents.capturePage();
+          if (!surfaceImage.isEmpty()) {
+            return surfaceImage;
+          }
+        } catch {
+          // BrowserView surfaces can briefly report UnknownVizError while Chromium swaps
+          // compositors. Repaint and retry before falling back to CDP.
+        }
+        contents.invalidate();
+        await delay(120 * (attempt + 1));
       }
     }
     const debuggerImage = await capturePageWithDebugger(contents);
@@ -1431,14 +1808,43 @@ export class DesktopBrowserController implements BrowserToolController {
       return;
     }
     const [width, height] = window.getContentSize();
+    const availableHeight = Math.max(0, height - this.visibleChromeHeight);
+    const scale = this.deviceViewport.enabled
+      ? Math.min(1, width / this.deviceViewport.width, availableHeight / this.deviceViewport.height)
+      : 1;
+    const viewWidth = this.deviceViewport.enabled ? Math.max(1, Math.floor(this.deviceViewport.width * scale)) : Math.max(0, width);
+    const viewHeight = this.deviceViewport.enabled ? Math.max(1, Math.floor(this.deviceViewport.height * scale)) : availableHeight;
+    this.deviceViewport = { ...this.deviceViewport, scale };
     active.view.setBounds({
-      x: this.deviceViewport.enabled ? Math.max(0, Math.floor((width - Math.min(width, this.deviceViewport.width)) / 2)) : 0,
+      x: this.deviceViewport.enabled ? Math.max(0, Math.floor((width - viewWidth) / 2)) : 0,
       y: this.visibleChromeHeight,
-      width: this.deviceViewport.enabled ? Math.max(0, Math.min(width, this.deviceViewport.width)) : Math.max(0, width),
-      height: this.deviceViewport.enabled
-        ? Math.max(0, Math.min(height - this.visibleChromeHeight, this.deviceViewport.height))
-        : Math.max(0, height - this.visibleChromeHeight)
+      width: viewWidth,
+      height: viewHeight
     });
+    void this.applyDeviceEmulation(active.contents, scale);
+    this.renderVisibleShellState();
+  }
+
+  private async applyDeviceEmulation(contents: WebContents, scale: number) {
+    const debuggerApi = contents.debugger;
+    try {
+      if (!debuggerApi.isAttached()) debuggerApi.attach("1.3");
+      if (!this.deviceViewport.enabled) {
+        await debuggerApi.sendCommand("Emulation.clearDeviceMetricsOverride");
+        return;
+      }
+      await debuggerApi.sendCommand("Emulation.setDeviceMetricsOverride", {
+        width: this.deviceViewport.width,
+        height: this.deviceViewport.height,
+        screenWidth: this.deviceViewport.width,
+        screenHeight: this.deviceViewport.height,
+        deviceScaleFactor: 1,
+        mobile: this.deviceViewport.width <= 768,
+        scale
+      });
+    } catch (error) {
+      this.notifyBrowserShell(`Device preview unavailable: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
   }
 
   private ensureVisibleShellPage(contents: WebContents) {
@@ -1509,7 +1915,7 @@ export class DesktopBrowserController implements BrowserToolController {
           this.activeVisibleTab()?.contents.reloadIgnoringCache();
           break;
         case "layout": {
-          this.visibleChromeHeight = clampNumber(Number(command.params.get("height")) || DEFAULT_VISIBLE_CHROME_HEIGHT, 72, 190);
+          this.visibleChromeHeight = clampNumber(Number(command.params.get("height")) || DEFAULT_VISIBLE_CHROME_HEIGHT, 72, 430);
           this.updateVisibleViewLayout();
           break;
         }
@@ -1598,6 +2004,64 @@ export class DesktopBrowserController implements BrowserToolController {
         case "site-info":
           this.showSiteInformationMenu();
           break;
+        case "annotation-mode":
+          await this.setBrowserAnnotationMode(
+            command.params.get("mode") === "element" ? "element" : command.params.get("mode") === "region" ? "region" : "browse"
+          );
+          break;
+        case "annotation-select": {
+          const annotationId = command.params.get("id");
+          if (annotationId && this.pendingAnnotations.some((annotation) => annotation.id === annotationId)) {
+            this.activeAnnotationId = annotationId;
+            this.emitState();
+          }
+          break;
+        }
+        case "annotation-comment": {
+          const annotation = this.pendingAnnotations.find((entry) => entry.id === command.params.get("id"));
+          if (annotation) {
+            annotation.comment = (command.params.get("comment") ?? "").slice(0, 4_000);
+            this.emitState();
+          }
+          break;
+        }
+        case "annotation-design":
+          await this.applyActiveAnnotationDesign(normalizeBrowserDesignPatch(Object.fromEntries(command.params)));
+          break;
+        case "annotation-preview": {
+          const annotation = this.activeAnnotation();
+          const tab = annotation ? this.visibleTabs.get(annotation.tabId) : undefined;
+          if (annotation?.selector && annotation.designPatch && tab && !tab.contents.isDestroyed()) {
+            await tab.contents.executeJavaScript(
+              command.params.get("mode") === "original"
+                ? discardBrowserDesignPatchScript(annotation.selector)
+                : applyBrowserDesignPatchScript(annotation.selector, annotation.designPatch),
+              true
+            );
+          }
+          break;
+        }
+        case "annotation-discard": {
+          const annotationId = command.params.get("id");
+          if (annotationId) await this.discardBrowserAnnotation(annotationId);
+          break;
+        }
+        case "annotation-send":
+          if (command.params.get("id")) {
+            const annotation = this.pendingAnnotations.find((entry) => entry.id === command.params.get("id"));
+            if (annotation) annotation.comment = (command.params.get("comment") ?? annotation.comment).slice(0, 4_000);
+          }
+          this.sendBrowserAnnotationsToArivu();
+          break;
+        case "adopt-agent-tab":
+          this.adoptBackgroundAgentTab();
+          break;
+        case "send-tab-to-agent":
+          await this.sendActiveTabToAgent();
+          break;
+        case "autofill":
+          await this.autofillActivePage(command.params.get("profileId") || undefined);
+          break;
         case "open-settings":
           this.openBrowserSettings();
           break;
@@ -1627,6 +2091,40 @@ export class DesktopBrowserController implements BrowserToolController {
           this.notifyBrowserShell("Saved site permissions reset.");
           this.refreshBrowserSettingsTabs();
           break;
+        case "settings-import-profile":
+          await this.importBrowserProfileData();
+          break;
+        case "settings-add-credential":
+          this.addBrowserCredential(command.params);
+          break;
+        case "settings-remove-credential": {
+          const id = command.params.get("id");
+          if (id) this.browserProfileStore().removeCredential(id);
+          this.refreshBrowserSettingsTabs();
+          break;
+        }
+        case "settings-add-autofill":
+          this.addBrowserAutofillProfile(command.params);
+          break;
+        case "settings-remove-autofill": {
+          const id = command.params.get("id");
+          if (id) this.browserProfileStore().removeAutofillProfile(id);
+          this.refreshBrowserSettingsTabs();
+          break;
+        }
+        case "settings-load-extension":
+          await this.chooseBrowserExtension();
+          break;
+        case "settings-remove-extension": {
+          const id = command.params.get("id");
+          if (id) this.removeBrowserExtension(id);
+          break;
+        }
+        case "settings-open-extension": {
+          const url = command.params.get("url");
+          if (url) this.openBrowserExtensionOptions(url);
+          break;
+        }
       }
     } catch (error) {
       const active = this.activeVisibleTab() ?? this.targets.visible;
@@ -1851,10 +2349,12 @@ export class DesktopBrowserController implements BrowserToolController {
 
   private applyDeviceSize(width: number, height: number) {
     this.deviceViewport = {
+      ...this.deviceViewport,
       enabled: true,
       preset: "responsive",
       width: clampNumber(Math.trunc(width || this.deviceViewport.width), 240, 4096),
-      height: clampNumber(Math.trunc(height || this.deviceViewport.height), 160, 4096)
+      height: clampNumber(Math.trunc(height || this.deviceViewport.height), 160, 4096),
+      scale: 1
     };
     this.updateVisibleViewLayout();
     this.emitState();
@@ -1961,6 +2461,38 @@ export class DesktopBrowserController implements BrowserToolController {
       { label: "Print…", accelerator: "CommandOrControl+P", click: () => active.contents.print({ printBackground: true }) },
       { label: "History", click: () => this.showBrowserHistoryMenu() },
       { label: "Browser settings", click: () => this.openBrowserSettings() },
+      {
+        label: "Review and comment",
+        submenu: [
+          { label: "Select element", click: () => void this.setBrowserAnnotationMode("element") },
+          { label: "Capture region", click: () => void this.setBrowserAnnotationMode("region") },
+          {
+            label: "Send pending notes to Arivu",
+            enabled: this.pendingAnnotations.length > 0,
+            click: () => this.sendBrowserAnnotationsToArivu()
+          }
+        ]
+      },
+      {
+        label: "Autofill",
+        enabled: this.browserProfileStore().autofillProfiles().length > 0 || this.browserProfileStore().credentialSummaries().length > 0,
+        click: () => void this.autofillActivePage()
+      },
+      {
+        label: "Agent tabs",
+        submenu: [
+          {
+            label: "Send current tab to background agent",
+            enabled: Boolean(active.url),
+            click: () => void this.sendActiveTabToAgent()
+          },
+          {
+            label: "Adopt background agent page",
+            enabled: Boolean(this.targets.background.url),
+            click: () => this.adoptBackgroundAgentTab()
+          }
+        ]
+      },
       { type: "separator" },
       {
         label: `Zoom (${zoom}%)`,
@@ -2028,11 +2560,24 @@ export class DesktopBrowserController implements BrowserToolController {
   }
 
   private browserSettingsPageState() {
+    const store = this.browserProfileStore();
+    const extensions = this.activeVisibleTab()?.contents.session.extensions.getAllExtensions() ?? [];
     return {
       askDownloadLocation: this.askDownloadLocation,
       downloadDirectory: this.downloadDirectory ?? app.getPath("downloads"),
       historyCount: this.browserHistory.length,
-      permissionCount: this.browserPermissions.size
+      permissionCount: this.browserPermissions.size,
+      credentials: store.credentialSummaries(),
+      autofillProfiles: store.autofillProfiles(),
+      extensions: extensions.map((extension) => {
+        const optionsPage = extension.manifest?.options_ui?.page ?? extension.manifest?.options_page;
+        return {
+          id: extension.id,
+          name: extension.name,
+          version: extension.version,
+          optionsUrl: typeof optionsPage === "string" ? new URL(optionsPage, extension.url).toString() : undefined
+        };
+      })
     };
   }
 
@@ -2089,6 +2634,7 @@ export class DesktopBrowserController implements BrowserToolController {
       return;
     }
     this.configuredBrowserSessions.add(browserSession);
+    void this.restoreBrowserExtensions(browserSession);
     browserSession.on("will-download", (_event, item) => {
       const downloadDirectory = this.downloadDirectory ?? app.getPath("downloads");
       const defaultPath = path.join(downloadDirectory, item.getFilename());
@@ -2299,6 +2845,12 @@ export class DesktopBrowserController implements BrowserToolController {
     if (!contents.getURL() || contents.isDestroyed()) {
       return;
     }
+    if (!this.visibleShellReady || this.visibleShellRenderInFlight) {
+      this.visibleShellRenderPending = true;
+      return;
+    }
+    this.visibleShellRenderInFlight = true;
+    this.visibleShellRenderPending = false;
     const state = {
       ...this.publicVisibleTarget(),
       chrome: {
@@ -2308,13 +2860,28 @@ export class DesktopBrowserController implements BrowserToolController {
         findMatches: this.findMatches,
         findActiveMatch: this.findActiveMatch,
         device: this.deviceViewport,
+        annotationMode: this.annotationMode,
+        annotations: this.pendingAnnotations,
+        activeAnnotationId: this.activeAnnotationId,
+        backgroundAgent: {
+          url: this.targets.background.url,
+          title: this.targets.background.title,
+          loading: this.targets.background.loading
+        },
         notice: this.shellNotice,
         downloadCount: this.browserDownloads.length,
         activeDownloadCount: this.browserDownloads.filter((download) => download.state === "progressing").length
       }
     };
     const script = `window.__ARIVU_BROWSER_APPLY_STATE__?.(${JSON.stringify(state)});`;
-    void contents.executeJavaScript(script, true).catch(() => undefined);
+    void Promise.race([contents.executeJavaScript(script, true), delay(750).then(() => undefined)])
+      .catch(() => undefined)
+      .finally(() => {
+        this.visibleShellRenderInFlight = false;
+        if (this.visibleShellRenderPending) {
+          this.renderVisibleShellState();
+        }
+      });
   }
 
   private showVisibleWindow(window: BrowserWindow) {
@@ -2388,7 +2955,15 @@ function isVisibleSettingsCommandUrl(url: string) {
       "settings-clear-cookies",
       "settings-clear-cache",
       "settings-clear-history",
-      "settings-reset-permissions"
+      "settings-reset-permissions",
+      "settings-import-profile",
+      "settings-add-credential",
+      "settings-remove-credential",
+      "settings-add-autofill",
+      "settings-remove-autofill",
+      "settings-load-extension",
+      "settings-remove-extension",
+      "settings-open-extension"
     ].includes(command.action)
   );
 }
@@ -2765,8 +3340,64 @@ function visibleSettingsPageUrl(state: {
   downloadDirectory: string;
   historyCount: number;
   permissionCount: number;
+  credentials: Array<{ id: string; origin: string; username: string; label?: string }>;
+  autofillProfiles: Array<{ id: string; label: string; fullName?: string; email?: string; phone?: string }>;
+  extensions: Array<{ id: string; name: string; version: string; optionsUrl?: string }>;
 }) {
-  const html = `<!doctype html><html lang="en" data-${VISIBLE_SETTINGS_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>Browser settings</title><style>:root{color-scheme:dark;--bg:#171717;--panel:#202020;--line:#343434;--text:#f2f2f2;--muted:#a3a3a3;--accent:#5b9cf5}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,sans-serif}main{width:min(820px,calc(100vw - 40px));margin:0 auto;padding:40px 0 80px}header{position:sticky;top:0;padding:0 0 20px;background:linear-gradient(var(--bg) 78%,transparent);z-index:2}h1{font-size:26px;margin:0 0 18px}#search{width:100%;height:38px;border:1px solid var(--line);border-radius:10px;background:#222;color:var(--text);padding:0 12px;outline:0}#search:focus{border-color:#555}section{display:grid;gap:14px}article{padding:18px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}article[hidden]{display:none}h2{font-size:16px;margin:0 0 6px}p{margin:0;color:var(--muted)}.row{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.stack{min-width:0}.path{margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:12px ui-monospace,SFMono-Regular,monospace;color:#bbb}button{flex:0 0 auto;border:1px solid var(--line);border-radius:8px;background:#292929;color:var(--text);padding:7px 10px;cursor:pointer}button:hover{background:#333}.switch{display:flex;align-items:center;gap:9px;color:var(--muted)}input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}.count{color:#ddd;font-weight:600}.danger{color:#ffaaa4}</style></head><body><main><header><h1>Browser settings</h1><input id="search" type="search" placeholder="Search settings" aria-label="Search browser settings"></header><section id="sections"><article data-search="downloads location save ask"><h2>Downloads</h2><p>Control where files downloaded by the isolated Arivu browser are saved.</p><div class="row"><div class="stack"><strong>Download location</strong><div class="path">${escapeHtml(state.downloadDirectory)}</div></div><button data-command="choose-download-directory">Change…</button></div><div class="row"><span>Ask where to save each file</span><label class="switch"><input id="ask-download" type="checkbox" ${state.askDownloadLocation ? "checked" : ""}>Ask</label></div></article><article data-search="privacy cookies cache history clear browsing data"><h2>Privacy and browser data</h2><p>History entries: <span class="count">${state.historyCount}</span></p><div class="row"><span>Cookies and site storage</span><button data-command="settings-clear-cookies">Clear cookies</button></div><div class="row"><span>Cached files</span><button data-command="settings-clear-cache">Clear cache</button></div><div class="row"><span>Browsing history</span><button class="danger" data-command="settings-clear-history">Delete history</button></div></article><article data-search="permissions camera microphone location notifications clipboard fullscreen"><h2>Site permissions</h2><p>Saved permission decisions: <span class="count">${state.permissionCount}</span>. Per-site Allow, Block, and Ask controls are also available from the site-information button.</p><div class="row"><span>Reset all saved permission decisions</span><button data-command="settings-reset-permissions">Reset permissions</button></div></article><article data-search="developer devtools inspect cdp debugging"><h2>Developer tools</h2><p>Use F12 or Browser options → Inspect to open Chromium DevTools for the active page. Arivu browser tasks use a separate, isolated browser profile.</p></article><article data-search="keyboard shortcuts tabs navigation zoom find"><h2>Keyboard shortcuts</h2><p>⌘/Ctrl+L address · ⌘/Ctrl+T new tab · ⌘/Ctrl+W close tab · Ctrl+Tab cycle tabs · ⌘/Ctrl+F find · ⌘/Ctrl+R reload · ⌘/Ctrl +/− zoom</p></article></section></main><script>const command=(name,params={})=>{const url=new URL("arivu-browser://"+name);for(const[key,value]of Object.entries(params))url.searchParams.set(key,String(value));location.href=url.href};document.querySelectorAll("[data-command]").forEach(button=>button.addEventListener("click",()=>command(button.dataset.command)));document.getElementById("ask-download").addEventListener("change",event=>command("set-ask-download",{value:event.target.checked}));document.getElementById("search").addEventListener("input",event=>{const query=event.target.value.trim().toLowerCase();document.querySelectorAll("article").forEach(article=>article.hidden=Boolean(query)&&!article.dataset.search.includes(query)&&!article.innerText.toLowerCase().includes(query))});</script></body></html>`;
+  const credentialRows = state.credentials.length
+    ? state.credentials
+        .map(
+          (credential) =>
+            `<div class="saved-row"><div><strong>${escapeHtml(credential.label || credential.username)}</strong><span>${escapeHtml(credential.username)} · ${escapeHtml(credential.origin)}</span></div><button class="danger" data-command="settings-remove-credential" data-id="${escapeHtml(credential.id)}">Remove</button></div>`
+        )
+        .join("")
+    : `<p class="empty">No passwords saved.</p>`;
+  const profileRows = state.autofillProfiles.length
+    ? state.autofillProfiles
+        .map(
+          (profile) =>
+            `<div class="saved-row"><div><strong>${escapeHtml(profile.label)}</strong><span>${escapeHtml([profile.fullName, profile.email, profile.phone].filter(Boolean).join(" · "))}</span></div><button class="danger" data-command="settings-remove-autofill" data-id="${escapeHtml(profile.id)}">Remove</button></div>`
+        )
+        .join("")
+    : `<p class="empty">No autofill profiles saved.</p>`;
+  const extensionRows = state.extensions.length
+    ? state.extensions
+        .map(
+          (extension) =>
+            `<div class="saved-row"><div><strong>${escapeHtml(extension.name)}</strong><span>Version ${escapeHtml(extension.version)} · ${escapeHtml(extension.id)}</span></div><div class="actions">${extension.optionsUrl ? `<button data-command="settings-open-extension" data-url="${escapeHtml(extension.optionsUrl)}">Options</button>` : ""}<button class="danger" data-command="settings-remove-extension" data-id="${escapeHtml(extension.id)}">Remove</button></div></div>`
+        )
+        .join("")
+    : `<p class="empty">No unpacked extensions loaded.</p>`;
+  const html = `<!doctype html>
+<html lang="en" data-${VISIBLE_SETTINGS_PAGE_MARKER}>
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline';form-action 'none'">
+  <title>Browser settings</title>
+  <style>
+    :root{color-scheme:dark;--bg:#171717;--panel:#202020;--field:#151515;--line:#343434;--text:#f2f2f2;--muted:#a3a3a3;--accent:#5b9cf5;--danger:#ffaaa4}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,sans-serif}main{width:min(880px,calc(100vw - 40px));margin:0 auto;padding:40px 0 80px}header{position:sticky;top:0;padding:0 0 20px;background:linear-gradient(var(--bg) 78%,transparent);z-index:2}h1{font-size:26px;margin:0 0 18px;letter-spacing:0}#search{width:100%;height:38px}section{display:grid;gap:14px}article{padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}article[hidden]{display:none}h2{font-size:16px;margin:0 0 6px;letter-spacing:0}p{margin:0;color:var(--muted)}.row,.saved-row{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.stack,.saved-row>div{min-width:0;display:grid;gap:3px}.saved-row span,.path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}.path{font-family:ui-monospace,SFMono-Regular,monospace;color:#bbb}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:14px}.form-grid .wide{grid-column:1/-1}.form-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px}input,button{font:inherit}input[type=text],input[type=password],input[type=email],input[type=tel],input[type=search]{min-width:0;height:36px;border:1px solid var(--line);border-radius:7px;background:var(--field);color:var(--text);padding:0 10px;outline:0}input:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}button{flex:0 0 auto;border:1px solid var(--line);border-radius:7px;background:#292929;color:var(--text);padding:7px 10px;cursor:pointer}button:hover{background:#333}.primary{border-color:#4779b9;background:#315f98}.switch{display:flex;align-items:center;gap:9px;color:var(--muted)}input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}.count{color:var(--text);font-weight:600}.danger{color:var(--danger)}.empty{margin-top:12px}.hint{margin-top:8px;font-size:12px}.actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+    @media(max-width:620px){main{width:min(100% - 24px,880px);padding-top:24px}.form-grid{grid-template-columns:1fr}.form-grid .wide{grid-column:auto}.row,.saved-row{align-items:flex-start}.saved-row{flex-direction:column}.saved-row button{align-self:flex-end}}
+    @media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f6f6f5;--panel:#fff;--field:#fff;--line:#d8d8d5;--text:#1c1c1b;--muted:#686865;--danger:#a92f2a}button{background:#f1f1ef}.primary{background:#3269aa;color:#fff}.path{color:#555}}
+  </style>
+</head>
+<body><main><header><h1>Browser settings</h1><input id="search" type="search" placeholder="Search settings" aria-label="Search browser settings"></header><section>
+  <article data-search="downloads location save ask"><h2>Downloads</h2><p>Control where files downloaded by the isolated Arivu browser are saved.</p><div class="row"><div class="stack"><strong>Download location</strong><div class="path">${escapeHtml(state.downloadDirectory)}</div></div><button data-command="choose-download-directory">Change</button></div><div class="row"><span>Ask where to save each file</span><label class="switch"><input id="ask-download" type="checkbox" ${state.askDownloadLocation ? "checked" : ""}>Ask</label></div></article>
+  <article data-search="privacy cookies cache history clear browsing data import profile"><h2>Privacy and browser data</h2><p>History entries: <span class="count">${state.historyCount}</span></p><div class="actions"><button class="primary" data-command="settings-import-profile">Import profile export</button><button data-command="settings-clear-cookies">Clear cookies</button><button data-command="settings-clear-cache">Clear cache</button><button class="danger" data-command="settings-clear-history">Delete history</button></div><p class="hint">Import accepts Chrome-compatible password CSV files or Arivu JSON exports containing passwords, cookies, and autofill profiles.</p></article>
+  <article data-search="password manager credentials login"><h2>Password manager</h2><p>Passwords are encrypted with the operating system credential store and never shown in this page.</p>${credentialRows}<form id="credential-form" class="form-grid"><input name="label" type="text" placeholder="Label"><input name="origin" type="text" placeholder="https://example.com" required><input name="username" type="text" autocomplete="username" placeholder="Username" required><input name="password" type="password" autocomplete="new-password" placeholder="Password" required><div class="form-actions"><button class="primary" type="submit">Save password</button></div></form></article>
+  <article data-search="autofill contact address phone email"><h2>Autofill profiles</h2><p>Saved contact details can be filled into the current page from Browser options.</p>${profileRows}<form id="autofill-form" class="form-grid"><input name="label" type="text" placeholder="Profile name" required><input name="fullName" type="text" autocomplete="name" placeholder="Full name"><input name="email" type="email" autocomplete="email" placeholder="Email"><input name="phone" type="tel" autocomplete="tel" placeholder="Phone"><input class="wide" name="addressLine1" type="text" autocomplete="address-line1" placeholder="Address"><input name="city" type="text" autocomplete="address-level2" placeholder="City"><input name="region" type="text" autocomplete="address-level1" placeholder="State or region"><input name="postalCode" type="text" autocomplete="postal-code" placeholder="Postal code"><input name="country" type="text" autocomplete="country-name" placeholder="Country"><div class="form-actions"><button class="primary" type="submit">Save profile</button></div></form></article>
+  <article data-search="extensions add-ons developer unpacked"><h2>Extensions</h2><p>Load unpacked Chromium extensions for this isolated profile. Chrome Web Store packages are not supported by Electron.</p>${extensionRows}<div class="actions"><button class="primary" data-command="settings-load-extension">Load unpacked extension</button></div></article>
+  <article data-search="permissions camera microphone location notifications clipboard fullscreen"><h2>Site permissions</h2><p>Saved permission decisions: <span class="count">${state.permissionCount}</span>. Per-site controls are available from the site-information button.</p><div class="row"><span>Reset all saved permission decisions</span><button data-command="settings-reset-permissions">Reset permissions</button></div></article>
+  <article data-search="developer devtools inspect cdp debugging"><h2>Developer tools</h2><p>Use F12 or Browser options > Inspect to open Chromium DevTools for the active page.</p></article>
+  <article data-search="keyboard shortcuts tabs navigation zoom find accessibility"><h2>Keyboard shortcuts</h2><p>Ctrl/Command+L address · Ctrl/Command+T new tab · Ctrl/Command+W close tab · Ctrl+Tab cycle tabs · Ctrl/Command+F find · Ctrl/Command+R reload · Ctrl/Command +/- zoom</p></article>
+</section></main><script>
+  const command=(name,params={})=>{const url=new URL("arivu-browser://"+name);for(const[key,value]of Object.entries(params))if(value!==undefined&&value!=="")url.searchParams.set(key,String(value));location.href=url.href};
+  document.querySelectorAll("[data-command]").forEach(button=>button.addEventListener("click",()=>command(button.dataset.command,{id:button.dataset.id,url:button.dataset.url})));
+  document.getElementById("ask-download").addEventListener("change",event=>command("set-ask-download",{value:event.target.checked}));
+  document.getElementById("credential-form").addEventListener("submit",event=>{event.preventDefault();command("settings-add-credential",Object.fromEntries(new FormData(event.target)))});
+  document.getElementById("autofill-form").addEventListener("submit",event=>{event.preventDefault();command("settings-add-autofill",Object.fromEntries(new FormData(event.target)))});
+  document.getElementById("search").addEventListener("input",event=>{const query=event.target.value.trim().toLowerCase();document.querySelectorAll("article").forEach(article=>article.hidden=Boolean(query)&&!article.dataset.search.includes(query)&&!article.innerText.toLowerCase().includes(query))});
+</script></body></html>`;
   return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
 }
 
@@ -2801,13 +3432,13 @@ function visibleLoadErrorPageUrl(failedUrl: string, errorCode: number, errorDesc
               ? `${host}'s certificate could not be verified`
               : `${host} could not be loaded`;
   const failedUrlJson = JSON.stringify(failedUrl).replace(/</g, "\\u003c");
-  const html = `<!doctype html><html data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>This site can't be reached</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#171717;color:#f1f1f1;font-family:Inter,system-ui,sans-serif}.card{width:min(560px,calc(100vw - 48px));padding:42px}.icon{width:42px;height:42px;border:2px solid #777;border-radius:50%;display:grid;place-items:center;color:#aaa;font-size:22px}h1{margin:24px 0 10px;font-size:26px}p{color:#aaa;line-height:1.55}.try{margin-top:24px;color:#ddd}.try+ul{padding-left:20px;color:#aaa;line-height:1.7}button{margin-top:20px;border:0;border-radius:9px;padding:9px 15px;background:#f1f1f1;color:#171717;font-weight:650;cursor:pointer}code{display:block;margin-top:18px;color:#777;font-size:11px}</style></head><body><main class="card"><div class="icon">!</div><h1>This site can't be reached</h1><p>${escapeHtml(summary)}</p><p class="try">Try:</p><ul><li>Checking the connection</li><li>Checking the proxy, firewall, and DNS configuration</li></ul><button id="retry" type="button">Reload</button><code>${escapeHtml(errorDescription)} (${errorCode})</code></main><script>document.getElementById("retry").addEventListener("click",()=>{location.href=${failedUrlJson}})</script></body></html>`;
+  const html = `<!doctype html><html data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>This site can't be reached</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#171717;color:#f1f1f1;font-family:Inter,system-ui,sans-serif}.card{width:min(560px,calc(100vw - 48px));padding:42px}.icon{width:42px;height:42px;border:2px solid #777;border-radius:50%;display:grid;place-items:center;color:#aaa;font-size:22px}h1{margin:24px 0 10px;font-size:26px}p{color:#aaa;line-height:1.55}.try{margin-top:24px;color:#ddd}.try+ul{padding-left:20px;color:#aaa;line-height:1.7}button{margin-top:20px;border:0;border-radius:9px;padding:9px 15px;background:#f1f1f1;color:#171717;font-weight:650;cursor:pointer}code{display:block;margin-top:18px;color:#777;font-size:11px}@media(prefers-color-scheme:light){:root{color-scheme:light}body{background:#f7f7f6;color:#1c1c1b}p,.try+ul{color:#686865}.try{color:#333}button{background:#1c1c1b;color:#fff}}</style></head><body><main class="card"><div class="icon">!</div><h1>This site can't be reached</h1><p>${escapeHtml(summary)}</p><p class="try">Try:</p><ul><li>Checking the connection</li><li>Checking the proxy, firewall, and DNS configuration</li></ul><button id="retry" type="button">Reload</button><code>${escapeHtml(errorDescription)} (${errorCode})</code></main><script>document.getElementById("retry").addEventListener("click",()=>{location.href=${failedUrlJson}})</script></body></html>`;
   return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
 }
 
 function visibleCrashRecoveryPageUrl(failedUrl: string, reason: string) {
   const retryTargetJson = JSON.stringify(failedUrl || visibleStartPageUrl()).replace(/</g, "\\u003c");
-  const html = `<!doctype html><html data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>This tab crashed</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#171717;color:#f1f1f1;font-family:Inter,system-ui,sans-serif}.card{width:min(560px,calc(100vw - 48px));padding:42px}.icon{width:42px;height:42px;border:2px solid #777;border-radius:50%;display:grid;place-items:center;color:#aaa;font-size:22px}h1{margin:24px 0 10px;font-size:26px}p{color:#aaa;line-height:1.55}button{margin-top:20px;border:0;border-radius:9px;padding:9px 15px;background:#f1f1f1;color:#171717;font-weight:650;cursor:pointer}code{display:block;margin-top:18px;color:#777;font-size:11px}</style></head><body><main class="card"><div class="icon">!</div><h1>This tab crashed</h1><p>The page renderer stopped unexpectedly. Reload the tab to continue where you left off.</p><button id="retry" type="button">Reload tab</button><code>${escapeHtml(reason)}</code></main><script>document.getElementById("retry").addEventListener("click",()=>{location.href=${retryTargetJson}})</script></body></html>`;
+  const html = `<!doctype html><html data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>This tab crashed</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#171717;color:#f1f1f1;font-family:Inter,system-ui,sans-serif}.card{width:min(560px,calc(100vw - 48px));padding:42px}.icon{width:42px;height:42px;border:2px solid #777;border-radius:50%;display:grid;place-items:center;color:#aaa;font-size:22px}h1{margin:24px 0 10px;font-size:26px}p{color:#aaa;line-height:1.55}button{margin-top:20px;border:0;border-radius:9px;padding:9px 15px;background:#f1f1f1;color:#171717;font-weight:650;cursor:pointer}code{display:block;margin-top:18px;color:#777;font-size:11px}@media(prefers-color-scheme:light){:root{color-scheme:light}body{background:#f7f7f6;color:#1c1c1b}p{color:#686865}button{background:#1c1c1b;color:#fff}}</style></head><body><main class="card"><div class="icon">!</div><h1>This tab crashed</h1><p>The page renderer stopped unexpectedly. Reload the tab to continue where you left off.</p><button id="retry" type="button">Reload tab</button><code>${escapeHtml(reason)}</code></main><script>document.getElementById("retry").addEventListener("click",()=>{location.href=${retryTargetJson}})</script></body></html>`;
   return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
 }
 
@@ -2921,6 +3552,22 @@ function visibleStartPageHtml() {
       color: var(--error);
       font-size: 14px;
     }
+    @media (prefers-color-scheme: light) {
+      :root {
+        color-scheme: light;
+        --bg: #f7f7f6;
+        --panel: #ffffff;
+        --line: #d8d8d5;
+        --text: #1c1c1b;
+        --muted: #6d6d68;
+        --accent: #2b9f7e;
+        --accent-strong: #24896d;
+        --error: #a92f2a;
+      }
+      body { background: #f7f7f6; }
+      form, input { background: #ffffff; }
+      button { color: #ffffff; }
+    }
     @media (max-width: 560px) {
       body {
         padding: 22px;
@@ -3020,6 +3667,7 @@ function initialTarget(mode: BrowserMode, id: string = mode): BrowserTargetRecor
     loading: false,
     canGoBack: false,
     canGoForward: false,
+    owner: mode === "background" ? "agent" : "user",
     logs: []
   };
 }
@@ -3034,6 +3682,7 @@ function publicTarget(target: BrowserTargetRecord): BrowserTargetState {
     loading: target.loading,
     canGoBack: target.canGoBack,
     canGoForward: target.canGoForward,
+    owner: target.owner,
     ...(target.lastError ? { lastError: target.lastError } : {}),
     ...(target.lastSnapshotAt ? { lastSnapshotAt: target.lastSnapshotAt } : {}),
     ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
@@ -3050,6 +3699,7 @@ function publicTab(target: BrowserTabRecord) {
     loading: target.loading,
     canGoBack: target.canGoBack,
     canGoForward: target.canGoForward,
+    owner: target.owner,
     ...(target.lastError ? { lastError: target.lastError } : {}),
     ...(target.lastSnapshotAt ? { lastSnapshotAt: target.lastSnapshotAt } : {}),
     ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
@@ -3241,11 +3891,16 @@ async function capturePageWithDebugger(contents: WebContents, captureBeyondViewp
     if (!wasAttached) {
       debuggerApi.attach("1.3");
     }
-    const result = (await debuggerApi.sendCommand("Page.captureScreenshot", {
-      format: "png",
-      fromSurface: true,
-      captureBeyondViewport
-    })) as BrowserToolResult;
+    const result = (await Promise.race([
+      debuggerApi.sendCommand("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport
+      }),
+      delay(3_000).then(() => {
+        throw new Error("CDP screenshot capture timed out.");
+      })
+    ])) as BrowserToolResult;
     const data = typeof result.data === "string" ? result.data : "";
     if (!data) {
       return undefined;

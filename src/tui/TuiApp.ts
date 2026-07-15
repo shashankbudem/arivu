@@ -9,6 +9,10 @@ import { AgentRunAbortedError } from "../agent/types.js";
 import type { AgentRunEvent, AgentSession, ChatMessage, ChatUsage } from "../agent/types.js";
 import { workspacePolicyOverridesForRoot, workspaceScopeRulesForRoot, type AppConfig } from "../config.js";
 import { ApprovalManager } from "../permissions/ApprovalManager.js";
+import { ModelCatalogStore } from "../models/ModelCatalogStore.js";
+import { resolveContextWindowTokens } from "../models/contextResolver.js";
+import { emptyCatalog, type ModelCatalog } from "../models/modelCatalogSchema.js";
+import { recordContextFromRuntime } from "../models/syncModelCatalog.js";
 import { SessionStore } from "../sessions/SessionStore.js";
 import {
   describeSessionListFilters,
@@ -90,6 +94,9 @@ export class TuiApp {
   private cwd!: string;
   private currentSession?: AgentSession;
   private readonly store = new SessionStore();
+  private readonly catalogStore = new ModelCatalogStore();
+  /** Loaded once in run(); createAgent() has six sync callers, so it reads this snapshot. */
+  private modelCatalog: ModelCatalog = emptyCatalog();
   private readonly log: LogLine[] = [];
   private readonly activityLog: ActivityLine[] = [];
   private busy = false;
@@ -117,6 +124,7 @@ export class TuiApp {
     this.cwd = this.currentSession?.cwd ?? this.options.cwd;
     this.workspace = await detectWorkspace(this.cwd);
     this.lastMessageCount = this.currentSession?.messages.length ?? 0;
+    this.modelCatalog = await this.catalogStore.load();
     this.agent = this.createAgent(this.currentSession);
 
     this.createScreen();
@@ -299,7 +307,14 @@ export class TuiApp {
       tavilyApiKey: this.config.tavilyApiKey,
       mcpServers: this.config.mcpServers,
       scopePolicyRules,
-      contextWindowTokens: this.config.contextWindowTokens,
+      // Per-model window from the catalog, capped by any hand-entered provider value.
+      contextWindowTokens: resolveContextWindowTokens(
+        this.config,
+        { model: this.config.model, baseUrl: this.config.baseUrl },
+        this.modelCatalog
+      ),
+      onContextWindowObserved: (tokens) =>
+        recordContextFromRuntime(this.catalogStore, { baseUrl: this.config.baseUrl, model: this.config.model }, tokens),
       session
     });
   }

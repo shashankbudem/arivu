@@ -655,6 +655,7 @@ export function App() {
   const activeSessionIdRef = useRef<string | undefined>(undefined);
   const activeSubmissionTokenRef = useRef<string | null>(null);
   const composerDragDepthRef = useRef(0);
+  const browserHandoffIdRef = useRef(0);
   const pullRequestWatchInFlightRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -1340,6 +1341,43 @@ export function App() {
   function applyBrowserState(next: BrowserState) {
     setBrowserState(next);
     setState((current) => (current ? { ...current, browser: next } : current));
+    const handoff = next.collaboration?.handoff;
+    if (handoff && handoff.id > browserHandoffIdRef.current) {
+      browserHandoffIdRef.current = handoff.id;
+      setPrompt((current) => [current.trim(), handoff.prompt].filter(Boolean).join("\n\n"));
+      void attachBrowserHandoffScreenshots(handoff.screenshotPaths);
+      setStatus(
+        handoff.screenshotPaths.length > 0 ? "Browser notes and captures added to the composer" : "Browser notes added to the composer"
+      );
+      requestAnimationFrame(() => promptInputRef.current?.focus());
+    }
+  }
+
+  async function attachBrowserHandoffScreenshots(paths: string[]) {
+    const available = paths.slice(0, MAX_IMAGE_ATTACHMENTS);
+    const images = await Promise.all(
+      available.map(async (filePath): Promise<ImageAttachment | null> => {
+        try {
+          const image = await window.arivu.readLocalImage(filePath);
+          return {
+            id: randomId(),
+            name: filePath.split(/[\\/]/).pop() || "browser-capture.png",
+            mimeType: image.mimeType,
+            size: image.size,
+            dataUrl: image.dataUrl,
+            detail: "auto"
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
+    setImageAttachments((current) =>
+      mergeImageAttachments(
+        current,
+        images.filter((image): image is ImageAttachment => Boolean(image))
+      )
+    );
   }
 
   async function setBrowserPaneOpen(open: boolean) {

@@ -20,7 +20,10 @@ describe("Codex-style browser shell", () => {
       "Browser options",
       "Find in page",
       "Device preset",
-      "Rotate viewport"
+      "Rotate viewport",
+      "Review and comment",
+      "Send to Arivu",
+      "Design adjustments"
     ]) {
       expect(html).toContain(label);
     }
@@ -32,8 +35,12 @@ describe("Codex-style browser shell", () => {
     expect(html).toContain('send("reorder-tab"');
     expect(html).toContain('send("cycle-tab"');
     expect(html).toContain('send("layout",{height})');
+    expect(html).toContain('send("annotation-mode"');
+    expect(html).toContain('send("annotation-send"');
+    expect(html).toContain('"adopt-agent-tab":"send-tab-to-agent"');
     expect(html).toContain("prefers-reduced-motion:reduce");
     expect(html).toContain("forced-colors:active");
+    expect(html).toContain("prefers-color-scheme:light");
   });
 
   it("emits syntactically valid inline JavaScript", () => {

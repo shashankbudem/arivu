@@ -978,6 +978,66 @@ describe("agent", () => {
     expect(requestText).not.toContain("Context compacted locally");
   });
 
+  it("budgets a large window at 90% instead of compacting prematurely", async () => {
+    const session = createTestSession();
+    // ~50k estimated tokens: far above the old 48k default, far below 90% of a 512k window.
+    session.messages.push({ role: "assistant", content: "y".repeat(200_000) });
+    const client = new ScriptedClient([{ message: { role: "assistant", content: "Handled." } }]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session,
+      contextWindowTokens: 524_288
+    });
+
+    await agent.run("continue");
+
+    const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(requestText).not.toContain("Context compacted locally");
+    expect(requestText).toContain("y".repeat(20_000));
+  });
+
+  it("reserves reply headroom on a tiny context window instead of claiming almost all of it", async () => {
+    const session = createTestSession();
+    // 3,200 estimated tokens. The old Math.max(4_000, ...) floor gave a 4,096-token model a 4,000
+    // budget (97.6% of its window), so this was NOT compacted and left ~96 tokens to answer with.
+    session.messages.push({ role: "assistant", content: "y".repeat(12_800) });
+    const client = new ScriptedClient([{ message: { role: "assistant", content: "Handled." } }]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session,
+      contextWindowTokens: 4_096
+    });
+
+    await agent.run("continue");
+
+    const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(requestText).toContain("Context compacted locally");
+  });
+
+  it("reports the real context window when the provider rejects an oversized request", async () => {
+    const observed: number[] = [];
+    const client = new ContextLengthRetryClient();
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session: createTestSession(),
+      onContextWindowObserved: (tokens) => {
+        observed.push(tokens);
+      }
+    });
+
+    await agent.run("continue");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The rejection names the model's real window; learning it here costs no extra API call.
+    expect(observed).toEqual([196_608]);
+  });
+
   it("retries context-length failures with aggressive request compaction", async () => {
     const client = new ContextLengthRetryClient();
     const agent = new Agent({

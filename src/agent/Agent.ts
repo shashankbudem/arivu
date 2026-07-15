@@ -8,6 +8,7 @@ import { chatContentToText, trimChatContent, type ChatContent } from "./content.
 import { stripFencedCodeBlocks } from "./textualToolCalls.js";
 import { applyModelSummary, compactMessagesForModelRequest, compactSessionMessages, messagesToSummarize } from "./contextCompaction.js";
 import { discoverSkills, readSkill, skillsSystemMessage } from "./skills.js";
+import { parseContextLimit } from "../models/contextLimitParser.js";
 import { AgentRunAbortedError } from "./types.js";
 import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCall } from "./types.js";
 import type { AppConfig } from "../config.js";
@@ -61,6 +62,12 @@ export class Agent {
       browserTaskModel?: BrowserTaskModelConfig;
       directEditReview?: boolean;
       contextWindowTokens?: number;
+      /**
+       * Called when a live request overflows the model's context and the provider names its real
+       * limit. Lets the caller record the true window for free, with no extra API calls — the
+       * scheduled catalog sync deliberately skips the active model most days.
+       */
+      onContextWindowObserved?: (tokens: number) => void | Promise<void>;
       checkpoint?: ChangeCheckpoint;
       session?: AgentSession;
     }
@@ -417,8 +424,24 @@ export class Agent {
       if (!isContextLengthError(error)) {
         throw error;
       }
+      // The provider just told us the model's real window in its rejection. Record it before
+      // retrying: it is the only free, always-fresh source of truth for the active model.
+      this.reportObservedContextWindow(error);
       return this.completeOnce(compactChatRequestForModel(request, "aggressive", tokenLimit), runOptions);
     }
+  }
+
+  private reportObservedContextWindow(error: unknown) {
+    const sink = this.options.onContextWindowObserved;
+    if (!sink) {
+      return;
+    }
+    const tokens = parseContextLimit(error instanceof Error ? error.message : String(error));
+    if (!tokens) {
+      return;
+    }
+    // Never let bookkeeping break the retry that the user is actually waiting on.
+    void Promise.resolve(sink(tokens)).catch(() => undefined);
   }
 
   private async completeOnce(request: ChatRequest, runOptions: AgentRunOptions): Promise<ChatResponse> {
@@ -776,13 +799,26 @@ function isParallelSafeTool(name: string) {
   return PARALLEL_SAFE_TOOLS.has(name);
 }
 
-// Convert a model's context window into the request-token budget that triggers transient compaction.
-// We keep ~40% headroom for the response, tool schemas, and token-estimation slack.
+/** Share of a model's real context window the request may occupy before transient compaction. */
+export const CONTEXT_BUDGET_FRACTION = 0.9;
+/** Never leave the model less than this much room to answer, however small its window is. */
+const MIN_RESPONSE_RESERVE_TOKENS = 1_024;
+const MIN_REQUEST_TOKEN_LIMIT = 2_000;
+
+/**
+ * Converts a model's context window into the request-token budget that triggers transient compaction.
+ *
+ * The reserve is a clamp, not a floor. The previous `Math.max(4_000, …)` floor inverted the intent:
+ * on a 4,096-token model it produced a 4,000-token budget — 97.6% of the window, leaving ~96 tokens
+ * to answer with. Taking `min(fraction, window - reserve)` instead means the fraction is honored on
+ * every real-world window and only tightens where the fraction is physically unsafe (below ~10k).
+ */
 function requestTokenLimitForContextWindow(contextWindowTokens: number | undefined): number | undefined {
   if (!contextWindowTokens || contextWindowTokens <= 0) {
     return undefined;
   }
-  return Math.max(4_000, Math.floor(contextWindowTokens * 0.6));
+  const budget = Math.min(Math.floor(contextWindowTokens * CONTEXT_BUDGET_FRACTION), contextWindowTokens - MIN_RESPONSE_RESERVE_TOKENS);
+  return Math.max(MIN_REQUEST_TOKEN_LIMIT, budget);
 }
 
 const SUMMARY_INSTRUCTION = [
@@ -854,7 +890,23 @@ function webSearchInstruction(webSearchCalls: number): ChatMessage | undefined {
   };
 }
 
+/**
+ * Tool JSON-Schemas ride along on every request but are not part of `messages`, so the compaction
+ * estimate never saw them. The old 40% headroom absorbed that silently; a 90% budget does not, so
+ * they are charged against the budget explicitly. Same chars/4 heuristic the message estimator uses.
+ */
+function estimateToolSchemaTokens(tools: ChatRequest["tools"]): number {
+  if (!tools || tools.length === 0) {
+    return 0;
+  }
+  return Math.ceil(JSON.stringify(tools).length / 4);
+}
+
 function compactChatRequestForModel(request: ChatRequest, mode: "default" | "aggressive" = "default", tokenLimit?: number): ChatRequest {
+  // Only chargeable against a real, known window. Leaving `undefined` alone preserves the
+  // conservative 48k default that compactMessagesForModelRequest applies for unknown models.
+  const messageTokenLimit =
+    tokenLimit === undefined ? undefined : Math.max(MIN_REQUEST_TOKEN_LIMIT, tokenLimit - estimateToolSchemaTokens(request.tools));
   const result = compactMessagesForModelRequest(
     request.messages,
     mode === "aggressive"
@@ -864,9 +916,9 @@ function compactChatRequestForModel(request: ChatRequest, mode: "default" | "agg
           entryCharacterLimit: 350,
           recentEntryCharacterLimit: 3_000,
           activeUserMessageCharacterLimit: 16_000,
-          tokenLimit
+          tokenLimit: messageTokenLimit
         }
-      : { tokenLimit }
+      : { tokenLimit: messageTokenLimit }
   );
   if (!result.compacted) {
     return request;

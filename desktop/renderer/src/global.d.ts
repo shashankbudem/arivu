@@ -627,6 +627,7 @@ type BrowserTargetState = {
   lastSnapshotAt?: string;
   lastScreenshotAt?: string;
   lastScreenshotPath?: string;
+  owner?: "user" | "agent";
 };
 
 type BrowserTabState = BrowserTargetState;
@@ -643,6 +644,16 @@ type BrowserState = {
   activeMode: BrowserMode;
   visible: BrowserModeTargetState;
   background: BrowserModeTargetState;
+  collaboration?: {
+    mode: "browse" | "element" | "region";
+    pendingCount: number;
+    activeAnnotationId?: string;
+    handoff?: {
+      id: number;
+      prompt: string;
+      screenshotPaths: string[];
+    };
+  };
 };
 
 type SessionSummary = {
