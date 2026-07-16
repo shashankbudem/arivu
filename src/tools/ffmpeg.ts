@@ -10,14 +10,7 @@
 
 export type FfmpegOperation = "probe" | "convert" | "extract_audio" | "trim" | "thumbnail" | "custom";
 
-export const FFMPEG_OPERATIONS: readonly FfmpegOperation[] = [
-  "probe",
-  "convert",
-  "extract_audio",
-  "trim",
-  "thumbnail",
-  "custom"
-] as const;
+export const FFMPEG_OPERATIONS: readonly FfmpegOperation[] = ["probe", "convert", "extract_audio", "trim", "thumbnail", "custom"] as const;
 
 export const FFMPEG_DEFAULT_TIMEOUT_MS = 300_000;
 export const FFMPEG_MIN_TIMEOUT_MS = 1_000;

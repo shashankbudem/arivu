@@ -137,8 +137,14 @@ describe("parseContextLimit", () => {
       131_072
     ],
     // SGLang emits this both with and without the space before "cannot" — both seen live on NIM.
-    ['{"error":{"message":"max_tokens=99999999cannot be greater than max_model_len=max_total_tokens=128000. Please request fewer output tokens."}}', 128_000],
-    ['{"error":{"message":"max_tokens=99999999 cannot be greater than max_model_len=max_total_tokens=262144. Please request fewer output tokens."}}', 262_144]
+    [
+      '{"error":{"message":"max_tokens=99999999cannot be greater than max_model_len=max_total_tokens=128000. Please request fewer output tokens."}}',
+      128_000
+    ],
+    [
+      '{"error":{"message":"max_tokens=99999999 cannot be greater than max_model_len=max_total_tokens=262144. Please request fewer output tokens."}}',
+      262_144
+    ]
   ])("extracts the limit from %j", (body, expected) => {
     expect(parseContextLimit(body)).toBe(expected);
   });

@@ -49,9 +49,16 @@ describe("patch tool", () => {
     await writeFile(file, "old", "utf8");
 
     await applyUnifiedDiff(
-      ["--- a/a.txt", "+++ b/a.txt", "@@ -1 +1 @@", "-old", "\\ No newline at end of file", "+new", "\\ No newline at end of file", ""].join(
-        "\n"
-      ),
+      [
+        "--- a/a.txt",
+        "+++ b/a.txt",
+        "@@ -1 +1 @@",
+        "-old",
+        "\\ No newline at end of file",
+        "+new",
+        "\\ No newline at end of file",
+        ""
+      ].join("\n"),
       (requested) => path.join(tempDir, requested),
       async () => {}
     );

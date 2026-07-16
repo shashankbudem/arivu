@@ -30,7 +30,9 @@ describe("buildFfmpegPlan", () => {
     expect(plan.bin).toBe("ffmpeg");
     expect(plan.writesOutput).toBe(true);
     expect(plan.argv.slice(0, 5)).toEqual(["-hide_banner", "-nostdin", "-n", "-i", IN]);
-    expect(plan.argv).toEqual(expect.arrayContaining(["-c:v", "libx264", "-crf", "23", "-vf", "scale=1280:720", "-c:a", "aac", "-b:a", "192k"]));
+    expect(plan.argv).toEqual(
+      expect.arrayContaining(["-c:v", "libx264", "-crf", "23", "-vf", "scale=1280:720", "-c:a", "aac", "-b:a", "192k"])
+    );
     expect(plan.argv.at(-1)).toBe(OUT);
   });
 
@@ -60,7 +62,20 @@ describe("buildFfmpegPlan", () => {
 
   it("builds a thumbnail plan capturing a single frame", () => {
     const plan = buildFfmpegPlan("thumbnail", { input: IN, output: "/ws/thumb.png", start: "2", scale: "-1:480" });
-    expect(plan.argv).toEqual(["-hide_banner", "-nostdin", "-n", "-ss", "2", "-i", IN, "-frames:v", "1", "-vf", "scale=-1:480", "/ws/thumb.png"]);
+    expect(plan.argv).toEqual([
+      "-hide_banner",
+      "-nostdin",
+      "-n",
+      "-ss",
+      "2",
+      "-i",
+      IN,
+      "-frames:v",
+      "1",
+      "-vf",
+      "scale=-1:480",
+      "/ws/thumb.png"
+    ]);
   });
 
   it("passes raw args through for custom while keeping -nostdin", () => {
@@ -132,23 +147,21 @@ describe("ffmpeg tool registration and guards", () => {
   });
 
   it("keeps input and output inside the workspace", async () => {
-    await expect(
-      registry().execute("ffmpeg", { operation: "probe", input: "../escape.mp4" })
-    ).resolves.toMatch(/escapes workspace/);
+    await expect(registry().execute("ffmpeg", { operation: "probe", input: "../escape.mp4" })).resolves.toMatch(/escapes workspace/);
   });
 
   it("refuses to overwrite an existing output unless overwrite is set", async () => {
     await writeFile(path.join(tempDir, "in.mp4"), "x", "utf8");
     await writeFile(path.join(tempDir, "out.mp4"), "y", "utf8");
-    await expect(
-      registry().execute("ffmpeg", { operation: "convert", input: "in.mp4", output: "out.mp4" })
-    ).resolves.toMatch(/already exists/);
+    await expect(registry().execute("ffmpeg", { operation: "convert", input: "in.mp4", output: "out.mp4" })).resolves.toMatch(
+      /already exists/
+    );
   });
 
   it("surfaces per-operation validation errors from the tool", async () => {
     await writeFile(path.join(tempDir, "in.mp4"), "x", "utf8");
-    await expect(
-      registry().execute("ffmpeg", { operation: "trim", input: "in.mp4", output: "out.mp4" })
-    ).resolves.toMatch(/requires end or duration/);
+    await expect(registry().execute("ffmpeg", { operation: "trim", input: "in.mp4", output: "out.mp4" })).resolves.toMatch(
+      /requires end or duration/
+    );
   });
 });

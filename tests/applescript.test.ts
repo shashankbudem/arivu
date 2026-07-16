@@ -24,7 +24,11 @@ describe("buildAppleScriptPlan", () => {
   });
 
   it("builds a run plan for JXA with script args", () => {
-    const plan = buildAppleScriptPlan("run", { source: "function run(argv) { return argv[0] }", language: "javascript", scriptArgs: ["a", "b"] });
+    const plan = buildAppleScriptPlan("run", {
+      source: "function run(argv) { return argv[0] }",
+      language: "javascript",
+      scriptArgs: ["a", "b"]
+    });
     expect(plan.argv.slice(0, 2)).toEqual(["-l", "JavaScript"]);
     expect(plan.argv.slice(-2)).toEqual(["a", "b"]);
   });
@@ -138,16 +142,16 @@ describe("applescript tool registration and guards", () => {
   });
 
   it.runIf(process.platform === "darwin")("keeps script paths inside the workspace", async () => {
-    await expect(
-      registry().execute("applescript", { operation: "run_file", file: "../escape.applescript" })
-    ).resolves.toMatch(/escapes workspace/);
+    await expect(registry().execute("applescript", { operation: "run_file", file: "../escape.applescript" })).resolves.toMatch(
+      /escapes workspace/
+    );
   });
 
   it.runIf(process.platform === "darwin")("refuses to overwrite an existing compile output unless overwrite is set", async () => {
     await writeFile(path.join(tempDir, "out.scpt"), "x", "utf8");
-    await expect(
-      registry().execute("applescript", { operation: "compile", source: SOURCE, output: "out.scpt" })
-    ).resolves.toMatch(/already exists/);
+    await expect(registry().execute("applescript", { operation: "compile", source: SOURCE, output: "out.scpt" })).resolves.toMatch(
+      /already exists/
+    );
   });
 
   it.runIf(process.platform !== "darwin")("reports that macOS is required on other platforms", async () => {
@@ -157,7 +161,7 @@ describe("applescript tool registration and guards", () => {
   it.runIf(process.platform === "darwin")("runs an inline script and returns its result with script args", async () => {
     const output = await registry().execute("applescript", {
       operation: "run",
-      source: ['on run argv', 'return "hello " & item 1 of argv', "end run"].join("\n"),
+      source: ["on run argv", 'return "hello " & item 1 of argv', "end run"].join("\n"),
       args: ["world"]
     });
     expect(output).toMatch(/status: success/);

@@ -216,10 +216,7 @@ function workspaceRelativeCandidatePath(requested: string, workspaceRoot: string
 }
 
 function toPosixRelative(value: string): string {
-  return value
-    .replace(/\\/g, "/")
-    .replace(/^\/+/, "")
-    .replace(/\/+$/g, "");
+  return value.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/g, "");
 }
 
 function pathMatchesPrefix(candidate: string, prefix: string) {

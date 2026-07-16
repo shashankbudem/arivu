@@ -46,9 +46,7 @@ describe("ApprovalManager enforces blocked paths with the threaded workspace roo
   const manager = () => new ApprovalManager("trusted", async () => true, {}, undefined, rules, root);
 
   it("denies an absolute path into a blocked directory", async () => {
-    await expect(manager().require(readAction(path.join(root, "secrets", "key.txt")))).rejects.toThrow(
-      /workspace scope rule blocks path/
-    );
+    await expect(manager().require(readAction(path.join(root, "secrets", "key.txt")))).rejects.toThrow(/workspace scope rule blocks path/);
   });
 
   it("denies a `..` traversal into a blocked directory", async () => {

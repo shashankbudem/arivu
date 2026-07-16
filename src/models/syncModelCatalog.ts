@@ -270,7 +270,14 @@ export async function recordContextFact(
   await store.save(catalog);
   await store.appendEvents([
     previous === undefined
-      ? { at: nowIso, type: "context_resolved", baseUrl: selection.baseUrl, model: selection.model, tokens: fact.tokens, source: fact.source }
+      ? {
+          at: nowIso,
+          type: "context_resolved",
+          baseUrl: selection.baseUrl,
+          model: selection.model,
+          tokens: fact.tokens,
+          source: fact.source
+        }
       : {
           at: nowIso,
           type: "context_changed",

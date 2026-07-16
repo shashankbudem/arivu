@@ -290,10 +290,8 @@ models
   .command("probe-context <model>")
   .description("Resolve one model's context length, optionally with the slow oversized-input probe.")
   .option("--deep", "use the reliable oversized-input probe (multi-MB upload)")
-  .option(
-    "--approx-tokens <count>",
-    "input size for --deep; must exceed the model's window (1M-context models need ~1200000)",
-    (value) => Number.parseInt(value, 10)
+  .option("--approx-tokens <count>", "input size for --deep; must exceed the model's window (1M-context models need ~1200000)", (value) =>
+    Number.parseInt(value, 10)
   )
   .action(async (model: string, options: { deep?: boolean; approxTokens?: number }) => {
     const config = await loadConfig();
