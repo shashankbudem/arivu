@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { resolveBrowserTaskModel } from "../src/agent/browserTaskModel.js";
+import { resolveBrowserTaskContextWindowTokens, resolveBrowserTaskModel } from "../src/agent/browserTaskModel.js";
 import type { AppConfig } from "../src/config.js";
 import type { ModelSelection } from "../src/agent/modelRouter.js";
+import { emptyCatalog } from "../src/models/modelCatalogSchema.js";
 
 const FALLBACK: ModelSelection = {
   mode: "manual",
@@ -104,6 +105,30 @@ describe("resolveBrowserTaskModel", () => {
       FALLBACK
     );
     expect(resolved).toMatchObject({ maxSteps: 80, stepDelayMs: 12_000 });
+  });
+
+  it("does not inherit the resolved chat-model window when the browser model differs", () => {
+    const config = configWith({ contextWindowTokens: 204_800 });
+    expect(
+      resolveBrowserTaskContextWindowTokens(
+        config,
+        { model: "minimaxai/minimax-m2.7", baseUrl: "https://integrate.api.nvidia.com/v1" },
+        { model: "nvidia/nemotron-3-nano-30b-a3b", baseUrl: "https://integrate.api.nvidia.com/v1" },
+        emptyCatalog()
+      )
+    ).toBe(1_000_000);
+  });
+
+  it("keeps the resolved chat window when browser_task follows the chat model", () => {
+    const config = configWith({ contextWindowTokens: 204_800 });
+    expect(
+      resolveBrowserTaskContextWindowTokens(
+        config,
+        { model: "minimaxai/minimax-m2.7", baseUrl: "https://integrate.api.nvidia.com/v1" },
+        { model: "minimaxai/minimax-m2.7", baseUrl: "https://integrate.api.nvidia.com/v1" },
+        emptyCatalog()
+      )
+    ).toBe(204_800);
   });
 
   it("rejects a stale browser-task provider reference instead of silently using a different model", () => {

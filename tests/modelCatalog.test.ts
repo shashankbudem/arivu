@@ -161,6 +161,42 @@ describe("resolveContextWindowTokens", () => {
     expect(resolveContextWindowTokens(configWith(), selection, catalog)).toBe(524_288);
   });
 
+  it("uses published native windows for MiniMax M2.7 and Nemotron 3 Nano", () => {
+    const empty = catalogWith({});
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "minimaxai/minimax-m2.7" }, empty)).toBe(204_800);
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "nvidia/nemotron-3-nano-30b-a3b" }, empty)).toBe(1_000_000);
+  });
+
+  it("does not let an inconclusive probe replace a published native window", () => {
+    const probed = catalogWith({
+      "minimaxai/minimax-m2.7": {
+        id: "minimaxai/minimax-m2.7",
+        status: "available",
+        statusCheckedAt: "2026-07-16T00:00:00.000Z",
+        context: { tokens: 196_608, source: "probe_oversized", observedAt: "2026-07-16T00:00:00.000Z" },
+        firstSeenAt: "2026-07-16T00:00:00.000Z",
+        lastSeenAt: "2026-07-16T00:00:00.000Z"
+      }
+    });
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "minimaxai/minimax-m2.7" }, probed)).toBe(204_800);
+  });
+
+  it("honors a smaller endpoint limit learned from a real request rejection", () => {
+    const runtimeLimited = catalogWith({
+      "nvidia/nemotron-3-nano-30b-a3b": {
+        id: "nvidia/nemotron-3-nano-30b-a3b",
+        status: "available",
+        statusCheckedAt: "2026-07-16T00:00:00.000Z",
+        context: { tokens: 262_144, source: "runtime_error", observedAt: "2026-07-16T00:00:00.000Z" },
+        firstSeenAt: "2026-07-16T00:00:00.000Z",
+        lastSeenAt: "2026-07-16T00:00:00.000Z"
+      }
+    });
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "nvidia/nemotron-3-nano-30b-a3b" }, runtimeLimited)).toBe(
+      262_144
+    );
+  });
+
   it("matches the endpoint regardless of trailing slash or case", () => {
     const messy = { ...selection, baseUrl: "HTTPS://Integrate.API.NVIDIA.com/v1/" };
     expect(resolveContextWindowTokens(configWith(), messy, catalog)).toBe(524_288);

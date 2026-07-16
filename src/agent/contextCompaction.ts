@@ -12,6 +12,36 @@ const COMPACTION_PREFIX = "Context compacted locally to reduce future model requ
 export const MODEL_SUMMARY_PREFIX = "Conversation summary (model-generated) to reduce context size.";
 const DEFAULT_ENTRY_LIMIT = 700;
 
+/**
+ * Tools whose output can be regenerated on demand (the file is still on disk, the page can be
+ * re-snapshotted, the search can be re-run). Their older results carry almost no unique
+ * information, so compaction collapses them to a stub instead of spending transcript budget on
+ * stale copies. Results of tools NOT listed here (edits, commands, browser actions) describe
+ * something that HAPPENED and cannot be re-observed, so they keep the regular budget.
+ */
+const REDERIVABLE_RESULT_TOOLS = new Set([
+  "list",
+  "read",
+  "search",
+  "git_status",
+  "web_search",
+  "browser_state",
+  "browser_snapshot",
+  "browser_screenshot",
+  "browser_console",
+  "current_datetime",
+  "current_location",
+  "list_skills",
+  "read_skill",
+  "mcp_list_tools"
+]);
+/** Head kept from a collapsed re-derivable result so the bullet still shows what came back. */
+const REDERIVABLE_RESULT_HEAD_CHARS = 160;
+/** Head kept from a succeeded command/browser-task result; the outcome line is what matters. */
+const SUCCEEDED_RESULT_HEAD_CHARS = 200;
+/** Failed commands/browser tasks keep head plus this much tail — errors live at the end. */
+const FAILED_RESULT_TAIL_CHARS = 1_000;
+
 type CompactOptions = {
   recentMessageCount?: number;
   entryCharacterLimit?: number;
@@ -214,10 +244,79 @@ function summarizeContent(message: ChatMessage, entryCharacterLimit: number) {
   if (!content) {
     return "(empty)";
   }
+  if (message.role === "tool") {
+    return summarizeToolResultContent(message.name, content, entryCharacterLimit);
+  }
   if (content.length <= entryCharacterLimit) {
     return content;
   }
   return `${content.slice(0, Math.max(0, entryCharacterLimit - 1)).trimEnd()}...`;
+}
+
+/**
+ * Retention policy for older tool results, by tool. Re-derivable output collapses to a stub;
+ * succeeded commands keep just their outcome head; failures keep the tail, where the error text
+ * lives, on a larger budget — the freed stub space is what pays for it.
+ */
+function summarizeToolResultContent(toolName: string | undefined, content: string, entryCharacterLimit: number) {
+  if (toolName && REDERIVABLE_RESULT_TOOLS.has(toolName)) {
+    const headLimit = Math.min(REDERIVABLE_RESULT_HEAD_CHARS, entryCharacterLimit);
+    if (content.length <= headLimit) {
+      return content;
+    }
+    return `${content.slice(0, headLimit).trimEnd()}... [older output dropped: stale; re-run ${toolName} for current data]`;
+  }
+
+  const outcome = toolResultOutcome(toolName, content);
+  if (outcome === "succeeded") {
+    const headLimit = Math.min(SUCCEEDED_RESULT_HEAD_CHARS, entryCharacterLimit);
+    if (content.length <= headLimit) {
+      return content;
+    }
+    return `${content.slice(0, headLimit).trimEnd()}... [older output trimmed: ${toolName} succeeded]`;
+  }
+  if (outcome === "failed") {
+    const headLimit = Math.min(SUCCEEDED_RESULT_HEAD_CHARS, entryCharacterLimit);
+    const tailLimit = Math.max(entryCharacterLimit - headLimit, FAILED_RESULT_TAIL_CHARS);
+    if (content.length <= headLimit + tailLimit) {
+      return content;
+    }
+    return `${content.slice(0, headLimit).trimEnd()} ...[middle trimmed; failure detail below]... ${content.slice(-tailLimit).trimStart()}`;
+  }
+
+  if (content.length <= entryCharacterLimit) {
+    return content;
+  }
+  return `${content.slice(0, Math.max(0, entryCharacterLimit - 1)).trimEnd()}...`;
+}
+
+/**
+ * Classifies a run/browser_task result as succeeded or failed from markers in the result text
+ * ("exitCode: N", "timedOut: true", `"success": false`). Anything unrecognizable returns
+ * "unknown" and gets the default truncation — misclassifying a failure as a success would
+ * silently discard the error the agent may still need.
+ */
+function toolResultOutcome(toolName: string | undefined, content: string): "succeeded" | "failed" | "unknown" {
+  if (toolName === "run") {
+    if (/\btimedOut: true\b/.test(content) || /\bsignal: \w+/.test(content)) {
+      return "failed";
+    }
+    const exitCode = /\bexitCode: (-?\d+)\b/.exec(content);
+    if (exitCode) {
+      return exitCode[1] === "0" ? "succeeded" : "failed";
+    }
+    return "unknown";
+  }
+  if (toolName === "browser_task") {
+    if (/"success"\s*:\s*true\b/.test(content)) {
+      return "succeeded";
+    }
+    if (/"success"\s*:\s*false\b/.test(content)) {
+      return "failed";
+    }
+    return "unknown";
+  }
+  return "unknown";
 }
 
 function messageLabel(message: ChatMessage) {

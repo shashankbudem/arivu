@@ -14,6 +14,8 @@ import type { ChatMessage, ToolCall } from "./types.js";
  *    history:  `Local tool request(s):` followed by `- name: {json args}` bullets.
  * 2. Qwen/Hermes chat-template formats: `<tool_call>{"name": ..., "arguments": ...}</tool_call>`
  *    and `<function=name><parameter=key>value</parameter>...</function>`.
+ * 3. MiniMax chat-template XML: `<minimax:tool_call><invoke name="tool"><parameter
+ *    name="key">value</parameter></invoke></minimax:tool_call>`.
  *
  * Guardrails against false positives (quoted examples, documentation, injection echoes):
  * - Blocks inside markdown code fences are never recovered.
@@ -37,6 +39,7 @@ export function recoverTextualToolCalls(message: ChatMessage, availableToolNames
   const recovered =
     parseLocalToolRequestBlock(text, names, fences) ??
     parseToolCallJsonBlock(text, names, fences) ??
+    parseMinimaxXmlBlock(text, names, fences) ??
     parseFunctionXmlBlock(text, names, fences);
   if (!recovered || recovered.calls.length === 0) {
     return message;
@@ -174,6 +177,36 @@ function parseToolCallJsonBlock(text: string, names: Set<string>, fences: Range[
       return undefined;
     }
     return { id: recoveredCallId(), name, arguments: record.arguments ?? record.parameters ?? {} };
+  });
+}
+
+/**
+ * Parses MiniMax's textual XML tool template. Both wrapper and invoke closing tags are required
+ * when the wrapper is present, and the invoke body may contain only complete parameter blocks;
+ * this makes a provider stream cut off mid-name or mid-parameter retryable rather than executable.
+ */
+function parseMinimaxXmlBlock(text: string, names: Set<string>, fences: Range[]): RecoveredCalls | undefined {
+  const pattern = /(<minimax:tool_call>\s*)?<invoke\s+name=["']([\w.-]+)["']>([\s\S]*?)<\/invoke>(\s*<\/minimax:tool_call>)?/g;
+  return collectTailBlocks(text, pattern, fences, (match) => {
+    const wrapped = Boolean(match[1]);
+    if (wrapped !== Boolean(match[4])) {
+      return undefined;
+    }
+    const name = match[2]!;
+    const body = match[3]!;
+    if (!names.has(name) || /<invoke\s+name=/i.test(body)) {
+      return undefined;
+    }
+    const args: Record<string, unknown> = {};
+    const parameterPattern = /<parameter\s+name=["']([\w.-]+)["']>\r?\n?([\s\S]*?)\r?\n?<\/parameter>/g;
+    let parameter: RegExpExecArray | null;
+    while ((parameter = parameterPattern.exec(body))) {
+      args[parameter[1]!] = coerceParameterValue(parameter[2]!);
+    }
+    if (body.replace(parameterPattern, "").trim().length > 0) {
+      return undefined;
+    }
+    return { id: recoveredCallId(), name, arguments: args };
   });
 }
 

@@ -10,12 +10,10 @@ import {
   configPath,
   loadConfig,
   mergeRedactedMcpServers,
-  normalizeWorkspacePolicyOverrides,
   normalizeWorkspacePolicyProfiles,
   redactConfigForDisplay,
   resolveModelListEndpoint,
   saveConfig,
-  updateWorkspacePolicy,
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot
 } from "../src/config.js";
@@ -358,21 +356,21 @@ describe("config", () => {
   it("saves workspace capability policy overrides by absolute workspace root", async () => {
     const workspaceRoot = path.join(tempDir, "repo");
     await saveConfig({
-      workspacePolicies: updateWorkspacePolicy(
-        {},
-        workspaceRoot,
-        {
-          read_repo: "prompt",
-          write_workspace: "prompt",
-          browser_control: "deny"
-        },
-        {
-          blockedPathPrefixes: [".env", "secrets", ".env"],
-          allowedNetworkDomains: ["https://api.tavily.com/search", "BING.com"],
-          allowedMcpServers: ["github", "github", "chrome-devtools"],
-          allowedBrowserTargetClasses: ["public", "background", "public"]
+      workspacePolicies: {
+        [path.resolve(workspaceRoot)]: {
+          overrides: {
+            read_repo: "prompt",
+            write_workspace: "prompt",
+            browser_control: "deny"
+          },
+          scopeRules: {
+            blockedPathPrefixes: [".env", "secrets", ".env"],
+            allowedNetworkDomains: ["https://api.tavily.com/search", "BING.com"],
+            allowedMcpServers: ["github", "github", "chrome-devtools"],
+            allowedBrowserTargetClasses: ["public", "background", "public"]
+          }
         }
-      )
+      }
     });
 
     const loaded = await loadConfig({ includeEnv: false });
@@ -420,40 +418,6 @@ describe("config", () => {
         }
       }
     });
-  });
-
-  it("normalizes workspace capability policy overrides", () => {
-    const workspaceRoot = path.join(tempDir, "repo");
-    const policies = updateWorkspacePolicy({}, workspaceRoot, {
-      write_workspace: "prompt",
-      browser_control: "deny",
-      read_repo: "deny"
-    } as ReturnType<typeof normalizeWorkspacePolicyOverrides>);
-
-    expect(Object.keys(policies[path.resolve(workspaceRoot)]?.overrides ?? {})).toEqual([
-      "write_workspace",
-      "browser_control",
-      "read_repo"
-    ]);
-    expect(
-      updateWorkspacePolicy(
-        policies,
-        workspaceRoot,
-        {},
-        {
-          blockedPathPrefixes: ["private", "private"],
-          allowedNetworkDomains: ["Example.com"],
-          allowedMcpServers: ["github", "github"],
-          allowedBrowserTargetClasses: ["visible", "public", "visible"]
-        }
-      )[path.resolve(workspaceRoot)]?.scopeRules
-    ).toEqual({
-      blockedPathPrefixes: ["private"],
-      allowedNetworkDomains: ["example.com"],
-      allowedMcpServers: ["github"],
-      allowedBrowserTargetClasses: ["public", "visible"]
-    });
-    expect(updateWorkspacePolicy(policies, workspaceRoot, {})).toEqual({});
   });
 
   it("migrates legacy config and data directories without overwriting Arivu files", async () => {

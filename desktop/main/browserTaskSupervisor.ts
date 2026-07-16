@@ -28,7 +28,9 @@ import {
  * off the running instance every PROGRESS_POLL_INTERVAL_MS; on a confirmed `did-navigate`,
  * the last-polled snapshot seeds a resume instruction for a fresh instance on the new
  * document, under a shrunk step budget and a separate navigation-resume cap. A same-page
- * (`did-navigate-in-page`) navigation is a no-op: the JS context survives those.
+ * (`did-navigate-in-page`) navigation is a no-op: the JS context survives those. A child
+ * window is a different target entirely, so opening one ends the originating instance with
+ * an explicit active-tab handoff instead of letting it reason against the stale parent page.
  */
 
 export type BrowserTaskArgs = {
@@ -72,6 +74,8 @@ const STEP_DELAY_SECONDS = 35;
 // both. Extra attempts are cheap relative to failing the whole multi-step task.
 const LLM_MAX_RETRIES = 4;
 const PROGRESS_POLL_INTERVAL_MS = 1_000;
+const NAVIGATION_SETTLE_TIMEOUT_MS = 10_000;
+const NAVIGATION_STABLE_MS = 300;
 const MAX_NAVIGATION_RESUMES = 6;
 const TRANSIENT_FAILURE_THRESHOLD = 3;
 const TRANSIENT_CIRCUIT_TTL_MS = 2 * 60_000;
@@ -131,6 +135,7 @@ export async function runBrowserTask(
     providerName: modelConfig.providerName,
     model: modelConfig.model,
     endpoint: safeEndpoint(modelConfig.baseUrl),
+    contextWindowTokens: modelConfig.contextWindowTokens,
     maxSteps,
     timeoutMs,
     stepDelayMs: Math.round(stepDelaySeconds * 1_000)
@@ -164,9 +169,25 @@ export async function runBrowserTask(
   let deadlineTimer: NodeJS.Timeout | undefined;
   let stopReason: BrowserTaskStopReason | undefined;
   let onTargetDestroyed: (() => void) | undefined;
+  let onPopupCreated: (() => void) | undefined;
   let settleInfrastructureStop: ((result: InjectedTaskResult) => void) | undefined;
+  let popupOpened = false;
   const infrastructureStopPromise = new Promise<InjectedTaskResult>((resolve) => {
     settleInfrastructureStop = resolve;
+  });
+  const popupPromise = new Promise<InjectedTaskResult>((resolve) => {
+    onPopupCreated = () => {
+      if (popupOpened || stopReason) {
+        return;
+      }
+      popupOpened = true;
+      resolve({
+        ok: true,
+        success: false,
+        data: "The browser action opened a new tab or popup. Continue the remaining lookup or dialog work on the active tab from browser_state; do not repeat the popup-opening action."
+      });
+    };
+    contents.on("did-create-window", onPopupCreated);
   });
   const stopPromise = new Promise<InjectedTaskResult>((resolve) => {
     const settleStop = (reason: "timeout" | "cancelled" | "target_closed", message: string) => {
@@ -234,8 +255,17 @@ export async function runBrowserTask(
       });
 
       let navigated = false;
+      let settleNavigation: ((result: InjectedTaskResult) => void) | undefined;
+      const navigationPromise = new Promise<InjectedTaskResult>((resolve) => {
+        settleNavigation = resolve;
+      });
       const onNavigate = () => {
         navigated = true;
+        // Electron does not consistently reject an in-flight executeJavaScript promise when a
+        // navigation destroys its execution context. Treat the navigation event itself as the
+        // terminal signal for this injected instance so the fresh-document resume can start
+        // immediately instead of waiting for the outer task deadline.
+        settleNavigation?.({ ok: false, error: "The page navigated while the browser task was running." });
       };
       contents.on("did-navigate", onNavigate);
       let lastProgress: PolledProgress | undefined;
@@ -273,13 +303,29 @@ export async function runBrowserTask(
       const taskPromise = executeInjectedTask(contents, script);
       let result: InjectedTaskResult;
       try {
-        result = await Promise.race([taskPromise, stopPromise, infrastructureStopPromise]);
+        result = await Promise.race([taskPromise, navigationPromise, popupPromise, stopPromise, infrastructureStopPromise]);
       } finally {
         instanceSettled = true;
         clearInterval(pollTimer);
         contents.off("did-navigate", onNavigate);
       }
       lastKnownProgress = lastProgress;
+
+      if (popupOpened) {
+        // The page agent is scoped to the originating WebContents and cannot observe the child
+        // tab. Stop it promptly so it cannot keep scrolling/clicking the parent while the popup
+        // is active, then preserve any action progress that became visible during the stop.
+        await Promise.race([stopInjectedTask(contents).catch(() => undefined), delay(STOP_GRACE_MS)]);
+        const popupProgress = await pollProgress(contents).catch(() => undefined);
+        if (popupProgress) {
+          lastKnownProgress = popupProgress;
+        }
+        finalResult = {
+          ...result,
+          stepCount: popupProgress?.stepCount ?? lastProgress?.stepCount ?? result.stepCount ?? 0
+        };
+        break;
+      }
 
       if (stopReason) {
         if (stopReason === "target_closed") {
@@ -295,6 +341,10 @@ export async function runBrowserTask(
       }
 
       if (!result.ok && navigated) {
+        // did-navigate can be the first hop of a redirect/reload chain. Re-injecting while the
+        // destination is still loading makes each later hop look like another agent action and
+        // wastes the navigation-resume budget. Wait for a short stable, non-loading window.
+        await waitForNavigationToSettle(contents);
         navigationResumeCount += 1;
         stepsUsedSoFar += lastProgress?.stepCount ?? 0;
         // Folded into stepsUsedSoFar above; must not be re-added via the fallback below.
@@ -319,7 +369,7 @@ export async function runBrowserTask(
           };
           break;
         }
-        resumeInstruction = buildResumeInstruction(args.instruction, lastProgress);
+        resumeInstruction = buildResumeInstruction(lastProgress, navigationResumeCount, contents.getURL());
         continue;
       }
 
@@ -366,6 +416,7 @@ export async function runBrowserTask(
       stepCount,
       stopped: Boolean(stopReason),
       stopReason,
+      popupOpened: popupOpened || undefined,
       navigationCount: navigationResumeCount,
       durationMs,
       browserTaskModel: modelMetadata,
@@ -386,6 +437,9 @@ export async function runBrowserTask(
     }
     if (onTargetDestroyed) {
       contents.off("destroyed", onTargetDestroyed);
+    }
+    if (onPopupCreated) {
+      contents.off("did-create-window", onPopupCreated);
     }
     unregisterBrowserTaskProxyEntry(token);
   }
@@ -461,16 +515,48 @@ function isModelConnectivityFailure(data: string): boolean {
   return /network request failed|failed to fetch|networkerror|err_connection|load failed/i.test(data);
 }
 
-function buildResumeInstruction(originalInstruction: string, progress: PolledProgress | undefined): string {
-  if (!progress || progress.stepCount === 0) {
-    return originalInstruction;
-  }
+function buildResumeInstruction(progress: PolledProgress | undefined, navigationResumeCount: number, currentUrl: string): string {
+  const stepCount = progress?.stepCount ?? 0;
   // lastAction/lastGoal are model-generated under page influence and end up inside the resumed
   // agent's <user_request>; condensing bounds what a hostile page can steer into that slot.
-  const lastAction = condenseForPrompt(progress.lastAction, 100);
-  const lastGoal = condenseForPrompt(progress.lastGoal, 200);
+  const lastAction = condenseForPrompt(progress?.lastAction, 100);
+  const lastGoal = condenseForPrompt(progress?.lastGoal, 200);
   const actionNote = lastAction ? ` (last action: ${lastAction}${lastGoal ? `, aiming to ${lastGoal}` : ""})` : "";
-  return `${originalInstruction}\n\nNote: you already completed ${progress.stepCount} step(s) toward this task before the page navigated${actionNote}. Continue from here on the new page. If the task already looks complete, finish immediately instead of repeating work.`;
+  const safeCurrentUrl = condenseForPrompt(currentUrl, 1_000) ?? "unknown";
+  // A cross-document navigation is always an action boundary, even when polling captured
+  // earlier steps. Repeating the original imperative on the destination is unsafe: a smaller
+  // model can replay form-field actions against unrelated controls on the parent/list page
+  // after a successful Submit. End at a read-only checkpoint and let the supervising model use
+  // snapshotAfter to issue a fresh, destination-specific task.
+  const progressNote =
+    stepCount > 0
+      ? `The previous document recorded ${stepCount} completed step(s)${actionNote}.`
+      : "The previous action replaced the document before progress polling could record it.";
+  return `Navigation checkpoint ${navigationResumeCount}: the previous document was replaced while this task was running.\n${progressNote}\nCurrent page URL: ${safeCurrentUrl}\n\nREAD-ONLY CHECKPOINT: Do not click, type, scroll, submit, select, or navigate. Do not attempt or repeat any action from the previous document. Inspect the current page, then choose done in your next response. Report the current page title, URL, and visible state, and say that the calling agent should use snapshotAfter to decide whether any follow-up browser_task is needed.`;
+}
+
+async function waitForNavigationToSettle(contents: WebContents): Promise<void> {
+  // Older Electron test doubles (and any alternate WebContents-compatible target) may not
+  // expose isLoading; their navigation event is already the only available boundary.
+  if (typeof contents.isLoading !== "function") {
+    return;
+  }
+  const deadline = Date.now() + NAVIGATION_SETTLE_TIMEOUT_MS;
+  let stableSince: number | undefined;
+  let lastUrl = contents.getURL();
+  while (Date.now() < deadline) {
+    await delay(100);
+    const currentUrl = contents.getURL();
+    if (contents.isLoading() || currentUrl !== lastUrl) {
+      lastUrl = currentUrl;
+      stableSince = undefined;
+      continue;
+    }
+    stableSince ??= Date.now();
+    if (Date.now() - stableSince >= NAVIGATION_STABLE_MS) {
+      return;
+    }
+  }
 }
 
 function condenseForPrompt(text: string | undefined, maxChars: number): string | undefined {

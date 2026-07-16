@@ -117,7 +117,17 @@ type SidebarSectionId = "projects" | "chats";
 type ResizeTarget = "sidebar" | "activity";
 type ThemeMode = "dark" | "light";
 type UiConceptId = "signal" | "lumen" | "graphite";
-type SettingsFocus = "skills" | null;
+const SETTINGS_SECTIONS = [
+  { id: "models", label: "Models", description: "Providers, model defaults, and input capabilities", icon: Cpu },
+  { id: "browser", label: "Browser agent", description: "Model and pacing for browser tasks", icon: Globe },
+  { id: "integrations", label: "Integrations", description: "Web search and MCP servers", icon: Server },
+  { id: "permissions", label: "Permissions", description: "Trust mode and workspace policy", icon: Shield },
+  { id: "skills", label: "Skills", description: "Installed instructions and new skills", icon: Wrench },
+  { id: "worktrees", label: "Worktrees", description: "Task branches and pull requests", icon: GitBranch },
+  { id: "diagnostics", label: "Diagnostics", description: "Provider and tool health checks", icon: Activity }
+] as const;
+type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+type SettingsFocus = Extract<SettingsSectionId, "skills"> | null;
 type ProviderFormState = LlmProviderPatch & {
   apiKeyPresent?: boolean;
 };
@@ -157,6 +167,7 @@ const SIDEBAR_COLLAPSED_WIDTH = 68;
 const SIDEBAR_DEFAULT_WIDTH = 320;
 const SIDEBAR_MIN_WIDTH = 260;
 const SIDEBAR_MAX_WIDTH = 460;
+const SIDEBAR_STANDALONE_CHAT_LIMIT = 10;
 const ACTIVITY_COLLAPSED_WIDTH = 46;
 const ACTIVITY_DEFAULT_WIDTH = 300;
 const ACTIVITY_MIN_WIDTH = 232;
@@ -2706,7 +2717,7 @@ export function App() {
   const standaloneSessions = sessions
     .filter((session) => session.projectRoot === null)
     .sort(compareSessionsForDisplay)
-    .slice(0, 5);
+    .slice(0, SIDEBAR_STANDALONE_CHAT_LIMIT);
   const chatStarted = Boolean(state.sessionId) || messages.some((message) => message.role !== "system");
   const canSelectChatProject = !chatStarted && !busy;
   const canCompactContext =
@@ -2729,12 +2740,6 @@ export function App() {
     >
       <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="brand-row">
-          <img className="brand-mark" src={arivuLogoUrl} alt="" />
-          {!sidebarCollapsed ? (
-            <div className="brand-copy">
-              <div className="brand-title">Arivu</div>
-            </div>
-          ) : null}
           <button
             className="icon-button sidebar-collapse-button"
             type="button"
@@ -2744,6 +2749,12 @@ export function App() {
           >
             {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           </button>
+          <img className="brand-mark" src={arivuLogoUrl} alt="" />
+          {!sidebarCollapsed ? (
+            <div className="brand-copy">
+              <div className="brand-title">Arivu</div>
+            </div>
+          ) : null}
         </div>
 
         <button className="primary-command" type="button" onClick={() => void startNewChat()}>
@@ -7099,7 +7110,9 @@ function SettingsView({
   const [workspacePolicyBundle, setWorkspacePolicyBundle] = useState<WorkspacePolicyBundleResult | null>(null);
   const [workspacePolicyBundleLoading, setWorkspacePolicyBundleLoading] = useState(false);
   const [workspacePolicyBundleError, setWorkspacePolicyBundleError] = useState<string | null>(null);
-  const skillsSectionRef = useRef<HTMLElement | null>(null);
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSectionId>(focusSection ?? "models");
+  const activeSettingsSectionItem = SETTINGS_SECTIONS.find((section) => section.id === activeSettingsSection) ?? SETTINGS_SECTIONS[0];
+  const formSettingsSection = ["models", "browser", "integrations", "permissions"].includes(activeSettingsSection);
   const selectedProvider = providers.find((provider) => provider.id === activeProviderId) ?? providers[0];
   const baseUrl = selectedProvider?.baseUrl ?? state.config.baseUrl;
   const model = selectedProvider?.model ?? state.config.model;
@@ -7113,10 +7126,10 @@ function SettingsView({
   const browserTaskApiKey = browserTaskProvider?.apiKey ?? "";
 
   useEffect(() => {
-    if (focusSection !== "skills") {
+    if (!focusSection) {
       return;
     }
-    requestAnimationFrame(() => skillsSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+    setActiveSettingsSection(focusSection);
     onFocusSettled();
   }, [focusSection, onFocusSettled]);
 
@@ -7381,437 +7394,512 @@ function SettingsView({
 
   return (
     <section className="settings-panel">
-      <div className="settings-grid">
-        <label className="provider-field">
-          <span>LLM provider</span>
-          <div className="provider-picker">
-            <select value={activeProviderId} onChange={(event) => setActiveProviderId(event.target.value)}>
-              {providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.name.trim() || "Unnamed provider"}
-                </option>
-              ))}
-            </select>
-            <button className="secondary-command" type="button" onClick={addProvider}>
-              <Plus size={15} />
-              Add provider
-            </button>
-            <button
-              className="icon-button compact-icon-button"
-              type="button"
-              onClick={removeSelectedProvider}
-              disabled={providers.length <= 1}
-              title="Remove provider"
-              aria-label="Remove provider"
-            >
-              <Trash2 size={14} />
-            </button>
-          </div>
-          <small className="field-note">Save multiple OpenAI-compatible providers and switch the active runtime here.</small>
-        </label>
-        <label>
-          <span>Provider name</span>
-          <input value={selectedProvider?.name ?? ""} onChange={(event) => updateSelectedProvider({ name: event.target.value })} />
-        </label>
-        <label className="base-url-field">
-          <span>Base URL</span>
-          <input value={baseUrl} onChange={(event) => updateSelectedProvider({ baseUrl: event.target.value })} />
-        </label>
-        <label className="model-field">
-          <span>Model</span>
-          <div className="model-picker">
-            <button className="model-dialog-trigger settings-model-trigger" type="button" onClick={() => setModelDialogOpen(true)}>
-              <Cpu size={15} />
-              <span>{modelDisplayName(model)}</span>
-              <Search size={13} />
-            </button>
-          </div>
-          <input value={model} onChange={(event) => updateSelectedProvider({ model: event.target.value })} placeholder="Enter model id" />
-          <small className="field-note">Choose Auto, use search, or enter a model id manually.</small>
-        </label>
-        <label className="api-key-field">
-          <span>API key</span>
-          <input
-            value={apiKey}
-            onChange={(event) => updateSelectedProvider({ apiKey: event.target.value })}
-            type="password"
-            placeholder={selectedProviderApiKeyPresent ? "Saved. Enter a new key to replace it." : "No key saved for this provider."}
-          />
-        </label>
-        <label>
-          <span>Tool calling</span>
-          <select
-            value={selectedProvider?.toolCalling ?? "auto"}
-            onChange={(event) => updateSelectedProvider({ toolCalling: event.target.value as ProviderToolCallingMode })}
-          >
-            <option value="auto">Auto fallback</option>
-            <option value="enabled">Enabled</option>
-            <option value="disabled">Disabled</option>
-          </select>
-          <small className="field-note">Disable for plain-chat endpoints that reject OpenAI tool schemas.</small>
-        </label>
-        <label>
-          <span>Image input</span>
-          <select
-            value={selectedProvider?.imageInput ?? "auto"}
-            onChange={(event) => updateSelectedProvider({ imageInput: event.target.value as ProviderImageInputMode })}
-          >
-            <option value="auto">Auto</option>
-            <option value="enabled">Enabled</option>
-            <option value="disabled">Disabled</option>
-          </select>
-          <small className="field-note">Disable for text-only endpoints; enable for models that accept OpenAI image parts.</small>
-        </label>
-        <label>
-          <span>Context window (tokens)</span>
-          <input
-            value={selectedProvider?.contextWindowTokens ?? ""}
-            onChange={(event) => {
-              const parsed = Number.parseInt(event.target.value, 10);
-              updateSelectedProvider({ contextWindowTokens: Number.isFinite(parsed) && parsed > 0 ? parsed : undefined });
-            }}
-            type="number"
-            min={1000}
-            step={1000}
-            placeholder="Auto (uses conservative default)"
-          />
-          <small className="field-note">This model's context window. Sets when Arivu compacts requests; leave blank for the default.</small>
-        </label>
-        <label className="tavily-key-field">
-          <span>Tavily API key</span>
-          <input
-            value={tavilyApiKey}
-            onChange={(event) => setTavilyApiKey(event.target.value)}
-            type="password"
-            placeholder={state.config.tavilyApiKeyPresent ? "Saved. Enter a new key to replace it." : "No Tavily key saved."}
-          />
-        </label>
-        <label>
-          <span>Trust mode</span>
-          <select value={trustMode} onChange={(event) => setTrustMode(event.target.value as TrustMode)}>
-            <option value="ask">ask</option>
-            <option value="readonly">readonly</option>
-            <option value="trusted">trusted</option>
-          </select>
-        </label>
-        <label>
-          <span>Browser task LLM</span>
-          <select
-            value={browserTaskProviderId}
-            onChange={(event) => {
-              setBrowserTaskProviderId(event.target.value);
-              setBrowserTaskModelId("");
-            }}
-          >
-            <option value="">Same as chat model</option>
-            {providers.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.name.trim() || "Unnamed provider"}
-              </option>
-            ))}
-          </select>
-          <small className="field-note">
-            Provider the in-page browser_task agent uses for its own model calls. Defaults to the active chat model.
-          </small>
-        </label>
-        <label className="browser-task-model-field">
-          <span>Browser task model</span>
-          <div className="browser-task-model-picker">
-            <button
-              className="model-dialog-trigger settings-model-trigger"
-              type="button"
-              onClick={() => setBrowserTaskModelDialogOpen(true)}
-              aria-label={`Choose browser task model. Current model: ${modelDisplayName(browserTaskEffectiveModel)}`}
-            >
-              <Cpu size={15} />
-              <span>
-                {browserTaskModelId.trim()
-                  ? modelDisplayName(browserTaskModelId)
-                  : `Provider default: ${modelDisplayName(browserTaskProviderModel)}`}
-              </span>
-              <Search size={13} />
-            </button>
-            {browserTaskModelId.trim() ? (
-              <button
-                className="icon-button compact-icon-button"
-                type="button"
-                onClick={() => setBrowserTaskModelId("")}
-                title="Use provider default model"
-                aria-label="Use provider default browser task model"
-              >
-                <RotateCcw size={14} />
-              </button>
-            ) : null}
-          </div>
-          <input
-            value={browserTaskModelId}
-            onChange={(event) => setBrowserTaskModelId(event.target.value)}
-            placeholder="Or enter a model ID manually"
-          />
-          <small className="field-note">
-            Choose from the provider's models or enter an ID manually. Use a model with strong native tool calling.
-          </small>
-        </label>
-        <label>
-          <span>Browser task max loops</span>
-          <input
-            type="number"
-            min={1}
-            max={200}
-            value={browserTaskMaxSteps}
-            onChange={(event) => setBrowserTaskMaxSteps(event.target.value)}
-            placeholder="100 (default)"
-          />
-          <small className="field-note">Maximum observe/act loops per browser_task call, from 1 to 200.</small>
-        </label>
-        <label>
-          <span>Browser task loop delay (ms)</span>
-          <input
-            type="number"
-            min={0}
-            max={120000}
-            step={500}
-            value={browserTaskStepDelayMs}
-            onChange={(event) => setBrowserTaskStepDelayMs(event.target.value)}
-            placeholder="35000 (default)"
-          />
-          <small className="field-note">
-            Pause between agent loops, from 0 to 120000 ms. Defaults to 35000 ms; provider rate-limit responses are also retried with
-            backoff automatically.
-          </small>
-        </label>
-      </div>
-
-      <CapabilityPolicyPanel
-        activeTrustMode={trustMode}
-        policies={capabilityPolicies}
-        source={capabilityPolicySource}
-        workspaceRoot={state.workspace.root}
-        workspaceOverrides={workspacePolicyOverrides}
-        workspaceScopeRules={workspaceScopeRules}
-        workspacePolicyProfiles={workspacePolicyProfiles}
-        workspacePolicyBundle={workspacePolicyBundle}
-        workspacePolicyBundleLoading={workspacePolicyBundleLoading}
-        workspacePolicyBundleError={workspacePolicyBundleError}
-        onWorkspaceOverrideChange={(capability, override) =>
-          setWorkspacePolicyOverrides((current) => updateWorkspacePolicyOverride(current, capability, override))
-        }
-        onWorkspaceScopeRulesChange={setWorkspaceScopeRules}
-        onWorkspacePolicyProfilesChange={setWorkspacePolicyProfiles}
-        onWorkspacePresetApply={(preset) => {
-          const normalizedPreset = normalizedWorkspacePolicyPreset(preset);
-          setWorkspacePolicyOverrides(normalizedPreset.overrides);
-          setWorkspaceScopeRules(normalizedPreset.scopeRules);
-        }}
-        onWorkspacePolicyImport={(policy) => {
-          setWorkspacePolicyOverrides(policy.overrides);
-          setWorkspaceScopeRules(policy.scopeRules);
-        }}
-        onWorkspacePolicyBundleReload={() => void refreshWorkspacePolicyBundle()}
-        loading={capabilityPolicyLoading}
-        error={capabilityPolicyError}
-        onRefresh={() => void refreshCapabilityPolicies()}
-      />
-
-      <label className="mcp-config-field">
-        <span>MCP servers</span>
-        <textarea value={mcpServersText} onChange={(event) => setMcpServersText(event.target.value)} spellCheck={false} rows={8} />
-        <small className="field-note">JSON object keyed by server name. Each server supports command, args, env, and disabled.</small>
-      </label>
-
-      <section className="skills-settings-section" ref={skillsSectionRef} aria-label="Skills">
-        <div className="settings-section-heading">
-          <div>
-            <strong>Skills</strong>
-            <span title={skillsRoot}>
-              {skills.length} installed · {skillsRoot || "Global skills directory"}
-            </span>
-          </div>
-          <button className="secondary-command" type="button" onClick={() => void refreshSkills()}>
-            <RefreshCw size={15} />
-            Refresh
-          </button>
+      <header className="settings-header">
+        <div className="settings-header-copy">
+          <span>Settings</span>
+          <h2 id="settings-section-title">{activeSettingsSectionItem.label}</h2>
+          <p>{activeSettingsSectionItem.description}</p>
         </div>
-
-        <div className="settings-skill-list">
-          {skills.length === 0 ? (
-            <div className="settings-skill-empty">No skills installed yet.</div>
-          ) : (
-            skills.map((skill) => (
-              <article key={skill.name} className="settings-skill-row">
-                <div>
-                  <code>${skill.name}</code>
-                  <strong>{skill.title}</strong>
-                </div>
-                {skill.description ? <p>{skill.description}</p> : null}
-                <small>{skill.path}</small>
-              </article>
-            ))
-          )}
-        </div>
-
-        <div className="skill-add-form">
-          <label>
-            <span>Name</span>
-            <input value={skillName} onChange={(event) => setSkillName(event.target.value)} placeholder="code-review" />
-          </label>
-          <label>
-            <span>Description</span>
-            <input
-              value={skillDescription}
-              onChange={(event) => setSkillDescription(event.target.value)}
-              placeholder="When this skill should be used"
-            />
-          </label>
-          <label className="skill-instructions-field">
-            <span>Instructions</span>
-            <textarea
-              value={skillInstructions}
-              onChange={(event) => setSkillInstructions(event.target.value)}
-              placeholder="Write the instructions Codex should follow for this skill."
-              rows={6}
-            />
-          </label>
-          <button
-            className="secondary-command skill-add-button"
-            type="button"
-            onClick={() => void addSkill()}
-            disabled={skillSaving || !skillName.trim() || !skillInstructions.trim()}
-          >
-            <Plus size={16} />
-            {skillSaving ? "Adding" : "Add skill"}
-          </button>
-        </div>
-        {skillError ? <div className="error-strip">{skillError}</div> : null}
-        {skillStatus ? <div className="success-strip">{skillStatus}</div> : null}
-      </section>
-
-      <section className="skills-settings-section" aria-label="Task worktrees">
-        <div className="settings-section-heading">
-          <div>
-            <strong>Task worktrees</strong>
-            <span>{taskWorktreeInventorySummary(worktreeInventory)}</span>
-          </div>
-          <button
-            className="secondary-command"
-            type="button"
-            onClick={() => void refreshTaskWorktrees(true)}
-            disabled={worktreeInventoryLoading}
-          >
-            <RefreshCw size={15} />
-            {worktreeInventoryLoading ? "Refreshing" : "Refresh"}
-          </button>
-        </div>
-
-        <div className="settings-worktree-list">
-          {worktreeInventory.length === 0 ? (
-            <div className="settings-skill-empty">No task worktrees recorded yet.</div>
-          ) : (
-            worktreeInventory.map((item) => {
-              const busyKey = `${item.sessionId}:${item.taskRunId}:open`;
-              return (
-                <article key={`${item.sessionId}:${item.taskRunId}`} className="settings-worktree-row">
-                  <div className="settings-worktree-main">
-                    <div>
-                      <strong>{item.branch ?? "Task worktree"}</strong>
-                      <span>{worktreeInventoryStatusLabel(item)}</span>
-                    </div>
-                    <p>{item.promptPreview || item.sessionTitle}</p>
-                    {item.path ? <small title={item.path}>{item.path}</small> : null}
-                  </div>
-                  <div className="settings-worktree-meta">
-                    <span>{item.changedFiles === undefined ? "diff unknown" : `${item.changedFiles} changed`}</span>
-                    {item.verificationStatus ? (
-                      <span
-                        title={item.verificationSummary}
-                      >{`verification ${verificationStatusLabel(item.verificationStatus).toLowerCase()}`}</span>
-                    ) : null}
-                    <span>{formatDateTime(item.updatedAt)}</span>
-                  </div>
-                  <div className="settings-worktree-actions">
-                    <button
-                      className="secondary-command"
-                      type="button"
-                      onClick={() => void openInventoryWorktree(item)}
-                      disabled={!item.canOpen || worktreeInventoryBusy === busyKey}
-                      title={item.canOpen ? "Open this task worktree folder" : "Task worktree folder is unavailable"}
-                    >
-                      <FolderOpen size={15} />
-                      {worktreeInventoryBusy === busyKey ? "Opening" : "Open"}
-                    </button>
-                    {item.canPreparePullRequest ? (
-                      <button
-                        className="secondary-command"
-                        type="button"
-                        onClick={() => void runInventoryWorktreeAction(item, "prepare_pr")}
-                        disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:prepare_pr`}
-                        title="Prepare a pull request draft for this task worktree"
-                      >
-                        <GitPullRequest size={15} />
-                        {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:prepare_pr` ? "Preparing" : "PR draft"}
-                      </button>
-                    ) : null}
-                    {item.canCreatePullRequest ? (
-                      <button
-                        className="secondary-command"
-                        type="button"
-                        onClick={() => void runInventoryWorktreeAction(item, "create_pr")}
-                        disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:create_pr`}
-                        title="Push this task branch and create a draft pull request"
-                      >
-                        <GitPullRequest size={15} />
-                        {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:create_pr` ? "Creating" : "Create PR"}
-                      </button>
-                    ) : null}
-                    {item.canDiscard ? (
-                      <button
-                        className="secondary-command danger-command"
-                        type="button"
-                        onClick={() => void runInventoryWorktreeAction(item, "discard")}
-                        disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:discard`}
-                        title="Discard this task worktree and task branch"
-                      >
-                        <Trash2 size={15} />
-                        {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:discard` ? "Discarding" : "Discard"}
-                      </button>
-                    ) : null}
-                    {item.canCleanup ? (
-                      <button
-                        className="secondary-command"
-                        type="button"
-                        onClick={() => void runInventoryWorktreeAction(item, "cleanup")}
-                        disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:cleanup`}
-                        title="Clean up this merged task worktree and task branch"
-                      >
-                        <Scissors size={15} />
-                        {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:cleanup` ? "Cleaning" : "Clean up"}
-                      </button>
-                    ) : null}
-                  </div>
-                </article>
-              );
-            })
-          )}
-        </div>
-        {worktreeInventoryError ? <div className="error-strip">{worktreeInventoryError}</div> : null}
-        {worktreeInventoryStatus ? <div className="success-strip">{worktreeInventoryStatus}</div> : null}
-      </section>
-
-      {error ? <div className="error-strip">{error}</div> : null}
-      {doctorError ? <div className="error-strip">{doctorError}</div> : null}
-
-      <div className="settings-actions">
         <button className="save-button" type="button" onClick={() => void save()} disabled={saving}>
           <Save size={17} />
           {saving ? "Saving" : "Save settings"}
         </button>
-        <button className="secondary-command doctor-button" type="button" onClick={() => void runSettingsDoctor()} disabled={doctorRunning}>
-          <RefreshCw size={17} />
-          {doctorRunning ? "Checking" : "Run doctor"}
-        </button>
+      </header>
+
+      <div className="settings-layout">
+        <nav className="settings-navigation" aria-label="Settings sections">
+          {SETTINGS_SECTIONS.map((section) => {
+            const SectionIcon = section.icon;
+            const active = section.id === activeSettingsSection;
+            return (
+              <button
+                key={section.id}
+                className={active ? "settings-navigation-item active" : "settings-navigation-item"}
+                type="button"
+                onClick={() => setActiveSettingsSection(section.id)}
+                aria-current={active ? "page" : undefined}
+                data-settings-section={section.id}
+              >
+                <span className="settings-navigation-icon">
+                  <SectionIcon size={16} />
+                </span>
+                <span className="settings-navigation-copy">
+                  <strong>{section.label}</strong>
+                </span>
+                <ChevronRight className="settings-navigation-chevron" size={14} />
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="settings-content" aria-labelledby="settings-section-title">
+          {error ? <div className="error-strip settings-save-error">{error}</div> : null}
+
+          <div
+            className="settings-grid"
+            hidden={!formSettingsSection}
+            data-settings-panel={formSettingsSection ? activeSettingsSection : undefined}
+          >
+            <label className="provider-field" hidden={activeSettingsSection !== "models"}>
+              <span>LLM provider</span>
+              <div className="provider-picker">
+                <select value={activeProviderId} onChange={(event) => setActiveProviderId(event.target.value)}>
+                  {providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name.trim() || "Unnamed provider"}
+                    </option>
+                  ))}
+                </select>
+                <button className="secondary-command" type="button" onClick={addProvider}>
+                  <Plus size={15} />
+                  Add provider
+                </button>
+                <button
+                  className="icon-button compact-icon-button"
+                  type="button"
+                  onClick={removeSelectedProvider}
+                  disabled={providers.length <= 1}
+                  title="Remove provider"
+                  aria-label="Remove provider"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+              <small className="field-note">Save multiple OpenAI-compatible providers and switch the active runtime here.</small>
+            </label>
+            <label hidden={activeSettingsSection !== "models"}>
+              <span>Provider name</span>
+              <input value={selectedProvider?.name ?? ""} onChange={(event) => updateSelectedProvider({ name: event.target.value })} />
+            </label>
+            <label className="base-url-field" hidden={activeSettingsSection !== "models"}>
+              <span>Base URL</span>
+              <input value={baseUrl} onChange={(event) => updateSelectedProvider({ baseUrl: event.target.value })} />
+            </label>
+            <label className="model-field" hidden={activeSettingsSection !== "models"}>
+              <span>Model</span>
+              <div className="model-picker">
+                <button className="model-dialog-trigger settings-model-trigger" type="button" onClick={() => setModelDialogOpen(true)}>
+                  <Cpu size={15} />
+                  <span>{modelDisplayName(model)}</span>
+                  <Search size={13} />
+                </button>
+              </div>
+              <input
+                value={model}
+                onChange={(event) => updateSelectedProvider({ model: event.target.value })}
+                placeholder="Enter model id"
+              />
+              <small className="field-note">Choose Auto, use search, or enter a model id manually.</small>
+            </label>
+            <label className="api-key-field" hidden={activeSettingsSection !== "models"}>
+              <span>API key</span>
+              <input
+                value={apiKey}
+                onChange={(event) => updateSelectedProvider({ apiKey: event.target.value })}
+                type="password"
+                placeholder={selectedProviderApiKeyPresent ? "Saved. Enter a new key to replace it." : "No key saved for this provider."}
+              />
+            </label>
+            <label hidden={activeSettingsSection !== "models"}>
+              <span>Tool calling</span>
+              <select
+                value={selectedProvider?.toolCalling ?? "auto"}
+                onChange={(event) => updateSelectedProvider({ toolCalling: event.target.value as ProviderToolCallingMode })}
+              >
+                <option value="auto">Auto fallback</option>
+                <option value="enabled">Enabled</option>
+                <option value="disabled">Disabled</option>
+              </select>
+              <small className="field-note">Disable for plain-chat endpoints that reject OpenAI tool schemas.</small>
+            </label>
+            <label hidden={activeSettingsSection !== "models"}>
+              <span>Image input</span>
+              <select
+                value={selectedProvider?.imageInput ?? "auto"}
+                onChange={(event) => updateSelectedProvider({ imageInput: event.target.value as ProviderImageInputMode })}
+              >
+                <option value="auto">Auto</option>
+                <option value="enabled">Enabled</option>
+                <option value="disabled">Disabled</option>
+              </select>
+              <small className="field-note">Disable for text-only endpoints; enable for models that accept OpenAI image parts.</small>
+            </label>
+            <label hidden={activeSettingsSection !== "models"}>
+              <span>Context window (tokens)</span>
+              <input
+                value={selectedProvider?.contextWindowTokens ?? ""}
+                onChange={(event) => {
+                  const parsed = Number.parseInt(event.target.value, 10);
+                  updateSelectedProvider({ contextWindowTokens: Number.isFinite(parsed) && parsed > 0 ? parsed : undefined });
+                }}
+                type="number"
+                min={1000}
+                step={1000}
+                placeholder="Auto (uses conservative default)"
+              />
+              <small className="field-note">
+                This model's context window. Sets when Arivu compacts requests; leave blank for the default.
+              </small>
+            </label>
+            <label className="tavily-key-field" hidden={activeSettingsSection !== "integrations"}>
+              <span>Tavily API key</span>
+              <input
+                value={tavilyApiKey}
+                onChange={(event) => setTavilyApiKey(event.target.value)}
+                type="password"
+                placeholder={state.config.tavilyApiKeyPresent ? "Saved. Enter a new key to replace it." : "No Tavily key saved."}
+              />
+            </label>
+            <label hidden={activeSettingsSection !== "permissions"}>
+              <span>Trust mode</span>
+              <select value={trustMode} onChange={(event) => setTrustMode(event.target.value as TrustMode)}>
+                <option value="ask">ask</option>
+                <option value="readonly">readonly</option>
+                <option value="trusted">trusted</option>
+              </select>
+            </label>
+            <label hidden={activeSettingsSection !== "browser"}>
+              <span>Browser task LLM</span>
+              <select
+                value={browserTaskProviderId}
+                onChange={(event) => {
+                  setBrowserTaskProviderId(event.target.value);
+                  setBrowserTaskModelId("");
+                }}
+              >
+                <option value="">Same as chat model</option>
+                {providers.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.name.trim() || "Unnamed provider"}
+                  </option>
+                ))}
+              </select>
+              <small className="field-note">
+                Provider the in-page browser_task agent uses for its own model calls. Defaults to the active chat model.
+              </small>
+            </label>
+            <label className="browser-task-model-field" hidden={activeSettingsSection !== "browser"}>
+              <span>Browser task model</span>
+              <div className="browser-task-model-picker">
+                <button
+                  className="model-dialog-trigger settings-model-trigger"
+                  type="button"
+                  onClick={() => setBrowserTaskModelDialogOpen(true)}
+                  aria-label={`Choose browser task model. Current model: ${modelDisplayName(browserTaskEffectiveModel)}`}
+                >
+                  <Cpu size={15} />
+                  <span>
+                    {browserTaskModelId.trim()
+                      ? modelDisplayName(browserTaskModelId)
+                      : `Provider default: ${modelDisplayName(browserTaskProviderModel)}`}
+                  </span>
+                  <Search size={13} />
+                </button>
+                {browserTaskModelId.trim() ? (
+                  <button
+                    className="icon-button compact-icon-button"
+                    type="button"
+                    onClick={() => setBrowserTaskModelId("")}
+                    title="Use provider default model"
+                    aria-label="Use provider default browser task model"
+                  >
+                    <RotateCcw size={14} />
+                  </button>
+                ) : null}
+              </div>
+              <input
+                value={browserTaskModelId}
+                onChange={(event) => setBrowserTaskModelId(event.target.value)}
+                placeholder="Or enter a model ID manually"
+              />
+              <small className="field-note">
+                Choose from the provider's models or enter an ID manually. Use a model with strong native tool calling.
+              </small>
+            </label>
+            <label hidden={activeSettingsSection !== "browser"}>
+              <span>Browser task max loops</span>
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={browserTaskMaxSteps}
+                onChange={(event) => setBrowserTaskMaxSteps(event.target.value)}
+                placeholder="100 (default)"
+              />
+              <small className="field-note">Maximum observe/act loops per browser_task call, from 1 to 200.</small>
+            </label>
+            <label hidden={activeSettingsSection !== "browser"}>
+              <span>Browser task loop delay (ms)</span>
+              <input
+                type="number"
+                min={0}
+                max={120000}
+                step={500}
+                value={browserTaskStepDelayMs}
+                onChange={(event) => setBrowserTaskStepDelayMs(event.target.value)}
+                placeholder="35000 (default)"
+              />
+              <small className="field-note">
+                Pause between agent loops, from 0 to 120000 ms. Defaults to 35000 ms; provider rate-limit responses are also retried with
+                backoff automatically.
+              </small>
+            </label>
+          </div>
+
+          <div hidden={activeSettingsSection !== "permissions"} data-settings-panel="permissions">
+            <CapabilityPolicyPanel
+              activeTrustMode={trustMode}
+              policies={capabilityPolicies}
+              source={capabilityPolicySource}
+              workspaceRoot={state.workspace.root}
+              workspaceOverrides={workspacePolicyOverrides}
+              workspaceScopeRules={workspaceScopeRules}
+              workspacePolicyProfiles={workspacePolicyProfiles}
+              workspacePolicyBundle={workspacePolicyBundle}
+              workspacePolicyBundleLoading={workspacePolicyBundleLoading}
+              workspacePolicyBundleError={workspacePolicyBundleError}
+              onWorkspaceOverrideChange={(capability, override) =>
+                setWorkspacePolicyOverrides((current) => updateWorkspacePolicyOverride(current, capability, override))
+              }
+              onWorkspaceScopeRulesChange={setWorkspaceScopeRules}
+              onWorkspacePolicyProfilesChange={setWorkspacePolicyProfiles}
+              onWorkspacePresetApply={(preset) => {
+                const normalizedPreset = normalizedWorkspacePolicyPreset(preset);
+                setWorkspacePolicyOverrides(normalizedPreset.overrides);
+                setWorkspaceScopeRules(normalizedPreset.scopeRules);
+              }}
+              onWorkspacePolicyImport={(policy) => {
+                setWorkspacePolicyOverrides(policy.overrides);
+                setWorkspaceScopeRules(policy.scopeRules);
+              }}
+              onWorkspacePolicyBundleReload={() => void refreshWorkspacePolicyBundle()}
+              loading={capabilityPolicyLoading}
+              error={capabilityPolicyError}
+              onRefresh={() => void refreshCapabilityPolicies()}
+            />
+          </div>
+
+          <label className="mcp-config-field" hidden={activeSettingsSection !== "integrations"} data-settings-panel="integrations">
+            <span>MCP servers</span>
+            <textarea value={mcpServersText} onChange={(event) => setMcpServersText(event.target.value)} spellCheck={false} rows={8} />
+            <small className="field-note">JSON object keyed by server name. Each server supports command, args, env, and disabled.</small>
+          </label>
+
+          <section
+            className="skills-settings-section"
+            aria-label="Skills"
+            hidden={activeSettingsSection !== "skills"}
+            data-settings-panel="skills"
+          >
+            <div className="settings-section-heading">
+              <div>
+                <strong>Skills</strong>
+                <span title={skillsRoot}>
+                  {skills.length} installed · {skillsRoot || "Global skills directory"}
+                </span>
+              </div>
+              <button className="secondary-command" type="button" onClick={() => void refreshSkills()}>
+                <RefreshCw size={15} />
+                Refresh
+              </button>
+            </div>
+
+            <div className="settings-skill-list">
+              {skills.length === 0 ? (
+                <div className="settings-skill-empty">No skills installed yet.</div>
+              ) : (
+                skills.map((skill) => (
+                  <article key={skill.name} className="settings-skill-row">
+                    <div>
+                      <code>${skill.name}</code>
+                      <strong>{skill.title}</strong>
+                    </div>
+                    {skill.description ? <p>{skill.description}</p> : null}
+                    <small>{skill.path}</small>
+                  </article>
+                ))
+              )}
+            </div>
+
+            <div className="skill-add-form">
+              <label>
+                <span>Name</span>
+                <input value={skillName} onChange={(event) => setSkillName(event.target.value)} placeholder="code-review" />
+              </label>
+              <label>
+                <span>Description</span>
+                <input
+                  value={skillDescription}
+                  onChange={(event) => setSkillDescription(event.target.value)}
+                  placeholder="When this skill should be used"
+                />
+              </label>
+              <label className="skill-instructions-field">
+                <span>Instructions</span>
+                <textarea
+                  value={skillInstructions}
+                  onChange={(event) => setSkillInstructions(event.target.value)}
+                  placeholder="Write the instructions Codex should follow for this skill."
+                  rows={6}
+                />
+              </label>
+              <button
+                className="secondary-command skill-add-button"
+                type="button"
+                onClick={() => void addSkill()}
+                disabled={skillSaving || !skillName.trim() || !skillInstructions.trim()}
+              >
+                <Plus size={16} />
+                {skillSaving ? "Adding" : "Add skill"}
+              </button>
+            </div>
+            {skillError ? <div className="error-strip">{skillError}</div> : null}
+            {skillStatus ? <div className="success-strip">{skillStatus}</div> : null}
+          </section>
+
+          <section
+            className="skills-settings-section"
+            aria-label="Task worktrees"
+            hidden={activeSettingsSection !== "worktrees"}
+            data-settings-panel="worktrees"
+          >
+            <div className="settings-section-heading">
+              <div>
+                <strong>Task worktrees</strong>
+                <span>{taskWorktreeInventorySummary(worktreeInventory)}</span>
+              </div>
+              <button
+                className="secondary-command"
+                type="button"
+                onClick={() => void refreshTaskWorktrees(true)}
+                disabled={worktreeInventoryLoading}
+              >
+                <RefreshCw size={15} />
+                {worktreeInventoryLoading ? "Refreshing" : "Refresh"}
+              </button>
+            </div>
+
+            <div className="settings-worktree-list">
+              {worktreeInventory.length === 0 ? (
+                <div className="settings-skill-empty">No task worktrees recorded yet.</div>
+              ) : (
+                worktreeInventory.map((item) => {
+                  const busyKey = `${item.sessionId}:${item.taskRunId}:open`;
+                  return (
+                    <article key={`${item.sessionId}:${item.taskRunId}`} className="settings-worktree-row">
+                      <div className="settings-worktree-main">
+                        <div>
+                          <strong>{item.branch ?? "Task worktree"}</strong>
+                          <span>{worktreeInventoryStatusLabel(item)}</span>
+                        </div>
+                        <p>{item.promptPreview || item.sessionTitle}</p>
+                        {item.path ? <small title={item.path}>{item.path}</small> : null}
+                      </div>
+                      <div className="settings-worktree-meta">
+                        <span>{item.changedFiles === undefined ? "diff unknown" : `${item.changedFiles} changed`}</span>
+                        {item.verificationStatus ? (
+                          <span
+                            title={item.verificationSummary}
+                          >{`verification ${verificationStatusLabel(item.verificationStatus).toLowerCase()}`}</span>
+                        ) : null}
+                        <span>{formatDateTime(item.updatedAt)}</span>
+                      </div>
+                      <div className="settings-worktree-actions">
+                        <button
+                          className="secondary-command"
+                          type="button"
+                          onClick={() => void openInventoryWorktree(item)}
+                          disabled={!item.canOpen || worktreeInventoryBusy === busyKey}
+                          title={item.canOpen ? "Open this task worktree folder" : "Task worktree folder is unavailable"}
+                        >
+                          <FolderOpen size={15} />
+                          {worktreeInventoryBusy === busyKey ? "Opening" : "Open"}
+                        </button>
+                        {item.canPreparePullRequest ? (
+                          <button
+                            className="secondary-command"
+                            type="button"
+                            onClick={() => void runInventoryWorktreeAction(item, "prepare_pr")}
+                            disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:prepare_pr`}
+                            title="Prepare a pull request draft for this task worktree"
+                          >
+                            <GitPullRequest size={15} />
+                            {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:prepare_pr` ? "Preparing" : "PR draft"}
+                          </button>
+                        ) : null}
+                        {item.canCreatePullRequest ? (
+                          <button
+                            className="secondary-command"
+                            type="button"
+                            onClick={() => void runInventoryWorktreeAction(item, "create_pr")}
+                            disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:create_pr`}
+                            title="Push this task branch and create a draft pull request"
+                          >
+                            <GitPullRequest size={15} />
+                            {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:create_pr` ? "Creating" : "Create PR"}
+                          </button>
+                        ) : null}
+                        {item.canDiscard ? (
+                          <button
+                            className="secondary-command danger-command"
+                            type="button"
+                            onClick={() => void runInventoryWorktreeAction(item, "discard")}
+                            disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:discard`}
+                            title="Discard this task worktree and task branch"
+                          >
+                            <Trash2 size={15} />
+                            {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:discard` ? "Discarding" : "Discard"}
+                          </button>
+                        ) : null}
+                        {item.canCleanup ? (
+                          <button
+                            className="secondary-command"
+                            type="button"
+                            onClick={() => void runInventoryWorktreeAction(item, "cleanup")}
+                            disabled={worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:cleanup`}
+                            title="Clean up this merged task worktree and task branch"
+                          >
+                            <Scissors size={15} />
+                            {worktreeInventoryBusy === `${item.sessionId}:${item.taskRunId}:cleanup` ? "Cleaning" : "Clean up"}
+                          </button>
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })
+              )}
+            </div>
+            {worktreeInventoryError ? <div className="error-strip">{worktreeInventoryError}</div> : null}
+            {worktreeInventoryStatus ? <div className="success-strip">{worktreeInventoryStatus}</div> : null}
+          </section>
+
+          <section
+            className="settings-diagnostics"
+            hidden={activeSettingsSection !== "diagnostics"}
+            data-settings-panel="diagnostics"
+            aria-label="Diagnostics"
+          >
+            <div className="settings-diagnostics-action">
+              <div>
+                <strong>Provider health</strong>
+                <p>Check model access, streaming, tool calling, image input, and web search configuration.</p>
+              </div>
+              <button
+                className="secondary-command doctor-button"
+                type="button"
+                onClick={() => void runSettingsDoctor()}
+                disabled={doctorRunning}
+              >
+                <RefreshCw size={17} />
+                {doctorRunning ? "Checking" : "Run doctor"}
+              </button>
+            </div>
+            {doctorError ? <div className="error-strip">{doctorError}</div> : null}
+            {doctorReport ? <DoctorReportView report={doctorReport} /> : null}
+          </section>
+        </div>
       </div>
 
-      {doctorReport ? <DoctorReportView report={doctorReport} /> : null}
       {modelDialogOpen ? (
         <ModelPickerDialog
           currentModel={model}

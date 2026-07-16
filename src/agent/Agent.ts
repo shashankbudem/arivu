@@ -6,7 +6,15 @@ import type { BrowserTaskModelConfig, BrowserToolController } from "../tools/bro
 import { detectWorkspace } from "../workspace.js";
 import { chatContentToText, trimChatContent, type ChatContent } from "./content.js";
 import { stripFencedCodeBlocks } from "./textualToolCalls.js";
-import { applyModelSummary, compactMessagesForModelRequest, compactSessionMessages, messagesToSummarize } from "./contextCompaction.js";
+import {
+  AUTO_COMPACT_REQUEST_TOKEN_LIMIT,
+  MODEL_SUMMARY_PREFIX,
+  applyModelSummary,
+  compactMessagesForModelRequest,
+  compactSessionMessages,
+  estimateMessageTokens,
+  messagesToSummarize
+} from "./contextCompaction.js";
 import { discoverSkills, readSkill, skillsSystemMessage } from "./skills.js";
 import { parseContextLimit } from "../models/contextLimitParser.js";
 import { AgentRunAbortedError } from "./types.js";
@@ -14,7 +22,7 @@ import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatReques
 import type { AppConfig } from "../config.js";
 
 const MAX_STEPS = 500;
-const SYSTEM_PROMPT_VERSION = 2;
+const SYSTEM_PROMPT_VERSION = 3;
 const SYSTEM_PROMPT_SIGNATURE = "You are Arivu";
 const WEB_SEARCH_TOOL = "web_search";
 const PARALLEL_TOOL_LIMIT = 5;
@@ -41,11 +49,19 @@ const LOADED_SKILL_PREFIX = "Skill loaded into chat:";
 // complete, well-formed textual calls into native ones (see textualToolCalls.ts); anything
 // that still reaches this guard is unparseable or truncated, so retry with a corrective
 // instruction instead of accepting it as a final answer.
-const TOOL_MIMICRY_PATTERN = /^\s*Local tool requests?:|<tool_call>|<function=/m;
+const TOOL_MIMICRY_PATTERN = /^\s*Local tool requests?:|<tool_call>|<function=|<minimax:tool_call>|<invoke\s+name=/m;
 const MAX_TOOL_MIMICRY_RETRIES = 2;
+/** A stuck summary call must not stall the run; past this the step proceeds on transient compaction. */
+const AUTO_SUMMARY_TIMEOUT_MS = 120_000;
+/** After an auto-summary attempt, wait for this much message growth before trying again. */
+const AUTO_SUMMARY_RETRY_MESSAGE_GROWTH = 8;
+/** Below this many older messages a summary would fold almost nothing; leave it to transient compaction. */
+const MIN_AUTO_SUMMARY_MESSAGE_COUNT = 6;
 
 export class Agent {
   private readonly session: AgentSession;
+  /** Message count at the last auto-summary attempt; throttles re-attempts to real growth. */
+  private autoSummaryFloor = 0;
 
   constructor(
     private readonly options: {
@@ -68,6 +84,8 @@ export class Agent {
        * scheduled catalog sync deliberately skips the active model most days.
        */
       onContextWindowObserved?: (tokens: number) => void | Promise<void>;
+      /** Test seam for the in-run auto-summary timeout; production uses the default. */
+      autoSummaryTimeoutMs?: number;
       checkpoint?: ChangeCheckpoint;
       session?: AgentSession;
     }
@@ -146,6 +164,88 @@ export class Agent {
         compactedMessageCount: result.compactedMessageCount,
         source: result.compacted ? "deterministic" : "none"
       };
+    }
+  }
+
+  /**
+   * In-run compaction: when the transcript outgrows the request budget, replace the older
+   * conversation with a model-written summary BEFORE the next step, so the model keeps working
+   * from a coherent brief instead of the blind per-request truncation. Deliberately quiet about
+   * failure: on timeout or provider error the step proceeds and transient request compaction
+   * still bounds the payload — a degraded request beats a stalled run. A user stop still aborts.
+   */
+  private async maybeAutoSummarizeSession(runOptions: AgentRunOptions): Promise<void> {
+    const tokenLimit = requestTokenLimitForContextWindow(this.options.contextWindowTokens) ?? AUTO_COMPACT_REQUEST_TOKEN_LIMIT;
+    if (estimateMessageTokens(this.session.messages) <= tokenLimit) {
+      return;
+    }
+    if (this.autoSummaryFloor > 0 && this.session.messages.length < this.autoSummaryFloor + AUTO_SUMMARY_RETRY_MESSAGE_GROWTH) {
+      // A recent attempt already ran (or failed) at this size; wait for real growth so a summary
+      // that could not get under the limit does not re-fire on every step.
+      return;
+    }
+    const older = messagesToSummarize(this.session.messages);
+    if (older.length < MIN_AUTO_SUMMARY_MESSAGE_COUNT) {
+      return;
+    }
+    this.autoSummaryFloor = this.session.messages.length;
+
+    const timeoutController = new AbortController();
+    const timer = setTimeout(() => timeoutController.abort(), this.options.autoSummaryTimeoutMs ?? AUTO_SUMMARY_TIMEOUT_MS);
+    const onParentAbort = () => timeoutController.abort();
+    if (runOptions.signal?.aborted) {
+      onParentAbort();
+    } else {
+      runOptions.signal?.addEventListener("abort", onParentAbort, { once: true });
+    }
+    try {
+      const summaryRequest = compactChatRequestForModel(
+        {
+          messages: [
+            { role: "system", content: SUMMARY_INSTRUCTION },
+            { role: "user", content: summaryTranscript(older) }
+          ],
+          tools: []
+        },
+        "default",
+        tokenLimit
+      );
+      // Only the signal is forwarded: without onEvent the summary tokens never stream into the UI.
+      const response = await this.completeOnce(summaryRequest, { signal: timeoutController.signal });
+      if (response.usage) {
+        await runOptions.onUsage?.(response.usage);
+      }
+      const summary = chatContentToText(response.message.content).trim();
+      if (!summary) {
+        return;
+      }
+      // Recent message objects survive by reference, so task-run indexes can be remapped by
+      // identity; runs whose user message was folded into the summary point at the summary itself.
+      const trackedRuns = (this.session.taskRuns ?? []).map((run) => ({ run, message: this.session.messages[run.userMessageIndex] }));
+      const result = applyModelSummary(this.session.messages, summary);
+      if (!result.compacted) {
+        return;
+      }
+      this.session.messages.splice(0, this.session.messages.length, ...result.messages);
+      const summaryIndex = Math.max(
+        0,
+        this.session.messages.findIndex(
+          (message) => message.role === "system" && chatContentToText(message.content).startsWith(MODEL_SUMMARY_PREFIX)
+        )
+      );
+      for (const { run, message } of trackedRuns) {
+        const index = message ? this.session.messages.indexOf(message) : -1;
+        run.userMessageIndex = index >= 0 ? index : summaryIndex;
+      }
+      this.autoSummaryFloor = this.session.messages.length;
+      this.touch();
+    } catch {
+      // A user stop must still stop the run; anything else (timeout, provider failure) falls
+      // through to the step, where transient request compaction covers the payload.
+      throwIfAborted(runOptions.signal);
+    } finally {
+      clearTimeout(timer);
+      runOptions.signal?.removeEventListener("abort", onParentAbort);
     }
   }
 
@@ -249,6 +349,9 @@ export class Agent {
       let mimicryRetries = 0;
       for (let step = 0; step < MAX_STEPS; step += 1) {
         throwIfAborted(runOptions.signal);
+        // When the transcript has outgrown the request budget, fold the older conversation into a
+        // model-written summary before this step; on failure the transient compaction below copes.
+        await this.maybeAutoSummarizeSession(runOptions);
         // Re-resolved every step so in-app tool toggles flipped mid-run take effect at the next
         // model request instead of waiting for the next prompt.
         const disabledToolNames = await resolveDisabledToolNames(runOptions.disabledToolNames);
@@ -516,6 +619,13 @@ function systemPrompt(workspaceRoot: string) {
     "Use Arivu browser tools as hidden/background tools by default. Use visible browser mode only when the user explicitly asks to see a separate browser window.",
     "For screenshot or visual browser checks, prefer Chrome DevTools MCP through mcp_list_tools and mcp_call_tool when it is configured; fall back to browser_screenshot only when Chrome tooling is unavailable.",
     "To act on a page (click, type, fill, scroll, or select options), delegate to browser_task with a clear natural-language instruction; the low-level manual browser click/type/scroll tools are currently disabled.",
+    "To load an explicit URL, use browser_open. browser_task is scoped inside page content and cannot type into browser chrome or navigate directly to a URL; when browser_open is disallowed, navigate through visible page links or Back controls instead.",
+    "For browser requests containing multiple TODOs, artifacts, or acceptance checks, maintain an explicit checklist and use as many sequential browser_task calls as needed within this run. Give each call one independently verifiable artifact or a small homogeneous batch; do not put an entire multi-page workflow into one delegated call.",
+    "After every browser_task call, inspect success, data, trace, and snapshotAfter. Continue from recoverable partial progress, but do not repeat a completed create action; inspect exact names or record ids first to avoid duplicates.",
+    "If browser_task reports popupOpened or says that a new tab/popup opened, call browser_state and continue on its activeTabId. Do not repeat the action that opened the popup.",
+    "When delegating ServiceNow custom-combobox fields, require the browser agent to click the exact suggestion and verify the displayed selection. Do not describe typing filter text as if it commits the value.",
+    "For ServiceNow related lists, delegate the actual New button (value=sysverb_new) for child records and the row's Open record link for edits. Do not substitute Preview, list context menus, filter breadcrumbs, or field labels.",
+    "Do not report a browser workflow complete from clicks or a delegated success flag alone. Verify every requested acceptance item from current browser state, and keep working through unchecked items before answering.",
     "For current browser, latest page, active tab, or user-changed browser questions, call browser_state first, then inspect the active or intended tab with browser_screenshot in the same turn before answering. Do not answer from older browser evidence.",
     "Do not use emojis in assistant replies.",
     `The active workspace root is ${workspaceRoot}.`,
@@ -822,11 +932,18 @@ function requestTokenLimitForContextWindow(contextWindowTokens: number | undefin
 }
 
 const SUMMARY_INSTRUCTION = [
-  "You are compacting a coding-assistant conversation to free up context.",
-  "Summarize the transcript below into a concise brief that preserves everything needed to continue the work:",
-  "the user's goals and constraints, decisions made, files and commands touched, current state, and any open TODOs or blockers.",
-  "Prefer a short set of bullet points over prose. Do not invent details or add commentary; only summarize what is present."
-].join(" ");
+  "You are compacting a coding-assistant conversation to free up context. Write a brief that lets the assistant continue seamlessly.",
+  "Use short bullet sections, and include a section ONLY when the transcript actually has content for it:",
+  "- Goal and constraints: what the user wants, plus any limits or preferences they stated.",
+  "- Decisions: choices already made, and rejected alternatives that must not be relitigated.",
+  "- Files and code: exact paths touched and their current state (edited, created, reverted, pending).",
+  "- Commands and results: what was run and its outcome. Keep the error text of FAILING commands verbatim; summarize passing ones in a few words.",
+  "- Browser and web: URLs or apps worked in, what was found or done there, and exact names or ids of anything created.",
+  "- Pending: open TODOs, blockers, and unverified assumptions.",
+  "- Next step: the single concrete action to take next.",
+  "Do not invent details or add commentary; only summarize what is present.",
+  'Write plain prose and bullets only — never tool-call syntax (no "Local tool request:" lines, no <tool_call> blocks).'
+].join("\n");
 
 function summaryTranscript(messages: ChatMessage[]): string {
   return messages
@@ -869,7 +986,7 @@ function toolMimicryInstruction(mimicryRetries: number): ChatMessage | undefined
   return {
     role: "system",
     content: [
-      'Your previous reply wrote a tool invocation as plain text (a "Local tool request:" block or <tool_call>/<function=...> template syntax). Text like that executes nothing and may have been truncated.',
+      'Your previous reply wrote a tool invocation as plain text (a "Local tool request:" block, <tool_call>/<function=...>, or <minimax:tool_call>/<invoke ...> template syntax). Text like that executes nothing and may have been truncated.',
       "Invoke the tool now with a real native tool call. Do not describe or narrate the call in text."
     ].join("\n")
   };

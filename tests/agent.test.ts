@@ -204,6 +204,110 @@ describe("agent", () => {
     expect(toolNames).not.toContain("web_search");
   });
 
+  it("auto-summarizes an oversized transcript before the next step and remaps task-run indexes", async () => {
+    const now = new Date().toISOString();
+    const filler = (marker: string) => `${marker} ${"x".repeat(3_000)}`;
+    const messages: ChatMessage[] = [];
+    for (let index = 0; index < 15; index += 1) {
+      messages.push({ role: "user", content: filler(`early-user-${index}`) });
+      messages.push({ role: "assistant", content: filler(`early-answer-${index}`) });
+    }
+    const lastSeededUserMessage = messages[28]!;
+    const earlyRun = createAgentTaskRun({ userMessageIndex: 0, prompt: "early", now });
+    const recentRun = createAgentTaskRun({ userMessageIndex: 28, prompt: "recent", now });
+    const session: AgentSession = {
+      id: "auto-summary-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages,
+      taskRuns: [earlyRun, recentRun],
+      createdAt: now,
+      updatedAt: now
+    };
+    const client = new ScriptedClient([
+      { message: { role: "assistant", content: "SUMMARY-BRIEF: polishing the parser; next step is running tests." } },
+      { message: { role: "assistant", content: "Continuing from the brief." } }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      contextWindowTokens: 10_000,
+      session
+    });
+
+    const result = await agent.run("wrap up");
+
+    expect(result.output).toBe("Continuing from the brief.");
+    // First request is the summary call (no tools), second is the step built on the brief.
+    expect(client.requests[0]?.tools).toHaveLength(0);
+    expect(String(client.requests[0]?.messages[0]?.content)).toContain("compacting a coding-assistant conversation");
+    const stepText = client.requests[1]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(stepText).toContain("SUMMARY-BRIEF");
+    expect(stepText).not.toContain("early-user-0");
+    const summaryIndex = session.messages.findIndex(
+      (message) => message.role === "system" && String(message.content).startsWith("Conversation summary (model-generated)")
+    );
+    expect(summaryIndex).toBeGreaterThanOrEqual(0);
+    // The early run's user message was folded into the summary; the recent run's survived by reference.
+    expect(earlyRun.userMessageIndex).toBe(summaryIndex);
+    expect(recentRun.userMessageIndex).toBe(session.messages.indexOf(lastSeededUserMessage));
+    expect(session.messages.indexOf(lastSeededUserMessage)).toBeGreaterThanOrEqual(0);
+  });
+
+  it("falls back to transient request compaction when the auto-summary call times out", async () => {
+    const now = new Date().toISOString();
+    const messages: ChatMessage[] = [];
+    for (let index = 0; index < 15; index += 1) {
+      messages.push({ role: "user", content: `early-user-${index} ${"x".repeat(3_000)}` });
+      messages.push({ role: "assistant", content: `early-answer-${index} ${"x".repeat(3_000)}` });
+    }
+    const session: AgentSession = {
+      id: "auto-summary-timeout-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages,
+      createdAt: now,
+      updatedAt: now
+    };
+    const client = new HangingSummaryClient({ message: { role: "assistant", content: "Answered without a summary." } });
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      contextWindowTokens: 10_000,
+      autoSummaryTimeoutMs: 25,
+      session
+    });
+
+    const result = await agent.run("wrap up");
+
+    expect(result.output).toBe("Answered without a summary.");
+    expect(client.requests).toHaveLength(2);
+    // The session was not summarized; the step request was still bounded by transient compaction.
+    expect(session.messages.some((message) => String(message.content).startsWith("Conversation summary (model-generated)"))).toBe(false);
+    const stepText = client.requests[1]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(stepText).toContain("Context compacted locally");
+  });
+
+  it("does not auto-summarize a transcript that fits the request budget", async () => {
+    const client = new ScriptedClient([{ message: { role: "assistant", content: "Done." } }]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      contextWindowTokens: 128_000,
+      session: createTestSession()
+    });
+
+    await agent.run("quick question");
+
+    expect(client.requests).toHaveLength(1);
+    expect(client.requests[0]?.tools.length).toBeGreaterThan(0);
+  });
+
   it("re-reads disabled tools before every step so mid-run toggles apply at the next model request", async () => {
     const client = new ScriptedClient([
       {
@@ -795,6 +899,39 @@ describe("agent", () => {
     ).not.toContain("real native tool call");
   });
 
+  it("retries a MiniMax tool invocation truncated mid-tag instead of completing the run", async () => {
+    const truncated = ["Adding the choice now.", "<minimax:tool_call>", '<invoke name="current_datetime">', '<parameter name="time'].join(
+      "\n"
+    );
+    const client = new ScriptedClient([
+      { message: { role: "assistant", content: truncated } },
+      { message: { role: "assistant", content: "", toolCalls: [{ id: "call_dt_minimax", name: "current_datetime", arguments: {} }] } },
+      { message: { role: "assistant", content: "Recovered." } }
+    ]);
+    const events: AgentRunEvent[] = [];
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir
+    });
+
+    const result = await agent.run("continue the task", {
+      onEvent: (event) => {
+        events.push(event);
+      }
+    });
+
+    expect(result.output).toBe("Recovered.");
+    expect(events.flatMap((event) => (event.type === "tool_call" ? [event.call.name] : []))).toEqual(["current_datetime"]);
+    expect(result.session.messages.some((message) => String(message.content).includes("<minimax:tool_call>"))).toBe(false);
+    const retryInstruction = client.requests[1]?.messages
+      .filter((message) => message.role === "system")
+      .map((message) => String(message.content))
+      .join("\n");
+    expect(retryInstruction).toContain("<minimax:tool_call>");
+    expect(retryInstruction).toContain("real native tool call");
+  });
+
   it("does not retry final answers that merely quote tool-call syntax inside code fences", async () => {
     const answer = "The qwen template looks like:\n```\n<tool_call>\n<function=browser_task>\n</function>\n</tool_call>\n```\nThat is all.";
     const client = new ScriptedClient([{ message: { role: "assistant", content: answer } }]);
@@ -1211,6 +1348,28 @@ class ScriptedClient implements ChatClient {
       throw new Error("No scripted response.");
     }
     return response;
+  }
+}
+
+/** Hangs the first (summary) call until its signal aborts, then answers normally. */
+class HangingSummaryClient implements ChatClient {
+  readonly requests: ChatRequest[] = [];
+
+  constructor(private readonly answer: ChatResponse) {}
+
+  async complete(request: ChatRequest, options?: { signal?: AbortSignal }): Promise<ChatResponse> {
+    this.requests.push(request);
+    if (this.requests.length === 1) {
+      return new Promise((_resolve, reject) => {
+        const abort = () => reject(new Error("Request aborted."));
+        if (options?.signal?.aborted) {
+          abort();
+          return;
+        }
+        options?.signal?.addEventListener("abort", abort, { once: true });
+      });
+    }
+    return this.answer;
   }
 }
 

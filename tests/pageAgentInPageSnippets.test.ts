@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS,
   BACKFILL_REFLECTION_SNIPPET,
@@ -105,6 +105,54 @@ describe("BACKFILL_REFLECTION_SNIPPET", () => {
     expect(() => backfill(undefined, [observation])).not.toThrow();
     expect(() => backfill(undefined, [])).not.toThrow();
     expect(observation).toEqual({ type: "observation", content: "Page navigated" });
+  });
+
+  it("stops after an uncommitted Select2 filter without choosing the option itself", async () => {
+    const stop = vi.fn(async () => undefined);
+    const input = { closest: () => ({ textContent: "Single Line Text" }) };
+    vi.stubGlobal("document", { getElementById: (id: string) => (id === "s2id_autogen6" ? input : null) });
+    vi.stubGlobal("window", {});
+    const step = {
+      type: "step",
+      stepIndex: 0,
+      reflection: {},
+      action: {
+        name: "input_text",
+        input: { index: 12, text: "Select Box" },
+        output: "✅ Input text (Select Box) into element ([12]<input type=text role=combobox id=s2id_autogen6 />)."
+      }
+    };
+
+    await backfill({ stop }, [step]);
+
+    expect(stop).toHaveBeenCalledOnce();
+    expect((globalThis as unknown as { window: { __arivuPageAgentStopReason?: string } }).window.__arivuPageAgentStopReason).toMatch(
+      /typed but not committed/
+    );
+    expect((step.reflection as { next_goal?: string }).next_goal).toContain('exact "Select Box" suggestion');
+    vi.unstubAllGlobals();
+  });
+
+  it("does not stop when a Select2 field already displays the typed option", async () => {
+    const stop = vi.fn(async () => undefined);
+    const input = { closest: () => ({ textContent: "Select Box" }) };
+    vi.stubGlobal("document", { getElementById: () => input });
+    vi.stubGlobal("window", {});
+    const step = {
+      type: "step",
+      stepIndex: 0,
+      reflection: {},
+      action: {
+        name: "input_text",
+        input: { index: 12, text: "Select Box" },
+        output: "✅ Input text into element ([12]<input role=combobox id=s2id_autogen6 />)."
+      }
+    };
+
+    await backfill({ stop }, [step]);
+
+    expect(stop).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });
 

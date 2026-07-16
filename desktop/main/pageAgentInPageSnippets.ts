@@ -23,11 +23,16 @@
 export const ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS = [
   "You are running inside Arivu's automated browser on behalf of a supervising agent.",
   "- In EVERY AgentOutput call, fill evaluation_previous_goal, memory, and next_goal. They are your only memory between steps; leaving them empty makes you lose track of the task and repeat work.",
-  '- Checkboxes: checked=true in the browser state means the box is already ON; checked=false means OFF. Clicking toggles it. Never click a checkbox to "verify" or "ensure" its state — click only when its current state differs from what the task needs.',
+  '- AgentOutput action must be a JSON object containing exactly one real action, for example {"input_text":{"index":903,"text":"requested_for"}}. Never encode action as a string, invent shorthand such as "fill 903", or return several actions at once.',
+  "- Before every indexed action, copy the index of the exact current element whose type and label match the goal. Never guess an adjacent index: a goal to click a tab must target the element labeled as that tab, never a nearby input or checkbox.",
+  '- Checkboxes: checked=true in the browser state means the box is already ON; checked=false means OFF. Target the indexed input type=checkbox itself, not its adjacent label, and verify the next browser state changed. Never click a checkbox to "verify" or "ensure" its state — click only when its current state differs from what the task needs.',
   "- Native <select> elements: use select_dropdown_option with the visible option text. Clicking a <select> element does nothing useful.",
+  "- Custom comboboxes/Select2 fields: input_text only filters the choices. Click the exact matching suggestion and verify the field's displayed value changed before moving on; typed filter text alone is not a selection.",
   "- Autocomplete/reference inputs (search-as-you-type fields): after input_text a suggestion list usually appears — the correct next action is to click the matching suggestion (new elements are marked with *[). The typed text alone does not commit the value.",
   "- Reference lookups: prefer an unlocked editable autocomplete/reference input and its suggestion list. Avoid lookup buttons that open a popup or new tab when an editable input exists; a task is bound to its current tab and cannot continue inside a child window.",
-  '- Lines like "(N more plain text lines omitted)" mean long non-interactive text was shortened to save space. All interactive [index] elements are still listed.'
+  "- ServiceNow related lists: create a child record with the actual button type=submit value=sysverb_new. To open an existing row, click its Open record link, not Preview, a filter breadcrumb, the list context menu, or a field label.",
+  '- Lines like "(N more plain text lines omitted)" mean long non-interactive text was shortened to save space. All interactive [index] elements are still listed.',
+  "- ServiceNow forms: use the labeled fields in the deepest visible form rather than similarly named navigation items in the outer shell. After Submit/Update, wait for navigation and verify the saved record or related list before calling done."
 ].join("\n");
 
 /**
@@ -71,9 +76,10 @@ export const CAP_PAGE_CONTENT_SNIPPET = String.raw`(function(content) {
 /**
  * Passed as page-agent's `onAfterStep`. Backfills reflection fields the model
  * omitted so subsequent prompts never render literal "undefined" in the agent's
- * own history (the core interpolates the fields unconditionally). The system
- * instruction above is the real fix; this removes the confusing artifact when a
- * model ignores it anyway.
+ * own history (the core interpolates the fields unconditionally). It also stops
+ * after a Select2 filter was typed but not committed, making the supervising agent
+ * issue a bounded exact-suggestion correction instead of letting later fields be
+ * saved under the old type. It never chooses or clicks the option itself.
  */
 export const BACKFILL_REFLECTION_SNIPPET = String.raw`(function(agentInstance, history) {
   var last = history && history[history.length - 1];
@@ -84,6 +90,27 @@ export const BACKFILL_REFLECTION_SNIPPET = String.raw`(function(agentInstance, h
   if (!reflection.evaluation_previous_goal) reflection.evaluation_previous_goal = "(not recorded)";
   if (!reflection.memory) reflection.memory = "(not recorded)";
   if (!reflection.next_goal) reflection.next_goal = "(not recorded)";
+  var action = last.action || {};
+  var output = String(action.output || "");
+  var typed = action.input && typeof action.input.text === "string" ? action.input.text.replace(/\s+/g, " ").trim() : "";
+  var idMatch = /\bid=(s2id_[^\s>]+)/.exec(output);
+  if (action.name === "input_text" && typed && idMatch && typeof document !== "undefined") {
+    var input = document.getElementById(idMatch[1]);
+    var container = input && typeof input.closest === "function" ? input.closest(".select2-container") : null;
+    var displayed = String((container && container.textContent) || "").replace(/\s+/g, " ").trim();
+    if (displayed.toLowerCase() !== typed.toLowerCase()) {
+      var safeTyped = typed.slice(0, 120);
+      var safeDisplayed = displayed.slice(0, 120) || "(blank)";
+      if (typeof window !== "undefined") {
+        window.__arivuPageAgentStopReason =
+          'Stopped for correction: custom combobox filter "' + safeTyped + '" was typed but not committed; the displayed value is still "' + safeDisplayed + '". Run a follow-up browser_task that clicks the exact "' + safeTyped + '" suggestion and verifies the displayed value before continuing.';
+      }
+      reflection.next_goal = 'Click the exact "' + safeTyped + '" suggestion and verify the custom combobox displays it.';
+      if (agentInstance && typeof agentInstance.stop === "function") {
+        return agentInstance.stop().catch(function() { return undefined; });
+      }
+    }
+  }
 })`;
 
 /**

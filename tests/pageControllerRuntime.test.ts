@@ -132,7 +132,7 @@ describe("pageControllerRuntime", () => {
   });
 
   it("flags the post-action snapshot as truncated when the page state is oversized", async () => {
-    const huge = "x".repeat(10_000);
+    const huge = `HEAD-CONTROLS\n${"x".repeat(30_000)}\nTAIL-FORM-CONTROLS`;
     const { contents } = createFakeContents((script) => {
       if (script.includes("getBrowserState")) {
         return { content: huge, url: "http://example.test/", title: "Example" };
@@ -142,8 +142,9 @@ describe("pageControllerRuntime", () => {
 
     const result = await freshPageSnapshot(contents);
     expect(result?.snapshotAfterTruncated).toBe(true);
-    expect(result?.snapshotAfter).toContain("...truncated...");
-    // Bounded to MAX_INDEXED_CONTENT_LENGTH (4000) plus the truncation marker — never the full 10k.
+    expect(result?.snapshotAfter).toContain("...middle truncated; final page controls preserved...");
+    expect(result?.snapshotAfter).toContain("HEAD-CONTROLS");
+    expect(result?.snapshotAfter).toContain("TAIL-FORM-CONTROLS");
     expect(result?.snapshotAfter.length ?? 0).toBeLessThan(huge.length);
   });
 

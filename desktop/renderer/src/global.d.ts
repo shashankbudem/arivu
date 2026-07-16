@@ -5,13 +5,6 @@ type ProviderToolCallingMode = "auto" | "enabled" | "disabled";
 type ProviderImageInputMode = "auto" | "enabled" | "disabled";
 type BrowserMode = "visible" | "background";
 
-type BrowserBounds = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
 type McpServerConfig = {
   command: string;
   args?: string[];
@@ -1030,8 +1023,6 @@ type DesktopApi = {
   getBrowserState(): Promise<BrowserState>;
   setBrowserPaneOpen(open: boolean): Promise<BrowserState>;
   setBrowserDefaultMode(mode: BrowserMode): Promise<BrowserState>;
-  setBrowserBounds(bounds: BrowserBounds): Promise<BrowserState>;
-  setBrowserVisibleSuppressed(suppressed: boolean): Promise<BrowserState>;
   openBrowserUrl(args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }): Promise<Record<string, unknown>>;
   browserNewTab(args?: { url?: string }): Promise<BrowserState>;
   browserSelectTab(tabId: string): Promise<BrowserState>;

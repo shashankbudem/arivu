@@ -3,8 +3,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import type { CapabilityPolicyOverrideEffect } from "./permissions/capabilityPolicy.js";
-import { normalizeWorkspaceScopePolicyRules, scopePolicyHasRules, type WorkspaceScopePolicyRules } from "./permissions/scopePolicy.js";
+import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "./permissions/scopePolicy.js";
 import { normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
 
 export { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
@@ -317,37 +316,6 @@ export function workspaceScopeRulesForRoot(config: AppConfig, workspaceRoot: str
   }
   const policy = config.workspacePolicies[path.resolve(workspaceRoot)];
   return normalizeWorkspaceScopePolicyRules(policy?.scopeRules);
-}
-
-export function updateWorkspacePolicy(
-  policies: AppConfig["workspacePolicies"],
-  workspaceRoot: string,
-  overrides: WorkspaceCapabilityPolicyOverrides,
-  scopeRules: WorkspaceCapabilityPolicyScopeRules = {}
-): AppConfig["workspacePolicies"] {
-  const root = path.resolve(workspaceRoot);
-  const normalized = normalizeWorkspacePolicyOverrides(overrides);
-  const normalizedScopeRules = normalizeWorkspaceScopePolicyRules(scopeRules);
-  const next = { ...policies };
-  if (Object.keys(normalized).length === 0 && !scopePolicyHasRules(normalizedScopeRules)) {
-    delete next[root];
-  } else {
-    next[root] = { overrides: normalized, scopeRules: normalizedScopeRules };
-  }
-  return next;
-}
-
-export function normalizeWorkspacePolicyOverrides(overrides: WorkspaceCapabilityPolicyOverrides): WorkspaceCapabilityPolicyOverrides {
-  return Object.fromEntries(
-    Object.entries(overrides).filter(
-      (entry): entry is [keyof WorkspaceCapabilityPolicyOverrides, CapabilityPolicyOverrideEffect] =>
-        isWorkspacePolicyCapability(entry[0]) && (entry[1] === "prompt" || entry[1] === "deny")
-    )
-  );
-}
-
-function isWorkspacePolicyCapability(value: string): value is keyof WorkspaceCapabilityPolicyOverrides {
-  return WorkspacePolicyCapabilitySchema.safeParse(value).success;
 }
 
 function normalizeLoadedConfig(config: AppConfig): AppConfig {

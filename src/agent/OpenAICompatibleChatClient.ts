@@ -290,6 +290,13 @@ export class OpenAICompatibleChatClient implements ChatClient {
     const citationCleaner = new StreamingCitationCleaner();
     let emitted = false;
     let usage: OpenAIUsage | undefined;
+    const streamController = new AbortController();
+    const removeStreamAbortLink = linkAbortSignal(options?.signal, streamController);
+    const streamTimeoutMs = this.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const streamTimeout = setTimeout(
+      () => streamController.abort(new Error(`Model response stream timed out after ${streamTimeoutMs}ms.`)),
+      streamTimeoutMs
+    );
 
     const processChunk = async (chunk: OpenAIStreamChunk) => {
       if (chunk.usage) {
@@ -341,14 +348,20 @@ export class OpenAICompatibleChatClient implements ChatClient {
       }
     };
 
+    const reader = response.body.getReader();
+    const cancelStreamRead = () => {
+      void reader.cancel(streamController.signal.reason).catch(() => undefined);
+    };
+    streamController.signal.addEventListener("abort", cancelStreamRead, { once: true });
     try {
       const decoder = new TextDecoder();
-      const reader = response.body.getReader();
       let buffer = "";
       let done = false;
 
       while (!done) {
+        throwIfAborted(streamController.signal);
         const read = await reader.read();
+        throwIfAborted(streamController.signal);
         done = read.done;
         buffer += decoder.decode(read.value, { stream: !done });
 
@@ -367,10 +380,17 @@ export class OpenAICompatibleChatClient implements ChatClient {
         await processSseEvent(buffer, processChunk);
       }
     } catch (error) {
+      if (streamController.signal.aborted) {
+        throw abortError(streamController.signal);
+      }
       if (!emitted) {
         return this.completeWithMode(request, initialCompletionMode(this.config), options, capture);
       }
       throw error;
+    } finally {
+      clearTimeout(streamTimeout);
+      removeStreamAbortLink();
+      streamController.signal.removeEventListener("abort", cancelStreamRead);
     }
 
     const cleanRemainder = citationCleaner.flush();

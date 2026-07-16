@@ -80,6 +80,108 @@ describe("context compaction", () => {
     expect(result.messages[3]).toEqual({ role: "assistant", content: "Recent answer" });
   });
 
+  it("collapses older re-derivable tool results to a stub instead of keeping stale copies", () => {
+    const bigFileDump = `line one of the file\n${"x".repeat(3_000)}`;
+    const messages: ChatMessage[] = [
+      { role: "user", content: "older question" },
+      { role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "read", arguments: { path: "src/app.ts" } }] },
+      { role: "tool", toolCallId: "call_1", name: "read", content: bigFileDump },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ];
+
+    const result = compactSessionMessages(messages, { recentMessageCount: 2 });
+    const summary = String(result.messages[0]?.content);
+
+    expect(result.compacted).toBe(true);
+    expect(summary).toContain("Tool read");
+    expect(summary).toContain("line one of the file");
+    expect(summary).toContain("[older output dropped: stale; re-run read for current data]");
+    const bullet = summary.split("\n").find((line) => line.includes("Tool read")) ?? "";
+    expect(bullet.length).toBeLessThan(300);
+  });
+
+  it("keeps the tail of a failed run result where the error text lives", () => {
+    const failedRun = [
+      "executionProfile: host",
+      "commandMode: argv",
+      "commandRisk: low",
+      "commandAnalysis: runs tests",
+      "exitCode: 1",
+      `stdout:\n${"noise ".repeat(600)}`,
+      "stderr:\nFAIL tests/example.test.ts > example\nAssertionError: expected 2 to be 3"
+    ].join("\n");
+    const messages: ChatMessage[] = [
+      { role: "user", content: "older question" },
+      { role: "tool", toolCallId: "call_1", name: "run", content: failedRun },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ];
+
+    const result = compactSessionMessages(messages, { recentMessageCount: 2 });
+    const summary = String(result.messages[0]?.content);
+
+    expect(summary).toContain("AssertionError: expected 2 to be 3");
+    expect(summary).toContain("[middle trimmed; failure detail below]");
+  });
+
+  it("trims a succeeded run result to its outcome head", () => {
+    const successRun = ["executionProfile: host", "commandMode: argv", "exitCode: 0", `stdout:\n${"build output ".repeat(400)}`].join("\n");
+    const messages: ChatMessage[] = [
+      { role: "user", content: "older question" },
+      { role: "tool", toolCallId: "call_1", name: "run", content: successRun },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ];
+
+    const result = compactSessionMessages(messages, { recentMessageCount: 2 });
+    const summary = String(result.messages[0]?.content);
+
+    expect(summary).toContain("[older output trimmed: run succeeded]");
+    const bullet = summary.split("\n").find((line) => line.includes("Tool run")) ?? "";
+    expect(bullet.length).toBeLessThan(350);
+  });
+
+  it("keeps failed browser_task detail but trims successful ones", () => {
+    const failedTask = JSON.stringify({
+      success: false,
+      stopReason: "error",
+      data: `${"step noise ".repeat(300)}`,
+      error: "The submit button never became clickable"
+    });
+    const successTask = JSON.stringify({ success: true, data: `created the record ${"detail ".repeat(300)}` });
+    const messages: ChatMessage[] = [
+      { role: "user", content: "older question" },
+      { role: "tool", toolCallId: "call_1", name: "browser_task", content: failedTask },
+      { role: "tool", toolCallId: "call_2", name: "browser_task", content: successTask },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ];
+
+    const result = compactSessionMessages(messages, { recentMessageCount: 2 });
+    const summary = String(result.messages[0]?.content);
+
+    expect(summary).toContain("The submit button never became clickable");
+    expect(summary).toContain("[older output trimmed: browser_task succeeded]");
+  });
+
+  it("applies the default truncation to tool results with no retention rule", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: "older question" },
+      { role: "tool", toolCallId: "call_1", name: "mcp_call_tool", content: `alpha ${"payload ".repeat(300)}omega` },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ];
+
+    const result = compactSessionMessages(messages, { recentMessageCount: 2, entryCharacterLimit: 500 });
+    const summary = String(result.messages[0]?.content);
+    const bullet = summary.split("\n").find((line) => line.includes("Tool mcp_call_tool")) ?? "";
+
+    expect(bullet).toContain("alpha");
+    expect(bullet).not.toContain("omega");
+    expect(bullet.length).toBeLessThan(600);
+  });
+
   it("compacts oversized model requests even when the recent message window is small", () => {
     const messages: ChatMessage[] = [
       { role: "system", content: "system prompt" },

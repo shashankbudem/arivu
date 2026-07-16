@@ -15,6 +15,7 @@ type ProxyRegistration = {
   expiresAt: number;
   requestCount: number;
   diagnostics: BrowserTaskProxyDiagnostic[];
+  unsupportedParams: Set<string>;
 };
 
 export type BrowserTaskProxyDiagnostic = {
@@ -38,10 +39,10 @@ const MAX_DIAGNOSTICS_PER_TASK = 50;
 
 // The in-page page-agent client retries rate limits with a flat 100ms delay, which just re-hits
 // the limit and burns its whole retry budget (seen killing a real run: "InvokeError: Rate limit
-// exceeded"). The proxy retries upstream 429/503 here instead, honoring Retry-After, so the page
+// exceeded"). The proxy retries transient upstream failures here instead, honoring Retry-After, so the page
 // only ever sees a rate-limit error after proper backoff has already been exhausted. The
 // browser_task wall-clock budget still bounds the total wait.
-const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 503]);
+const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 500, 502, 503, 504]);
 const UPSTREAM_RETRY_LIMIT = 3;
 const UPSTREAM_RETRY_BASE_DELAY_MS = 1_000;
 const UPSTREAM_RETRY_MAX_DELAY_MS = 30_000;
@@ -124,7 +125,8 @@ export async function registerBrowserTaskProxyEntry(options: {
     realApiKey: options.realApiKey,
     expiresAt: Date.now() + options.ttlMs,
     requestCount: 0,
-    diagnostics: []
+    diagnostics: [],
+    unsupportedParams: new Set()
   });
   return { token, proxyBaseUrl: `http://127.0.0.1:${port}` };
 }
@@ -227,6 +229,9 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
         return;
       }
     }
+    if (requestBody && registration.unsupportedParams.size > 0) {
+      requestBody = stripNamedParams(requestBody, registration.unsupportedParams).body ?? requestBody;
+    }
 
     let upstreamResponse: Response;
     let consumedErrorBody: string | undefined;
@@ -246,6 +251,9 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
         const stripped = stripUnsupportedParams(consumedErrorBody, requestBody);
         if (stripped.body) {
           strippedParams = stripped.params;
+          for (const param of strippedParams) {
+            registration.unsupportedParams.add(param);
+          }
           requestBody = stripped.body;
           paramStripRetries += 1;
         }
@@ -365,6 +373,10 @@ function stripUnsupportedParams(errorBody: string, requestBody: Buffer): { param
   if (named.length === 0) {
     return { params: [] };
   }
+  return stripNamedParams(requestBody, named);
+}
+
+function stripNamedParams(requestBody: Buffer, names: Iterable<string>): { params: string[]; body?: Buffer } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(requestBody.toString("utf8"));
@@ -375,7 +387,7 @@ function stripUnsupportedParams(errorBody: string, requestBody: Buffer): { param
     return { params: [] };
   }
   const record = parsed as Record<string, unknown>;
-  const present = named.filter((name) => name in record);
+  const present = Array.from(names).filter((name) => name in record);
   if (present.length === 0) {
     return { params: [] };
   }

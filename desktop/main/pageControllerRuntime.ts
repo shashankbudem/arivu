@@ -12,7 +12,9 @@ import type { WebContents } from "electron";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const PAGE_CONTROLLER_BUNDLE_PATH = path.resolve(currentDir, "../pageControllerBundle/page-controller.iife.js");
-const MAX_INDEXED_CONTENT_LENGTH = 4_000;
+const MAX_INDEXED_CONTENT_LENGTH = 16_000;
+const INDEXED_CONTENT_HEAD_LENGTH = 2_000;
+const INDEXED_CONTENT_TRUNCATION_MARKER = "\n...middle truncated; final page controls preserved...\n";
 
 let cachedBundleText: string | undefined;
 
@@ -127,7 +129,11 @@ export function boundIndexedContent(content: string): { text: string; truncated:
   if (content.length <= MAX_INDEXED_CONTENT_LENGTH) {
     return { text: content, truncated: false };
   }
-  return { text: `${content.slice(0, MAX_INDEXED_CONTENT_LENGTH)}\n...truncated...`, truncated: true };
+  const tailLength = MAX_INDEXED_CONTENT_LENGTH - INDEXED_CONTENT_HEAD_LENGTH - INDEXED_CONTENT_TRUNCATION_MARKER.length;
+  return {
+    text: `${content.slice(0, INDEXED_CONTENT_HEAD_LENGTH)}${INDEXED_CONTENT_TRUNCATION_MARKER}${content.slice(-tailLength)}`,
+    truncated: true
+  };
 }
 
 /**

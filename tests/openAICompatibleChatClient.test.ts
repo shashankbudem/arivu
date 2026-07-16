@@ -968,6 +968,69 @@ describe("OpenAICompatibleChatClient", () => {
     expect(response?.usage).toEqual({ promptTokens: 40, completionTokens: 10, totalTokens: 50 });
   });
 
+  it("times out and cancels a silent response stream after headers arrive", async () => {
+    let cancelled = false;
+    vi.stubGlobal("fetch", async () => {
+      const body = new ReadableStream({
+        cancel: () => {
+          cancelled = true;
+        }
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" }
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      requestTimeoutMs: 25,
+      maxRequestRetries: 0
+    });
+
+    await expect(client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow(
+      "Model response stream timed out after 25ms."
+    );
+    expect(cancelled).toBe(true);
+  });
+
+  it("cancels a response stream when the caller aborts after headers arrive", async () => {
+    let cancelled = false;
+    let calls = 0;
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      const body = new ReadableStream({
+        cancel: () => {
+          cancelled = true;
+        }
+      });
+      setTimeout(() => controller.abort(new Error("user stopped")), 5);
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" }
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      requestTimeoutMs: 1_000,
+      maxRequestRetries: 0
+    });
+
+    await expect(
+      client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] }, undefined, { signal: controller.signal })
+    ).rejects.toThrow("user stopped");
+    expect(calls).toBe(1);
+    expect(cancelled).toBe(true);
+  });
+
   it("does not send a request when the signal is already aborted", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);

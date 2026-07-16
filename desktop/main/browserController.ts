@@ -24,10 +24,10 @@ import { appDataDir } from "../../src/config.js";
 import {
   normalizeBrowserMode,
   normalizeBrowserUrl,
-  type BrowserBounds,
   type BrowserConsoleEntry,
   type BrowserMode,
   type BrowserState,
+  type BrowserTabState,
   type BrowserTargetState,
   type BrowserTaskModelConfig,
   type BrowserToolController,
@@ -149,13 +149,11 @@ const MAX_CONSOLE_LOGS = 300;
 const MAX_VISUAL_ELEMENTS_JSON_CHARS = 48_000;
 const DEFAULT_BACKGROUND_BOUNDS = { width: 1280, height: 800 };
 const DEFAULT_VISIBLE_CHROME_HEIGHT = 80;
-const VISIBLE_CHROME_HEIGHT = DEFAULT_VISIBLE_CHROME_HEIGHT;
 const VISIBLE_START_PAGE_TITLE = "Arivu Browser";
 const VISIBLE_START_PAGE_PREFIX = "data:text/html;charset=utf-8,";
 const VISIBLE_START_PAGE_MARKER = "arivu-browser-start";
 const VISIBLE_LOAD_ERROR_PAGE_MARKER = "arivu-browser-load-error";
 const VISIBLE_SETTINGS_PAGE_MARKER = "arivu-browser-settings";
-const VISIBLE_SHELL_PAGE_MARKER = "arivu-browser-shell";
 const VISIBLE_SHELL_COMMAND_PROTOCOL = "arivu-browser:";
 const BROWSER_PARTITION = "persist:arivu-browser";
 const BROWSER_SESSION_FILE = "browser-session.json";
@@ -268,16 +266,6 @@ export class DesktopBrowserController implements BrowserToolController {
     this.defaultMode = mode;
     this.rememberMode(mode);
     this.emitState();
-    return this.getState();
-  }
-
-  setVisibleBounds(bounds: BrowserBounds) {
-    void bounds;
-    return this.getState();
-  }
-
-  setVisibleSuppressed(suppressed: boolean) {
-    void suppressed;
     return this.getState();
   }
 
@@ -404,7 +392,7 @@ export class DesktopBrowserController implements BrowserToolController {
     assertPageLoaded(contents, mode);
     this.prepareForScreenshot(mode, contents);
     const preInspectPaint = await waitForFreshPaint(contents);
-    const visual = (await this.inspectPage(mode, contents, 6_000)) as BrowserToolResult & { viewport?: BrowserViewport };
+    const visual = (await this.inspectPage(contents, 6_000)) as BrowserToolResult & { viewport?: BrowserViewport };
     this.prepareForScreenshot(mode, contents);
     const preCapturePaint = await waitForFreshPaint(contents);
     const image = await this.captureTargetPage(mode, contents);
@@ -440,7 +428,7 @@ export class DesktopBrowserController implements BrowserToolController {
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
     assertPageLoaded(contents, mode);
     const maxLength = clampNumber(args.maxLength ?? 12_000, 1_000, 20_000);
-    const snapshot = await this.inspectPage(mode, contents, maxLength);
+    const snapshot = await this.inspectPage(contents, maxLength);
     const indexed = await indexedPageState(contents).catch(() => undefined);
     if (indexed) {
       const bounded = boundIndexedContent(indexed.content);
@@ -661,8 +649,7 @@ export class DesktopBrowserController implements BrowserToolController {
     this.activeMode = mode;
   }
 
-  private async inspectPage(mode: BrowserMode, contents: WebContents, maxLength: number): Promise<BrowserToolResult> {
-    void mode;
+  private async inspectPage(contents: WebContents, maxLength: number): Promise<BrowserToolResult> {
     const frames = frameList(contents);
     const frameResults: BrowserFrameInspection[] = await Promise.all(
       frames.slice(0, 30).map(async (frame, index) => {
@@ -2915,7 +2902,7 @@ export class DesktopBrowserController implements BrowserToolController {
 }
 
 function visibleShellPageUrl() {
-  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(visibleShellPageHtml())}`;
+  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(codexBrowserShellHtml({ defaultChromeHeight: DEFAULT_VISIBLE_CHROME_HEIGHT }))}`;
 }
 
 function isVisibleShellPageUrl(url: string) {
@@ -2966,365 +2953,6 @@ function isVisibleSettingsCommandUrl(url: string) {
       "settings-open-extension"
     ].includes(command.action)
   );
-}
-
-function visibleShellPageHtml() {
-  if (process.env.ARIVU_LEGACY_BROWSER_SHELL !== "1") {
-    return codexBrowserShellHtml({ defaultChromeHeight: DEFAULT_VISIBLE_CHROME_HEIGHT });
-  }
-  return `<!doctype html>
-<html lang="en" data-${VISIBLE_SHELL_PAGE_MARKER}>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'">
-  <title>${VISIBLE_START_PAGE_TITLE}</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #11100f;
-      --panel: #171716;
-      --panel-2: #1f2220;
-      --line: #302f2b;
-      --text: #f4f0e7;
-      --muted: #a7a199;
-      --accent: #47c797;
-      --accent-strong: #73e0b8;
-      --error: #ff8b7f;
-    }
-    * {
-      box-sizing: border-box;
-    }
-    body {
-      margin: 0;
-      overflow: hidden;
-      background: var(--bg);
-      color: var(--text);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      user-select: none;
-    }
-    .browser-shell {
-      height: ${VISIBLE_CHROME_HEIGHT}px;
-      display: grid;
-      grid-template-rows: 42px 54px;
-      border-bottom: 1px solid var(--line);
-      background: linear-gradient(180deg, #131615 0%, #101211 100%);
-    }
-    .tabs {
-      min-width: 0;
-      display: flex;
-      align-items: end;
-      gap: 4px;
-      padding: 7px 10px 0;
-      overflow: hidden;
-    }
-    .tab {
-      min-width: 104px;
-      max-width: 230px;
-      height: 34px;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 24px;
-      align-items: center;
-      gap: 4px;
-      border: 1px solid transparent;
-      border-bottom: 0;
-      border-radius: 8px 8px 0 0;
-      padding: 0 3px 0 11px;
-      background: transparent;
-      color: var(--muted);
-      cursor: pointer;
-    }
-    .tab.active {
-      background: var(--panel);
-      border-color: var(--line);
-      color: var(--text);
-    }
-    .tab-title {
-      overflow: hidden;
-      white-space: nowrap;
-      text-overflow: ellipsis;
-      font-size: 13px;
-      font-weight: 650;
-    }
-    .tab.loading .tab-title::before {
-      content: "";
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      margin-right: 7px;
-      border-radius: 999px;
-      background: var(--accent);
-      vertical-align: 1px;
-    }
-    .tab-close,
-    .new-tab,
-    .nav-button {
-      display: grid;
-      place-items: center;
-      border: 1px solid transparent;
-      background: transparent;
-      color: var(--muted);
-      cursor: pointer;
-      font: inherit;
-    }
-    .tab-close {
-      width: 22px;
-      height: 22px;
-      border-radius: 6px;
-      font-size: 18px;
-      line-height: 1;
-    }
-    .tab-close:hover,
-    .new-tab:hover,
-    .nav-button:hover:not(:disabled) {
-      border-color: var(--line);
-      background: var(--panel-2);
-      color: var(--text);
-    }
-    .new-tab {
-      width: 32px;
-      height: 32px;
-      margin-bottom: 2px;
-      border-radius: 8px;
-      font-size: 22px;
-      line-height: 1;
-    }
-    .controls {
-      display: grid;
-      grid-template-columns: repeat(3, 34px) minmax(0, 1fr);
-      gap: 10px;
-      align-items: center;
-      padding: 9px 12px 10px;
-      background: var(--panel);
-    }
-    .nav-button {
-      width: 34px;
-      height: 34px;
-      border-radius: 8px;
-      font-size: 17px;
-    }
-    .nav-button svg {
-      width: 16px;
-      height: 16px;
-      display: block;
-      stroke: currentColor;
-    }
-    .nav-button:disabled {
-      opacity: 0.34;
-      cursor: default;
-    }
-    form {
-      min-width: 0;
-    }
-    input {
-      width: 100%;
-      min-width: 0;
-      height: 36px;
-      border: 1px solid var(--line);
-      outline: 0;
-      border-radius: 10px;
-      padding: 0 13px;
-      background: #100f0e;
-      color: var(--text);
-      font: inherit;
-      font-size: 13px;
-      user-select: text;
-    }
-    input::placeholder {
-      color: var(--muted);
-    }
-    input:focus {
-      box-shadow: 0 0 0 2px rgba(71, 199, 151, 0.45);
-    }
-    .error {
-      position: fixed;
-      right: 12px;
-      top: 104px;
-      max-width: min(520px, calc(100vw - 24px));
-      display: none;
-      padding: 10px 12px;
-      border: 1px solid rgba(255, 139, 127, 0.45);
-      border-radius: 8px;
-      background: rgba(36, 18, 17, 0.96);
-      color: var(--error);
-      font-size: 13px;
-      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.35);
-      z-index: 10;
-    }
-    .error.visible {
-      display: block;
-    }
-    @media (max-width: 720px) {
-      .tab {
-        min-width: 72px;
-        max-width: 160px;
-      }
-      .controls {
-        grid-template-columns: repeat(3, 32px) minmax(0, 1fr);
-        gap: 7px;
-      }
-    }
-  </style>
-</head>
-<body>
-  <main class="browser-shell">
-    <div class="tabs" id="tabs" role="tablist" aria-label="Browser tabs"></div>
-    <div class="controls">
-      <button class="nav-button" id="back" type="button" aria-label="Back">&lt;</button>
-      <button class="nav-button" id="forward" type="button" aria-label="Forward">&gt;</button>
-      <button class="nav-button" id="reload" type="button" aria-label="Reload"></button>
-      <form id="address-form" autocomplete="off">
-        <input id="address" name="url" type="text" inputmode="url" spellcheck="false" placeholder="Search or enter URL">
-      </form>
-    </div>
-  </main>
-  <div class="error" id="error" role="status" aria-live="polite"></div>
-  <script>
-    let browserState = null;
-    const tabs = document.getElementById("tabs");
-    const addressForm = document.getElementById("address-form");
-    const address = document.getElementById("address");
-    const error = document.getElementById("error");
-    const back = document.getElementById("back");
-    const forward = document.getElementById("forward");
-    const reload = document.getElementById("reload");
-    const reloadIcon = '<svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
-    const stopIcon = '<svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>';
-
-    window.__ARIVU_BROWSER_APPLY_STATE__ = (state) => {
-      browserState = state;
-      render(state);
-    };
-
-    addressForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-      hideError();
-      const rawValue = address.value.trim();
-      if (!rawValue) {
-        showError("Enter a URL.");
-        address.focus();
-        return;
-      }
-      try {
-        const nextUrl = normalizeUrl(rawValue);
-        send("navigate", { id: browserState?.activeTabId || "", url: nextUrl });
-      } catch {
-        showError("Enter a valid URL.");
-        address.focus();
-      }
-    });
-
-    back.addEventListener("click", () => send("back", { id: browserState?.activeTabId || "" }));
-    forward.addEventListener("click", () => send("forward", { id: browserState?.activeTabId || "" }));
-    reload.addEventListener("click", () => send(browserState?.loading ? "stop" : "reload", { id: browserState?.activeTabId || "" }));
-
-    function render(state) {
-      const tabItems = Array.isArray(state.tabs) ? state.tabs : [];
-      tabs.textContent = "";
-      for (const tab of tabItems) {
-        const tabButton = document.createElement("button");
-        tabButton.type = "button";
-        tabButton.className = ["tab", tab.id === state.activeTabId ? "active" : "", tab.loading ? "loading" : ""].filter(Boolean).join(" ");
-        tabButton.setAttribute("role", "tab");
-        tabButton.setAttribute("aria-selected", tab.id === state.activeTabId ? "true" : "false");
-        tabButton.title = tab.title || tab.url || "New tab";
-        tabButton.addEventListener("click", () => send("select-tab", { id: tab.id }));
-        const title = document.createElement("span");
-        title.className = "tab-title";
-        title.textContent = tab.title || hostLabel(tab.url) || "New tab";
-        const close = document.createElement("button");
-        close.type = "button";
-        close.className = "tab-close";
-        close.setAttribute("aria-label", "Close tab");
-        close.textContent = "x";
-        close.addEventListener("click", (event) => {
-          event.stopPropagation();
-          send("close-tab", { id: tab.id });
-        });
-        tabButton.append(title, close);
-        tabs.append(tabButton);
-      }
-      const newTab = document.createElement("button");
-      newTab.type = "button";
-      newTab.className = "new-tab";
-      newTab.setAttribute("aria-label", "New tab");
-      newTab.textContent = "+";
-      newTab.addEventListener("click", () => send("new-tab"));
-      tabs.append(newTab);
-      if (document.activeElement !== address) {
-        address.value = state.url || "";
-      }
-      back.disabled = !state.canGoBack;
-      forward.disabled = !state.canGoForward;
-      reload.innerHTML = state.loading ? stopIcon : reloadIcon;
-      reload.setAttribute("aria-label", state.loading ? "Stop" : "Reload");
-      reload.title = state.loading ? "Stop" : "Reload";
-      if (state.lastError) {
-        showError(state.lastError);
-      } else {
-        hideError();
-      }
-    }
-
-    function send(action, params = {}) {
-      const url = new URL("arivu-browser://" + action);
-      for (const [key, value] of Object.entries(params)) {
-        if (value) {
-          url.searchParams.set(key, value);
-        }
-      }
-      window.location.href = url.href;
-    }
-
-    function showError(message) {
-      error.textContent = message;
-      error.classList.add("visible");
-    }
-
-    function hideError() {
-      error.textContent = "";
-      error.classList.remove("visible");
-    }
-
-    function hostLabel(value) {
-      if (!value) {
-        return "";
-      }
-      try {
-        return new URL(value).hostname || value;
-      } catch {
-        return value;
-      }
-    }
-
-    function normalizeUrl(value) {
-      if (/^https?:\\/\\//i.test(value) || /^file:\\/\\//i.test(value)) {
-        return assertAllowedUrl(value).href;
-      }
-      if (/^(localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?(\\/.*)?$/i.test(value)) {
-        return assertAllowedUrl("http://" + value).href;
-      }
-      if (/^[\\w.-]+:\\d+(\\/.*)?$/i.test(value)) {
-        return assertAllowedUrl("http://" + value).href;
-      }
-      if (/^[a-z0-9.-]+\\.[a-z]{2,}(:\\d+)?(\\/.*)?$/i.test(value)) {
-        return assertAllowedUrl("https://" + value).href;
-      }
-      return googleSearchUrl(value);
-    }
-    function googleSearchUrl(value) {
-      return "https://www.google.com/search?q=" + encodeURIComponent(value);
-    }
-    function assertAllowedUrl(value) {
-      const url = new URL(value);
-      if (!["http:", "https:", "file:"].includes(url.protocol)) {
-        throw new Error("Unsupported protocol");
-      }
-      return url;
-    }
-  </script>
-</body>
-</html>`;
 }
 
 function visibleStartPageUrl() {
@@ -3672,10 +3300,9 @@ function initialTarget(mode: BrowserMode, id: string = mode): BrowserTargetRecor
   };
 }
 
-function publicTarget(target: BrowserTargetRecord): BrowserTargetState {
+function publicTab(target: BrowserTargetRecord): BrowserTabState {
   return {
     id: target.id,
-    mode: target.mode,
     url: target.url,
     title: target.title,
     ...(target.faviconUrl ? { faviconUrl: target.faviconUrl } : {}),
@@ -3690,21 +3317,8 @@ function publicTarget(target: BrowserTargetRecord): BrowserTargetState {
   };
 }
 
-function publicTab(target: BrowserTabRecord) {
-  return {
-    id: target.id,
-    url: target.url,
-    title: target.title,
-    ...(target.faviconUrl ? { faviconUrl: target.faviconUrl } : {}),
-    loading: target.loading,
-    canGoBack: target.canGoBack,
-    canGoForward: target.canGoForward,
-    owner: target.owner,
-    ...(target.lastError ? { lastError: target.lastError } : {}),
-    ...(target.lastSnapshotAt ? { lastSnapshotAt: target.lastSnapshotAt } : {}),
-    ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
-    ...(target.lastScreenshotPath ? { lastScreenshotPath: target.lastScreenshotPath } : {})
-  };
+function publicTarget(target: BrowserTargetRecord): BrowserTargetState {
+  return { ...publicTab(target), mode: target.mode };
 }
 
 function humanizePermission(permission: string): string {

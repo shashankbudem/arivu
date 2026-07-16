@@ -121,9 +121,10 @@ button {
 }
 
 .sidebar-collapse-button {
+  flex: 0 0 auto;
   width: 32px;
   height: 32px;
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .sidebar.collapsed .brand-row {
@@ -133,11 +134,13 @@ button {
 }
 
 .sidebar.collapsed .brand-mark {
+  order: 1;
   width: 42px;
   height: 42px;
 }
 
 .sidebar.collapsed .sidebar-collapse-button {
+  order: 2;
   margin-left: 0;
 }
 
@@ -5023,13 +5026,166 @@ body.is-resizing .panel-resize-handle::after {
 
 .settings-panel {
   min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.settings-header {
+  min-width: 0;
+  min-height: 92px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 24px;
+  border-bottom: 1px solid #34302a;
+  background: rgb(13 17 18 / 0.48);
+}
+
+.settings-header-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.settings-header-copy > span {
+  color: #8f887e;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.settings-header-copy h2,
+.settings-header-copy p {
+  margin: 0;
+}
+
+.settings-header-copy h2 {
+  color: #efede8;
+  font-family: "Avenir Next", "SF Pro Display", "Segoe UI Variable", ui-sans-serif, system-ui, sans-serif;
+  font-size: 19px;
+  line-height: 1.2;
+}
+
+.settings-header-copy p {
+  overflow: hidden;
+  color: #9c968d;
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-header .save-button {
+  flex: 0 0 auto;
+  padding: 0 15px;
+}
+
+.settings-layout {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+}
+
+.settings-navigation {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  padding: 14px 10px;
+  border-right: 1px solid #34302a;
+  background: rgb(8 12 13 / 0.34);
+}
+
+.settings-navigation-item {
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #a9a298;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-navigation-item:hover,
+.settings-navigation-item:focus-visible {
+  border-color: rgb(52 48 42 / 0.78);
+  background: rgb(255 255 255 / 0.035);
+  color: #efede8;
+}
+
+.settings-navigation-item.active {
+  border-color: rgb(43 191 159 / 0.38);
+  background: rgb(43 191 159 / 0.1);
+  color: #d8fff7;
+}
+
+.settings-navigation-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #34302a;
+  border-radius: 7px;
+  color: #9c968d;
+}
+
+.settings-navigation-item.active .settings-navigation-icon {
+  border-color: rgb(43 191 159 / 0.42);
+  color: #64dcc2;
+}
+
+.settings-navigation-copy {
+  min-width: 0;
+  display: grid;
+}
+
+.settings-navigation-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-navigation-chevron {
+  opacity: 0;
+}
+
+.settings-navigation-item.active .settings-navigation-chevron {
+  opacity: 1;
+}
+
+.settings-content {
+  min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 24px;
+  padding: 24px 28px 40px;
+}
+
+.settings-content > [hidden],
+.settings-content [hidden] {
+  display: none !important;
+}
+
+.settings-save-error {
+  max-width: 1080px;
+  margin-bottom: 16px;
 }
 
 .settings-grid {
-  max-width: 760px;
+  max-width: 820px;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 18px;
@@ -5139,6 +5295,13 @@ body.is-resizing .panel-resize-handle::after {
   margin-top: 22px;
   padding-top: 18px;
   border-top: 1px solid #34302a;
+}
+
+.settings-content > .skills-settings-section {
+  max-width: 1080px;
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .settings-section-heading {
@@ -5953,6 +6116,44 @@ html .secondary-command.danger-command:focus-visible {
   margin-top: 22px;
 }
 
+.settings-diagnostics {
+  max-width: 820px;
+  display: grid;
+  gap: 16px;
+}
+
+.settings-diagnostics-action {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #34302a;
+}
+
+.settings-diagnostics-action > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.settings-diagnostics-action strong,
+.settings-diagnostics-action p {
+  margin: 0;
+}
+
+.settings-diagnostics-action strong {
+  color: #efede8;
+  font-size: 13px;
+}
+
+.settings-diagnostics-action p {
+  color: #9c968d;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .save-button {
   padding: 0 16px;
 }
@@ -5963,8 +6164,8 @@ html .secondary-command.danger-command:focus-visible {
 }
 
 .doctor-report {
-  max-width: 760px;
-  margin-top: 22px;
+  max-width: 820px;
+  margin-top: 0;
   border: 1px solid #34302a;
   border-radius: 8px;
   background: var(--sample-card-gradient);
@@ -6857,12 +7058,54 @@ html[data-theme="light"] .history-panel {
 html[data-theme="light"] .sidebar,
 html[data-theme="light"] .conversation-panel,
 html[data-theme="light"] .topbar,
+html[data-theme="light"] .settings-header,
+html[data-theme="light"] .settings-navigation,
 html[data-theme="light"] .panel-heading,
 html[data-theme="light"] .composer,
 html[data-theme="light"] .doctor-report-heading,
 html[data-theme="light"] .side-diff-title,
 html[data-theme="light"] .side-diff-heading,
 html[data-theme="light"] .side-diff-cell.old {
+  border-color: #d9d0c3;
+}
+
+html[data-theme="light"] .settings-header {
+  background: rgb(255 251 245 / 0.72);
+}
+
+html[data-theme="light"] .settings-navigation {
+  background: rgb(226 218 207 / 0.24);
+}
+
+html[data-theme="light"] .settings-header-copy h2,
+html[data-theme="light"] .settings-diagnostics-action strong {
+  color: #211b14;
+}
+
+html[data-theme="light"] .settings-header-copy > span,
+html[data-theme="light"] .settings-header-copy p,
+html[data-theme="light"] .settings-diagnostics-action p {
+  color: #756b5e;
+}
+
+html[data-theme="light"] .settings-navigation-item {
+  color: #62584c;
+}
+
+html[data-theme="light"] .settings-navigation-item:hover,
+html[data-theme="light"] .settings-navigation-item:focus-visible {
+  border-color: #d9d0c3;
+  background: rgb(255 255 255 / 0.72);
+  color: #211b14;
+}
+
+html[data-theme="light"] .settings-navigation-item.active {
+  border-color: rgb(25 142 118 / 0.38);
+  background: rgb(25 142 118 / 0.1);
+  color: #155f50;
+}
+
+html[data-theme="light"] .settings-navigation-icon {
   border-color: #d9d0c3;
 }
 
@@ -9314,6 +9557,22 @@ html[data-ui-concept="graphite"] .user-message pre {
 
   .topbar-actions {
     flex-wrap: wrap;
+  }
+
+  .settings-header {
+    padding-inline: 20px;
+  }
+
+  .settings-layout {
+    grid-template-columns: 176px minmax(0, 1fr);
+  }
+
+  .settings-navigation-item {
+    min-height: 46px;
+  }
+
+  .settings-content {
+    padding: 20px 20px 32px;
   }
 
   .workspace-grid {

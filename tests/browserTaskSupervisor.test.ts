@@ -147,6 +147,45 @@ describe("browserTaskProxy", () => {
     }
   });
 
+  it("retries transient gateway failures before surfacing them to the page", async () => {
+    let hits = 0;
+    const flaky = http.createServer((req, res) => {
+      req.resume();
+      hits += 1;
+      if (hits < 3) {
+        res.writeHead(hits === 1 ? 502 : 504, { "content-type": "application/json", "retry-after": "0" });
+        res.end(JSON.stringify({ error: "temporary gateway failure" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => flaky.listen(0, "127.0.0.1", resolve));
+    const flakyUrl = `http://127.0.0.1:${(flaky.address() as AddressInfo).port}`;
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: flakyUrl,
+        realApiKey: REAL_API_KEY,
+        ttlMs: 30_000
+      });
+      const response = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ hello: "world" })
+      });
+      expect(response.status).toBe(200);
+      expect(hits).toBe(3);
+      expect(getBrowserTaskProxyDiagnostics(token)).toMatchObject([
+        { status: 502, willRetry: true },
+        { status: 504, willRetry: true },
+        { status: 200, outcome: "success" }
+      ]);
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      flaky.close();
+    }
+  });
+
   it("strips parameters a gateway rejects as unsupported and retries the request without them", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const picky = http.createServer((req, res) => {
@@ -182,6 +221,14 @@ describe("browserTaskProxy", () => {
       expect(bodies[0]).toHaveProperty("thinking");
       expect(bodies[1]).not.toHaveProperty("thinking");
       expect(bodies[1]).toHaveProperty("model", "deepseek-v4-flash");
+      const cachedResponse = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "deepseek-v4-flash", thinking: { type: "disabled" }, messages: [] })
+      });
+      expect(cachedResponse.status).toBe(200);
+      expect(bodies).toHaveLength(3);
+      expect(bodies[2]).not.toHaveProperty("thinking");
       const diagnostics = getBrowserTaskProxyDiagnostics(token);
       expect(diagnostics[0]).toMatchObject({ status: 400, willRetry: true });
       expect(String(diagnostics[0].message)).toMatch(/rejected parameter\(s\) thinking/);
@@ -335,15 +382,17 @@ describe("circuitFailureFromDiagnostics", () => {
 });
 
 describe("runBrowserTask", () => {
-  function createFakeContents(onScript: (script: string) => unknown) {
+  function createFakeContents(onScript: (script: string) => unknown, progress?: () => unknown) {
     const scripts: string[] = [];
     const navigateListeners = new Set<() => void>();
     const destroyedListeners = new Set<() => void>();
+    const popupListeners = new Set<() => void>();
     const contents = {
+      getURL: () => "https://example.test/",
       executeJavaScript: async (script: string) => {
         scripts.push(script);
         if (script.includes("window.__arivuPageAgentTask.history")) {
-          return null;
+          return progress?.() ?? null;
         }
         return onScript(script);
       },
@@ -353,6 +402,9 @@ describe("runBrowserTask", () => {
         }
         if (event === "destroyed") {
           destroyedListeners.add(listener);
+        }
+        if (event === "did-create-window") {
+          popupListeners.add(listener);
         }
         return contents;
       },
@@ -369,6 +421,9 @@ describe("runBrowserTask", () => {
         if (event === "destroyed") {
           destroyedListeners.delete(listener);
         }
+        if (event === "did-create-window") {
+          popupListeners.delete(listener);
+        }
         return contents;
       }
     } as unknown as WebContents;
@@ -383,7 +438,12 @@ describe("runBrowserTask", () => {
         listener();
       }
     };
-    return { contents, scripts, fireNavigate, fireDestroyed };
+    const firePopup = () => {
+      for (const listener of popupListeners) {
+        listener();
+      }
+    };
+    return { contents, scripts, fireNavigate, fireDestroyed, firePopup };
   }
 
   function mainTaskScriptCount(scripts: string[]) {
@@ -405,7 +465,7 @@ describe("runBrowserTask", () => {
     const result = await runBrowserTask(
       contents,
       { instruction: "fill out the form" },
-      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY, contextWindowTokens: 1_000_000 }
     );
 
     expect(result.success).toBe(true);
@@ -414,6 +474,7 @@ describe("runBrowserTask", () => {
     expect(result.browserTaskModel).toMatchObject({
       model: "gpt-4.1",
       endpoint: "https://api.openai.com/v1",
+      contextWindowTokens: 1_000_000,
       maxSteps: 100,
       timeoutMs: 4_200_000,
       stepDelayMs: 35_000
@@ -535,6 +596,28 @@ describe("runBrowserTask", () => {
     expect(result.data).toMatch(/expected result of selecting a value in a popup lookup/i);
   }, 10_000);
 
+  it("stops the parent task and returns an active-tab handoff when an action opens a popup", async () => {
+    const { contents, scripts, firePopup } = createFakeContents((script) => {
+      if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+        return true;
+      }
+      return new Promise(() => undefined);
+    });
+
+    const runPromise = runBrowserTask(
+      contents,
+      { instruction: "open the category lookup" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+    setTimeout(firePopup, 10);
+    const result = await runPromise;
+
+    expect(result).toMatchObject({ success: false, stopped: false, popupOpened: true });
+    expect(result.data).toMatch(/continue .* on the active tab/i);
+    expect(result.data).toMatch(/do not repeat the popup-opening action/i);
+    expect(scripts.some((script) => script.includes("typeof window.__arivuPageAgentTask.stop"))).toBe(true);
+  }, 10_000);
+
   it("resumes on a fresh document after a cross-document navigation destroys the context", async () => {
     let attempt = 0;
     const { contents, scripts, fireNavigate } = createFakeContents((script) => {
@@ -559,6 +642,103 @@ describe("runBrowserTask", () => {
     expect(result.data).toBe("Done on page two.");
     expect(result.navigationCount).toBe(1);
     expect(mainTaskScriptCount(scripts)).toBe(2);
+  });
+
+  it("resumes when navigation leaves the old executeJavaScript promise pending", async () => {
+    let attempt = 0;
+    const fake = createFakeContents((script) => {
+      if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+        return true;
+      }
+      attempt += 1;
+      if (attempt === 1) {
+        setTimeout(fake.fireNavigate, 0);
+        return new Promise(() => undefined);
+      }
+      return { ok: true, success: true, data: "Resumed without waiting for the old context.", stepCount: 1 };
+    });
+
+    const result = await runBrowserTask(
+      fake.contents,
+      { instruction: "clear the list filter and continue" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      data: "Resumed without waiting for the old context.",
+      navigationCount: 1
+    });
+    expect(mainTaskScriptCount(fake.scripts)).toBe(2);
+    const resumedScript = fake.scripts.filter((script) => script.includes("new lib.PageAgentCore"))[1];
+    expect(resumedScript).toContain("Navigation checkpoint 1");
+    expect(resumedScript).toContain("Current page URL: https://example.test/");
+    expect(resumedScript).toContain("READ-ONLY CHECKPOINT");
+    expect(resumedScript).toContain("choose done in your next response");
+    expect(resumedScript).toContain("use snapshotAfter to decide whether any follow-up browser_task is needed");
+    expect(resumedScript).not.toContain("clear the list filter and continue");
+  });
+
+  it("uses a read-only checkpoint after navigation even when earlier steps were recorded", async () => {
+    let attempt = 0;
+    const fake = createFakeContents(
+      (script) => {
+        if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+          return true;
+        }
+        attempt += 1;
+        if (attempt === 1) {
+          // Let the supervisor's one-second progress poll capture the four completed steps
+          // before the document is replaced.
+          setTimeout(fake.fireNavigate, 1_100);
+          return new Promise(() => undefined);
+        }
+        return { ok: true, success: true, data: "Read-only checkpoint complete.", stepCount: 1 };
+      },
+      () => ({ stepCount: 4, lastAction: "click_element_by_index", lastGoal: "submit the variable form" })
+    );
+
+    const result = await runBrowserTask(
+      fake.contents,
+      { instruction: "fill fields and submit the variable" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    expect(result).toMatchObject({ success: true, navigationCount: 1, stepCount: 5 });
+    const resumedScript = fake.scripts.filter((script) => script.includes("new lib.PageAgentCore"))[1];
+    expect(resumedScript).toContain("Navigation checkpoint 1");
+    expect(resumedScript).toContain("recorded 4 completed step(s)");
+    expect(resumedScript).toContain("READ-ONLY CHECKPOINT");
+    expect(resumedScript).toContain("Do not attempt or repeat any action from the previous document");
+    expect(resumedScript).not.toContain("fill fields and submit the variable");
+  });
+
+  it("waits for the destination document to settle before re-injecting", async () => {
+    let attempt = 0;
+    let loading = true;
+    const fake = createFakeContents(() => {
+      attempt += 1;
+      if (attempt === 1) {
+        setTimeout(() => {
+          fake.fireNavigate();
+          setTimeout(() => {
+            loading = false;
+          }, 120);
+        }, 0);
+        return new Promise(() => undefined);
+      }
+      expect(loading).toBe(false);
+      return { ok: true, success: true, data: "Injected after load settled.", stepCount: 1 };
+    });
+    Object.assign(fake.contents, { isLoading: () => loading });
+
+    const result = await runBrowserTask(
+      fake.contents,
+      { instruction: "continue after the destination loads" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    expect(result).toMatchObject({ success: true, navigationCount: 1, data: "Injected after load settled." });
   });
 
   it("gives up after exceeding the navigation-resume cap instead of looping forever", async () => {

@@ -1,12 +1,5 @@
 export type BrowserMode = "visible" | "background";
 
-export type BrowserBounds = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
 export type BrowserState = {
   paneOpen: boolean;
   defaultMode: BrowserMode;
@@ -65,6 +58,8 @@ export type BrowserTaskModelConfig = {
   apiKey?: string;
   providerId?: string;
   providerName?: string;
+  /** Native per-model input context window, resolved independently from the chat model. */
+  contextWindowTokens?: number;
   maxSteps?: number;
   stepDelayMs?: number;
 };

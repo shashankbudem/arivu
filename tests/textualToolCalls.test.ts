@@ -101,6 +101,44 @@ describe("recoverTextualToolCalls", () => {
     expect(String(result.content)).toBe("Checking state first.");
   });
 
+  it("recovers a complete MiniMax invoke block", () => {
+    const content = [
+      "Adding the first choice now.",
+      "<minimax:tool_call>",
+      '<invoke name="browser_task">',
+      '<parameter name="instruction">Fill in the choice:\n1. Text: Full Time\n2. Value: Full Time\n3. Submit</parameter>',
+      '<parameter name="mode">visible</parameter>',
+      '<parameter name="tabId">tab-1</parameter>',
+      "</invoke>",
+      "</minimax:tool_call>"
+    ].join("\n");
+
+    const result = recoverTextualToolCalls(assistant(content), TOOLS);
+
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls?.[0]).toMatchObject({
+      name: "browser_task",
+      arguments: { instruction: "Fill in the choice:\n1. Text: Full Time\n2. Value: Full Time\n3. Submit", mode: "visible", tabId: "tab-1" }
+    });
+    expect(String(result.content)).toBe("Adding the first choice now.");
+  });
+
+  it("does not recover a MiniMax invoke block truncated mid-parameter", () => {
+    const content = [
+      "Adding the first choice now.",
+      "<minimax:tool_call>",
+      '<invoke name="browser_task">',
+      '<parameter name="instruction">Fill in Full Time</parameter>',
+      '<parameter name="mode">visible</parameter>',
+      '<parameter name="tabId'
+    ].join("\n");
+
+    const result = recoverTextualToolCalls(assistant(content), TOOLS);
+
+    expect(result.toolCalls).toBeUndefined();
+    expect(result.content).toBe(content);
+  });
+
   it("ignores unknown tool names, malformed JSON, and messages that already have native calls", () => {
     const unknownTool = recoverTextualToolCalls(assistant('Local tool request:\n- not_a_tool: {"x": 1}'), TOOLS);
     expect(unknownTool.toolCalls).toBeUndefined();

@@ -100,7 +100,7 @@ import {
   type BrowserTaskModelConfigProfile,
   type LlmProviderProfile
 } from "../../src/config.js";
-import { resolveBrowserTaskModel } from "../../src/agent/browserTaskModel.js";
+import { resolveBrowserTaskContextWindowTokens, resolveBrowserTaskModel } from "../../src/agent/browserTaskModel.js";
 import { ModelCatalogStore } from "../../src/models/ModelCatalogStore.js";
 import { resolveContextWindowTokens } from "../../src/models/contextResolver.js";
 import { recordContextFromRuntime } from "../../src/models/syncModelCatalog.js";
@@ -118,7 +118,7 @@ import { SessionStore } from "../../src/sessions/SessionStore.js";
 import { detachSessionFromProject, sessionBelongsToProject, sessionProjectRoot } from "../../src/sessions/sessionList.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
-import type { BrowserBounds, BrowserMode, BrowserState, BrowserTaskModelConfig } from "../../src/tools/browserControl.js";
+import type { BrowserMode, BrowserState, BrowserTaskModelConfig } from "../../src/tools/browserControl.js";
 import { detectWorkspace, type WorkspaceInfo } from "../../src/workspace.js";
 import { DesktopBrowserController } from "./browserController.js";
 import { isExternalHttpUrl, isTrustedAppNavigationUrl } from "./navigationSafety.js";
@@ -1445,6 +1445,22 @@ class DesktopController {
     });
     const browserTaskModel = resolveBrowserTaskModel(baseConfig, modelSelection);
     const config = configForModelSelection(baseConfig, modelSelection);
+    const modelCatalog = await modelCatalogStore.load();
+    // effectiveConfig resolved the window for the pre-selection model; auto routing may have just
+    // picked a different one, so re-resolve for the model that will actually serve this run.
+    config.contextWindowTokens = resolveContextWindowTokens(
+      baseConfig,
+      { model: modelSelection.model, baseUrl: modelSelection.baseUrl },
+      modelCatalog
+    );
+    // browser_task can use a different provider/model from the chat turn. Resolve its native window
+    // separately so it never inherits the base model's context cap (or the provider-wide fallback).
+    browserTaskModel.contextWindowTokens = resolveBrowserTaskContextWindowTokens(
+      baseConfig,
+      modelSelection,
+      browserTaskModel,
+      modelCatalog
+    );
     const now = new Date().toISOString();
     const session = applyModelSelectionToSession(
       originSession
@@ -3340,39 +3356,57 @@ async function prepareDesktopSmokeView(window: BrowserWindow) {
     return;
   }
   await window.webContents.executeJavaScript(`document.querySelector('button[aria-label="Settings"]')?.click()`, true);
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < 5_000) {
-    const ready = await window.webContents
-      .executeJavaScript(`Boolean(document.querySelector(".settings-panel .policy-table"))`, true)
-      .catch(() => false);
-    if (ready) {
-      await window.webContents.executeJavaScript(
-        `document.querySelector(".policy-settings-section")?.scrollIntoView({ block: "start" })`,
-        true
-      );
-      if (smokeView === "browser-task-model") {
-        const opened = await window.webContents.executeJavaScript(
-          `(() => {
-            const button = document.querySelector('button[aria-label^="Choose browser task model"]');
-            if (!(button instanceof HTMLButtonElement)) return false;
-            button.click();
-            return true;
-          })()`,
-          true
-        );
-        if (!opened) {
-          throw new Error("desktop smoke: browser-task model picker trigger was not found");
-        }
-        const dialogOpened = await waitForRendererSelector(window, '.model-dialog[aria-label="Select browser task model"]', 2_000);
-        if (!dialogOpened) {
-          throw new Error("desktop smoke: browser-task model picker did not open");
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 120));
+  if (!(await waitForRendererSelector(window, '.settings-navigation [data-settings-section="models"]', 5_000))) {
+    throw new Error("desktop smoke: sectioned settings navigation did not render");
   }
+
+  const sectionIds = ["models", "browser", "integrations", "permissions", "skills", "worktrees", "diagnostics"];
+  for (const sectionId of sectionIds) {
+    const switched = await window.webContents.executeJavaScript(
+      `(() => {
+        const button = document.querySelector(${JSON.stringify(`[data-settings-section="${sectionId}"]`)});
+        if (!(button instanceof HTMLButtonElement)) return false;
+        button.click();
+        return true;
+      })()`,
+      true
+    );
+    if (!switched || !(await waitForRendererSelector(window, `[data-settings-panel="${sectionId}"]:not([hidden])`, 2_000))) {
+      throw new Error(`desktop smoke: settings section did not activate: ${sectionId}`);
+    }
+  }
+
+  const requestedSection = smokeView === "browser-task-model" ? "browser" : (appEnv("DESKTOP_SMOKE_SETTINGS_SECTION") ?? "models");
+  if (!sectionIds.includes(requestedSection)) {
+    throw new Error(`desktop smoke: unknown settings section: ${requestedSection}`);
+  }
+  await window.webContents.executeJavaScript(
+    `document.querySelector(${JSON.stringify(`[data-settings-section="${requestedSection}"]`)})?.click()`,
+    true
+  );
+  if (!(await waitForRendererSelector(window, `[data-settings-panel="${requestedSection}"]:not([hidden])`, 2_000))) {
+    throw new Error(`desktop smoke: requested settings section did not activate: ${requestedSection}`);
+  }
+
+  if (smokeView === "browser-task-model") {
+    const opened = await window.webContents.executeJavaScript(
+      `(() => {
+        const button = document.querySelector('button[aria-label^="Choose browser task model"]');
+        if (!(button instanceof HTMLButtonElement)) return false;
+        button.click();
+        return true;
+      })()`,
+      true
+    );
+    if (!opened) {
+      throw new Error("desktop smoke: browser-task model picker trigger was not found");
+    }
+    const dialogOpened = await waitForRendererSelector(window, '.model-dialog[aria-label="Select browser task model"]', 2_000);
+    if (!dialogOpened) {
+      throw new Error("desktop smoke: browser-task model picker did not open");
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 350));
 }
 
 async function waitForRendererSelector(window: BrowserWindow, selector: string, timeoutMs: number) {
@@ -3769,10 +3803,6 @@ handleFromMain("agent:openTaskRunEvidence", (_event, input: OpenTaskRunEvidenceI
 handleFromMain("browser:getState", () => browserController.getState());
 handleFromMain("browser:setPaneOpen", (_event, open: boolean) => browserController.setPaneOpen(Boolean(open)));
 handleFromMain("browser:setDefaultMode", (_event, mode: BrowserMode) => browserController.setDefaultMode(mode));
-handleFromMain("browser:setBounds", (_event, bounds: BrowserBounds) => browserController.setVisibleBounds(bounds));
-handleFromMain("browser:setVisibleSuppressed", (_event, suppressed: boolean) =>
-  browserController.setVisibleSuppressed(Boolean(suppressed))
-);
 handleFromMain("browser:open", (_event, args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }) =>
   browserController.open(args)
 );
