@@ -299,7 +299,8 @@ export class TuiApp {
         (message) => this.confirm(message),
         workspacePolicyOverridesForRoot(this.config, this.workspace.root),
         undefined,
-        scopePolicyRules
+        scopePolicyRules,
+        this.workspace.root
       ),
       cwd: this.cwd,
       model: this.config.model,

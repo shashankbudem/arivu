@@ -44,6 +44,47 @@ describe("patch tool", () => {
     await expect(readFile(file, "utf8")).resolves.toBe("new\n");
   });
 
+  it("does not add a trailing newline when the new side ends without one", async () => {
+    const file = path.join(tempDir, "a.txt");
+    await writeFile(file, "old", "utf8");
+
+    await applyUnifiedDiff(
+      ["--- a/a.txt", "+++ b/a.txt", "@@ -1 +1 @@", "-old", "\\ No newline at end of file", "+new", "\\ No newline at end of file", ""].join(
+        "\n"
+      ),
+      (requested) => path.join(tempDir, requested),
+      async () => {}
+    );
+
+    await expect(readFile(file, "utf8")).resolves.toBe("new");
+  });
+
+  it("preserves a newline-free file when editing a line that is not at the end", async () => {
+    const file = path.join(tempDir, "a.txt");
+    await writeFile(file, "a\nb\nc", "utf8");
+
+    await applyUnifiedDiff(
+      ["--- a/a.txt", "+++ b/a.txt", "@@ -2 +2 @@", "-b", "+B", ""].join("\n"),
+      (requested) => path.join(tempDir, requested),
+      async () => {}
+    );
+
+    await expect(readFile(file, "utf8")).resolves.toBe("a\nB\nc");
+  });
+
+  it("keeps the trailing newline when editing the final line of a newline-terminated file", async () => {
+    const file = path.join(tempDir, "a.txt");
+    await writeFile(file, "a\nb\n", "utf8");
+
+    await applyUnifiedDiff(
+      ["--- a/a.txt", "+++ b/a.txt", "@@ -2 +2 @@", "-b", "+B", ""].join("\n"),
+      (requested) => path.join(tempDir, requested),
+      async () => {}
+    );
+
+    await expect(readFile(file, "utf8")).resolves.toBe("a\nB\n");
+  });
+
   it("rejects mismatched context", async () => {
     const file = path.join(tempDir, "a.txt");
     await writeFile(file, "different\n", "utf8");

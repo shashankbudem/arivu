@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "../src/config.js";
 import { ModelCatalogStore } from "../src/models/ModelCatalogStore.js";
-import { isActiveSweepDay, runModelCatalogSync } from "../src/models/syncModelCatalog.js";
+import { isActiveSweepDay, recordContextFact, runModelCatalogSync } from "../src/models/syncModelCatalog.js";
 import type { FetchLike } from "../src/models/probe.js";
 
 let tempDir: string;
@@ -294,5 +294,39 @@ describe("runModelCatalogSync", () => {
     expect(summary.added).toEqual(["vendor/a"]);
     expect(summary.dryRun).toBe(true);
     expect((await store.load()).providers).toEqual({});
+  });
+});
+
+describe("recordContextFact", () => {
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "arivu-sync-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("persists a manual probe result with its source and emits an event", async () => {
+    const store = new ModelCatalogStore(tempDir);
+    const selection = { baseUrl: BASE_URL, model: "vendor/permissive" };
+    await recordContextFact(store, selection, { tokens: 196_608, source: "probe_oversized" }, TUESDAY);
+
+    const entry = (await store.load()).providers[BASE_URL].models["vendor/permissive"];
+    expect(entry.context).toEqual({ tokens: 196_608, source: "probe_oversized", observedAt: TUESDAY.toISOString() });
+    expect(await store.readEvents()).toContainEqual(
+      expect.objectContaining({ type: "context_resolved", model: "vendor/permissive", tokens: 196_608, source: "probe_oversized" })
+    );
+  });
+
+  it("records a change event when a probe corrects an earlier window", async () => {
+    const store = new ModelCatalogStore(tempDir);
+    const selection = { baseUrl: BASE_URL, model: "vendor/permissive" };
+    await recordContextFact(store, selection, { tokens: 131_072, source: "probe_max_tokens" }, MONDAY);
+    await recordContextFact(store, selection, { tokens: 196_608, source: "probe_oversized" }, TUESDAY);
+
+    expect((await store.load()).providers[BASE_URL].models["vendor/permissive"].context?.tokens).toBe(196_608);
+    expect(await store.readEvents()).toContainEqual(
+      expect.objectContaining({ type: "context_changed", from: 131_072, to: 196_608, source: "probe_oversized" })
+    );
   });
 });

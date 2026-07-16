@@ -1,6 +1,13 @@
 import { normalizeCapabilityBaseUrl, resolveModelListEndpoint, type AppConfig } from "../config.js";
 import { pruneTombstones, ModelCatalogStore } from "./ModelCatalogStore.js";
-import { emptyCatalog, type CatalogEvent, type CatalogModel, type ModelCatalog, type ModelStatus } from "./modelCatalogSchema.js";
+import {
+  emptyCatalog,
+  type CatalogEvent,
+  type CatalogModel,
+  type ModelCatalog,
+  type ModelContextFact,
+  type ModelStatus
+} from "./modelCatalogSchema.js";
 import { listProviderModels, probeContextViaMaxTokens, probeStatus, type FetchLike } from "./probe.js";
 
 /**
@@ -233,11 +240,11 @@ function shouldProbeContext(entry: CatalogModel, reprobe: boolean): boolean {
   return (entry.contextProbe?.attempts ?? 0) < MAX_CONTEXT_PROBE_ATTEMPTS;
 }
 
-/** Records a context window learned from a live request failure. Costs no extra API calls. */
-export async function recordContextFromRuntime(
+/** Records a context window learned outside the scheduled sync (runtime overflow, manual probe). */
+export async function recordContextFact(
   store: ModelCatalogStore,
   selection: { baseUrl: string; model: string },
-  tokens: number,
+  fact: { tokens: number; source: ModelContextFact["source"] },
   now: Date = new Date()
 ): Promise<void> {
   const catalog: ModelCatalog = structuredClone(await store.load());
@@ -246,7 +253,7 @@ export async function recordContextFromRuntime(
   const provider = catalog.providers[key] ?? { baseUrl: selection.baseUrl, providerIds: [], models: {} };
   catalog.providers[key] = provider;
   const previous = provider.models[selection.model]?.context?.tokens;
-  if (previous === tokens) {
+  if (previous === fact.tokens) {
     return;
   }
   provider.models[selection.model] = {
@@ -257,23 +264,33 @@ export async function recordContextFromRuntime(
       firstSeenAt: nowIso,
       lastSeenAt: nowIso
     }),
-    context: { tokens, source: "runtime_error", observedAt: nowIso }
+    context: { tokens: fact.tokens, source: fact.source, observedAt: nowIso }
   };
   catalog.updatedAt = nowIso;
   await store.save(catalog);
   await store.appendEvents([
     previous === undefined
-      ? { at: nowIso, type: "context_resolved", baseUrl: selection.baseUrl, model: selection.model, tokens, source: "runtime_error" }
+      ? { at: nowIso, type: "context_resolved", baseUrl: selection.baseUrl, model: selection.model, tokens: fact.tokens, source: fact.source }
       : {
           at: nowIso,
           type: "context_changed",
           baseUrl: selection.baseUrl,
           model: selection.model,
           from: previous,
-          to: tokens,
-          source: "runtime_error"
+          to: fact.tokens,
+          source: fact.source
         }
   ]);
+}
+
+/** Records a context window learned from a live request failure. Costs no extra API calls. */
+export async function recordContextFromRuntime(
+  store: ModelCatalogStore,
+  selection: { baseUrl: string; model: string },
+  tokens: number,
+  now: Date = new Date()
+): Promise<void> {
+  await recordContextFact(store, selection, { tokens, source: "runtime_error" }, now);
 }
 
 function emptyStatusCounts(): Record<ModelStatus, number> {

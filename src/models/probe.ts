@@ -83,7 +83,10 @@ export async function probeContextViaOversizedInput(
   approxTokens = 550_000,
   timeoutMs = 120_000
 ): Promise<ContextProbeResult> {
-  const blob = "word ".repeat(Math.ceil(approxTokens * 0.8));
+  // "word " tokenizes to ~1.0 token on every backend measured (usage.prompt_tokens ≈ repetitions on
+  // minimax, nemotron, deepseek), so repeat exactly approxTokens times — an undershoot silently turns
+  // "window larger than N" into a false acceptance for windows just under N.
+  const blob = "word ".repeat(Math.ceil(approxTokens));
   try {
     const response = await postChat(target, { messages: [{ role: "user", content: blob }], max_tokens: 16 }, fetcher, timeoutMs);
     const body = await response.text().catch(() => "");

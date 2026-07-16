@@ -15,6 +15,34 @@ import { reviewForFileWrite, reviewForPatch } from "./directEditReview.js";
 import { FileStateTracker } from "./fileState.js";
 import { callMcpTool, listMcpTools } from "./mcp.js";
 import { applyUnifiedDiff, changedPathsFromDiff, summarizePatch } from "./patch.js";
+import {
+  buildFfmpegPlan,
+  FFMPEG_DEFAULT_TIMEOUT_MS,
+  FFMPEG_MAX_CRF,
+  FFMPEG_MAX_OUTPUT_CHARS,
+  FFMPEG_MAX_TIMEOUT_MS,
+  FFMPEG_MIN_CRF,
+  FFMPEG_MIN_TIMEOUT_MS,
+  FFMPEG_OPERATIONS,
+  FFMPEG_OPERATIONS_REQUIRING_INPUT,
+  type FfmpegOperation
+} from "./ffmpeg.js";
+import {
+  analyzeAppleScriptSource,
+  APPLESCRIPT_COMPILED_EXTENSIONS,
+  APPLESCRIPT_DEFAULT_TIMEOUT_MS,
+  APPLESCRIPT_LANGUAGES,
+  APPLESCRIPT_MAX_OUTPUT_CHARS,
+  APPLESCRIPT_MAX_TIMEOUT_MS,
+  APPLESCRIPT_MIN_TIMEOUT_MS,
+  APPLESCRIPT_OPERATIONS,
+  APPLESCRIPT_RUNNABLE_EXTENSIONS,
+  buildAppleScriptPlan,
+  isPlainTextAppleScriptFile,
+  maxAppleScriptRisk,
+  type AppleScriptLanguage,
+  type AppleScriptOperation
+} from "./applescript.js";
 import { assertRealPathInsideWorkspace, resolveSafeWorkspacePath } from "./pathSafety.js";
 import { formatWebSearchResults, searchWeb } from "./webSearch.js";
 import {
@@ -1047,6 +1075,303 @@ export function createToolRegistry(context: ToolContext) {
 
   register({
     schema: {
+      name: "ffmpeg",
+      description:
+        "Inspect or transform local media files with FFmpeg. operation=probe returns JSON metadata (format, duration, streams) via ffprobe; convert transcodes to the output's container/codecs; extract_audio pulls the audio track; trim cuts a start/end or start/duration span; thumbnail saves a single frame; custom runs raw ffmpeg args. input and output are workspace-relative paths and must stay inside the workspace. An existing output file is not overwritten unless overwrite is true. Requires FFmpeg (ffmpeg and ffprobe) installed on the host PATH; it runs a local process and needs command permission.",
+      parameters: objectSchema({
+        operation: {
+          type: "string",
+          enum: [...FFMPEG_OPERATIONS],
+          description: "probe, convert, extract_audio, trim, thumbnail, or custom."
+        },
+        input: {
+          type: "string",
+          description: "Workspace-relative path to the input media file. Required for every operation except custom."
+        },
+        output: {
+          type: "string",
+          description: "Workspace-relative path to write. Required for convert, extract_audio, trim, and thumbnail."
+        },
+        overwrite: { type: "boolean", description: "Replace the output file if it already exists. Defaults to false." },
+        start: { type: "string", description: "Start time for trim/thumbnail, in seconds or HH:MM:SS[.ms]." },
+        end: { type: "string", description: "End time for trim, in seconds or HH:MM:SS[.ms]. Mutually exclusive with duration." },
+        duration: { type: "string", description: "Clip length for trim, in seconds or HH:MM:SS[.ms]. Mutually exclusive with end." },
+        videoCodec: { type: "string", description: "Video codec for convert, e.g. libx264, vp9, or copy." },
+        audioCodec: { type: "string", description: "Audio codec for convert/extract_audio, e.g. aac, libmp3lame, or copy." },
+        audioBitrate: { type: "string", description: "Audio bitrate for convert/extract_audio, e.g. 192k." },
+        scale: { type: "string", description: "Scale filter for convert/thumbnail as WIDTH:HEIGHT, e.g. 1280:720 or -1:720." },
+        crf: {
+          type: "number",
+          description: `Constant rate factor for convert, from ${FFMPEG_MIN_CRF} to ${FFMPEG_MAX_CRF} (lower is higher quality).`
+        },
+        args: { type: "array", items: { type: "string" }, description: "Raw ffmpeg arguments for operation=custom." },
+        timeoutMs: {
+          type: "number",
+          description: `Wall-clock timeout in milliseconds, from ${FFMPEG_MIN_TIMEOUT_MS} to ${FFMPEG_MAX_TIMEOUT_MS}. Defaults to ${FFMPEG_DEFAULT_TIMEOUT_MS}.`
+        }
+      })
+    },
+    async execute(args) {
+      const parsed = z
+        .object({
+          operation: z.enum([...FFMPEG_OPERATIONS] as [FfmpegOperation, ...FfmpegOperation[]]),
+          input: z.string().trim().min(1).optional(),
+          output: z.string().trim().min(1).optional(),
+          overwrite: z.boolean().default(false),
+          start: z.string().trim().min(1).optional(),
+          end: z.string().trim().min(1).optional(),
+          duration: z.string().trim().min(1).optional(),
+          videoCodec: z.string().trim().min(1).optional(),
+          audioCodec: z.string().trim().min(1).optional(),
+          audioBitrate: z.string().trim().min(1).optional(),
+          scale: z.string().trim().min(1).optional(),
+          crf: z.number().int().min(FFMPEG_MIN_CRF).max(FFMPEG_MAX_CRF).optional(),
+          args: z.array(z.string()).optional(),
+          timeoutMs: z.number().int().min(FFMPEG_MIN_TIMEOUT_MS).max(FFMPEG_MAX_TIMEOUT_MS).default(FFMPEG_DEFAULT_TIMEOUT_MS)
+        })
+        .parse(args);
+
+      const input = parsed.input ? await resolveSafeWorkspacePath(context.workspaceRoot, parsed.input) : undefined;
+      const output = parsed.output ? await resolveSafeWorkspacePath(context.workspaceRoot, parsed.output) : undefined;
+
+      if (input && FFMPEG_OPERATIONS_REQUIRING_INPUT.includes(parsed.operation) && !(await exists(input))) {
+        throw new Error(`Input not found: ${parsed.input}`);
+      }
+
+      const plan = buildFfmpegPlan(parsed.operation, {
+        input,
+        output,
+        overwrite: parsed.overwrite,
+        start: parsed.start,
+        end: parsed.end,
+        duration: parsed.duration,
+        videoCodec: parsed.videoCodec,
+        audioCodec: parsed.audioCodec,
+        audioBitrate: parsed.audioBitrate,
+        scale: parsed.scale,
+        crf: parsed.crf,
+        args: parsed.args
+      });
+
+      if (plan.writesOutput && output && !parsed.overwrite && (await exists(output))) {
+        throw new Error(`Refusing to write ${parsed.output}; file already exists. Set overwrite to replace it.`);
+      }
+
+      const commandText = formatCommandVector([plan.bin, ...plan.argv]);
+      const analysis = analyzeArgvCommand(plan.bin, plan.argv);
+      await context.approvals.require({
+        type: "shell",
+        command: commandText,
+        commandMode: "argv",
+        cwd: context.workspaceRoot,
+        destructive: analysis.destructive || plan.writesOutput,
+        risk: analysis.risk,
+        analysisSummary: analysis.summary,
+        analysisReasons: analysis.reasons
+      });
+
+      // Record the output up front so a run's ffmpeg-created files can be undone like other direct edits.
+      if (plan.writesOutput && output) {
+        await context.checkpoint?.record(output);
+      }
+
+      let result;
+      try {
+        result = await execa(plan.bin, plan.argv, {
+          cwd: context.workspaceRoot,
+          shell: false,
+          reject: false,
+          timeout: parsed.timeoutMs,
+          cancelSignal: context.signal,
+          stdin: "ignore"
+        });
+      } catch (error) {
+        if (looksLikeMissingBinary(error)) {
+          throw new Error(`${plan.bin} is not installed or not on PATH. Install FFmpeg (https://ffmpeg.org/) to use this tool.`);
+        }
+        throw error;
+      }
+      // Some execa versions resolve (rather than throw) a spawn failure when reject is false.
+      if (looksLikeMissingBinary(result)) {
+        throw new Error(`${plan.bin} is not installed or not on PATH. Install FFmpeg (https://ffmpeg.org/) to use this tool.`);
+      }
+
+      const stdout = String(result.stdout ?? "");
+      const stderr = truncateCommandStream(String(result.stderr ?? ""));
+
+      if (parsed.operation === "probe") {
+        if (result.exitCode !== 0) {
+          return ["ffprobe failed", result.timedOut ? "timedOut: true" : "", stderr ? `stderr:\n${stderr}` : ""].filter(Boolean).join("\n");
+        }
+        return truncateToolOutput(prettyJson(stdout), FFMPEG_MAX_OUTPUT_CHARS);
+      }
+
+      return [
+        `operation: ${parsed.operation}`,
+        output ? `output: ${parsed.output}` : "",
+        `command: ${commandText}`,
+        result.timedOut ? "timedOut: true" : "",
+        result.signal ? `signal: ${result.signal}` : "",
+        result.exitCode === undefined ? "" : `exitCode: ${result.exitCode}`,
+        `status: ${result.exitCode === 0 ? "success" : "failed"}`,
+        stderr ? `stderr:\n${stderr}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+  });
+
+  register({
+    schema: {
+      name: "applescript",
+      description:
+        "Create, compile, and run AppleScript or JXA (JavaScript for Automation) on macOS. operation=run executes inline source via osascript and returns the script's result on stdout; run_file executes a workspace script file (.applescript, .scpt, .scptd, or .js); compile builds a compiled script with osacompile from inline source or a workspace file into a .scpt, .scptd, or .app output. Trailing args are delivered to the script's `on run argv` handler. macOS only; the first time a script controls an app, macOS shows the user a one-time Automation permission prompt, and System Events UI scripting needs Accessibility permission.",
+      parameters: objectSchema({
+        operation: {
+          type: "string",
+          enum: [...APPLESCRIPT_OPERATIONS],
+          description: "run, run_file, or compile."
+        },
+        source: {
+          type: "string",
+          description: "Inline script source. Required for run; one of source or file is required for compile."
+        },
+        file: {
+          type: "string",
+          description: `Workspace-relative script path (${APPLESCRIPT_RUNNABLE_EXTENSIONS.join(", ")}). Required for run_file; alternative to source for compile.`
+        },
+        output: {
+          type: "string",
+          description: `Workspace-relative compiled output path (${APPLESCRIPT_COMPILED_EXTENSIONS.join(", ")}). Required for compile.`
+        },
+        overwrite: { type: "boolean", description: "Replace the compile output if it already exists. Defaults to false." },
+        language: {
+          type: "string",
+          enum: [...APPLESCRIPT_LANGUAGES],
+          description: "Script language. Defaults to applescript for inline source; inferred from the file when omitted for run_file."
+        },
+        args: {
+          type: "array",
+          items: { type: "string" },
+          description: "Arguments passed to the script's run handler (on run argv / function run(argv))."
+        },
+        timeoutMs: {
+          type: "number",
+          description: `Wall-clock timeout in milliseconds, from ${APPLESCRIPT_MIN_TIMEOUT_MS} to ${APPLESCRIPT_MAX_TIMEOUT_MS}. Defaults to ${APPLESCRIPT_DEFAULT_TIMEOUT_MS}.`
+        }
+      })
+    },
+    async execute(args) {
+      const parsed = z
+        .object({
+          operation: z.enum([...APPLESCRIPT_OPERATIONS] as [AppleScriptOperation, ...AppleScriptOperation[]]),
+          source: z.string().trim().min(1).optional(),
+          file: z.string().trim().min(1).optional(),
+          output: z.string().trim().min(1).optional(),
+          overwrite: z.boolean().default(false),
+          language: z.enum([...APPLESCRIPT_LANGUAGES] as [AppleScriptLanguage, ...AppleScriptLanguage[]]).optional(),
+          args: z.array(z.string()).optional(),
+          timeoutMs: z
+            .number()
+            .int()
+            .min(APPLESCRIPT_MIN_TIMEOUT_MS)
+            .max(APPLESCRIPT_MAX_TIMEOUT_MS)
+            .default(APPLESCRIPT_DEFAULT_TIMEOUT_MS)
+        })
+        .parse(args);
+
+      if (process.platform !== "darwin") {
+        throw new Error("The applescript tool requires macOS; osascript is not available on this platform.");
+      }
+
+      const file = parsed.file ? await resolveSafeWorkspacePath(context.workspaceRoot, parsed.file) : undefined;
+      const output = parsed.output ? await resolveSafeWorkspacePath(context.workspaceRoot, parsed.output) : undefined;
+      if (file && !(await exists(file))) {
+        throw new Error(`Script not found: ${parsed.file}`);
+      }
+
+      const plan = buildAppleScriptPlan(parsed.operation, {
+        source: parsed.source,
+        file,
+        output,
+        language: parsed.language,
+        scriptArgs: parsed.args
+      });
+
+      if (plan.writesOutput && output && !parsed.overwrite && (await exists(output))) {
+        throw new Error(`Refusing to write ${parsed.output}; file already exists. Set overwrite to replace it.`);
+      }
+
+      const commandText = formatCommandVector([plan.bin, ...plan.argv]);
+      const argvAnalysis = analyzeArgvCommand(plan.bin, plan.argv);
+      const executesScript = parsed.operation !== "compile";
+      // For execution, audit the script text (reading plain-text run_file sources); a compiled
+      // .scpt/.scptd cannot be audited and is flagged as such. Compiling only writes a workspace
+      // file, so it keeps the plain argv analysis plus the writesOutput gate like ffmpeg.
+      let scriptAnalysis;
+      if (executesScript) {
+        let auditSource = parsed.source;
+        if (auditSource === undefined && file && isPlainTextAppleScriptFile(file)) {
+          auditSource = await readFile(file, "utf8");
+        }
+        scriptAnalysis = analyzeAppleScriptSource(auditSource);
+      }
+      await context.approvals.require({
+        type: "shell",
+        command: commandText,
+        commandMode: "argv",
+        cwd: context.workspaceRoot,
+        destructive: scriptAnalysis ? true : argvAnalysis.destructive || plan.writesOutput,
+        risk: scriptAnalysis ? maxAppleScriptRisk(argvAnalysis.risk, scriptAnalysis.risk) : argvAnalysis.risk,
+        analysisSummary: scriptAnalysis ? scriptAnalysis.summary : argvAnalysis.summary,
+        analysisReasons: scriptAnalysis ? [...argvAnalysis.reasons, ...scriptAnalysis.reasons] : argvAnalysis.reasons
+      });
+
+      // Record the output up front so a run's compiled scripts can be undone like other direct edits.
+      if (plan.writesOutput && output) {
+        await context.checkpoint?.record(output);
+      }
+
+      let result;
+      try {
+        result = await execa(plan.bin, plan.argv, {
+          cwd: context.workspaceRoot,
+          shell: false,
+          reject: false,
+          timeout: parsed.timeoutMs,
+          cancelSignal: context.signal,
+          stdin: "ignore"
+        });
+      } catch (error) {
+        if (looksLikeMissingBinary(error)) {
+          throw new Error(`${plan.bin} is not installed or not on PATH. It ships with macOS; this tool requires macOS.`);
+        }
+        throw error;
+      }
+      if (looksLikeMissingBinary(result)) {
+        throw new Error(`${plan.bin} is not installed or not on PATH. It ships with macOS; this tool requires macOS.`);
+      }
+
+      const stdout = truncateToolOutput(String(result.stdout ?? ""), APPLESCRIPT_MAX_OUTPUT_CHARS);
+      const stderr = truncateToolOutput(String(result.stderr ?? ""), APPLESCRIPT_MAX_OUTPUT_CHARS);
+      return [
+        `operation: ${parsed.operation}`,
+        output ? `output: ${parsed.output}` : "",
+        `command: ${commandText}`,
+        result.timedOut ? "timedOut: true" : "",
+        result.signal ? `signal: ${result.signal}` : "",
+        result.exitCode === undefined ? "" : `exitCode: ${result.exitCode}`,
+        `status: ${result.exitCode === 0 ? "success" : "failed"}`,
+        stdout ? `result:\n${stdout}` : "",
+        stderr ? `stderr:\n${stderr}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+  });
+
+  register({
+    schema: {
       name: "git_status",
       description: "Show git branch and working tree status.",
       parameters: objectSchema({})
@@ -1411,6 +1736,31 @@ function globToRegExp(glob: string): RegExp {
 
 function truncateToolOutput(value: string, maxLength: number) {
   return value.length <= maxLength ? value : `${value.slice(0, maxLength)}\n[truncated]`;
+}
+
+function prettyJson(value: string) {
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * True when a spawn attempt failed because the executable is missing. execa surfaces this as an
+ * ENOENT error that, depending on version and the `reject` option, is either thrown or returned on
+ * the result object — so this accepts either shape.
+ */
+function looksLikeMissingBinary(candidate: unknown): boolean {
+  if (!candidate || typeof candidate !== "object") {
+    return false;
+  }
+  const record = candidate as { code?: unknown; shortMessage?: unknown; originalMessage?: unknown };
+  if (record.code === "ENOENT") {
+    return true;
+  }
+  const text = [record.shortMessage, record.originalMessage].filter((part) => typeof part === "string").join(" ");
+  return /\bENOENT\b/.test(text);
 }
 
 async function normalizeSafeBrowserToolUrl(workspaceRoot: string, rawUrl: string) {

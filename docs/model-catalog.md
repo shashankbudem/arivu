@@ -19,9 +19,12 @@ Two facts make probing the only option:
 - `/v1/models` is a **catalog, not an entitlement list**. On NVIDIA NIM, ~59 of 116 advertised models
   return `404 "Function '<uuid>': Not found for account"` when actually called.
 
-Measured windows are also frequently *not* the advertised native value — `nemotron-nano-9b-v2` is
-**127,984** (not 131,072) and `mistral-small-4-119b` is **262,128** (16 below 262,144). Never infer a
-window from a model card or a name; store what the provider reports.
+Measured windows are also frequently *not* the advertised native value — `nemotron-nano-9b-v2`
+measured **127,984** (not 131,072) and `mistral-small-4-119b` **262,128** (16 below 262,144). They
+are not even stable: a July 2026 re-probe of the same two models returned **128,000** and **262,144**
+after the provider redeployed its backends. The window is a property of the *deployment*, not the
+model card. Never infer one from a name; store what the provider reports, and let `context_changed`
+events track the drift.
 
 ## Storage
 
@@ -77,8 +80,11 @@ arivu models sync --force-active  # include the active model on a non-Monday
 arivu models sync --reprobe       # re-probe context even where already known
 arivu models status               # show the stored catalog
 arivu models status --all         # include tombstoned models
-arivu models probe-context <model> [--deep]
+arivu models probe-context <model> [--deep] [--approx-tokens <n>]
 ```
+
+`probe-context` records a resolved window into the catalog (it's a measurement, not a peek), so a
+manual probe immediately corrects the agent's budget.
 
 Cadence: **non-active models daily; the active model on Mondays** (it's the one you're interactively
 spending quota on). The split lives in code (`isActiveSweepDay`), not in a second launchd entry.
@@ -103,7 +109,9 @@ limit in its rejection, and `onContextWindowObserved` latches it into the catalo
   blow the deadline while being perfectly reachable. Context is therefore still probed for `unknown`
   models — the validation-only probe usually answers where the ping timed out.
 - `--deep` uses an oversized *input* (multi-MB upload). Reliable on every model, but never run on the
-  schedule (~250MB/day for a value that never changes).
+  schedule (~250MB/day for a value that never changes). The default input is ~550k tokens; models with
+  windows beyond that (the Nemotron-3 line is 1M) need `--approx-tokens 1200000` or larger, since an
+  input the model can fit is silently accepted and resolves nothing.
 
 Paced at 30 req/min by default, under the provider's observed ~40 RPM ceiling.
 

@@ -13,6 +13,8 @@ type Hunk = {
   newStart: number;
   newCount: number;
   lines: string[];
+  /** True when a "\ No newline at end of file" marker applies to this hunk's new-side final line. */
+  noNewlineAtEndNew?: boolean;
 };
 
 export function summarizePatch(diff: string): string {
@@ -115,6 +117,13 @@ export function parseUnifiedDiff(diff: string): FilePatch[] {
           break;
         }
         if (hunkLine === "\\ No newline at end of file") {
+          // The marker refers to the file line just emitted. When that line exists on the new side
+          // (an added `+` line, or a shared context ` ` line), the new file has no trailing newline.
+          // A marker after a `-` line only describes the old side and is intentionally ignored.
+          const previousMarker = hunk.lines[hunk.lines.length - 1]?.[0];
+          if (previousMarker === "+" || previousMarker === " ") {
+            hunk.noNewlineAtEndNew = true;
+          }
           continue;
         }
         if (/^[ +-]/.test(hunkLine)) {
@@ -163,8 +172,22 @@ function applyPatchToText(original: string, patch: FilePatch): string {
     }
   }
 
+  const tailStart = cursor;
   output.push(...source.slice(cursor));
-  return `${output.join("\n")}${hasFinalNewline || output.length > 0 ? "\n" : ""}`;
+
+  if (output.length === 0) {
+    return "";
+  }
+
+  // Preserve the original file's trailing-newline state for edits that stop short of the end of the
+  // file. When the final hunk does reach EOF, the diff's "\ No newline at end of file" marker on the
+  // new side is authoritative. Without this, apply_patch silently appended a newline the file never
+  // had (and could not drop one the edit removed), corrupting newline-free files on every patch.
+  const touchedEof = tailStart >= source.length;
+  const lastHunk = patch.hunks.at(-1);
+  const endsWithNewline = touchedEof ? !lastHunk?.noNewlineAtEndNew : hasFinalNewline;
+
+  return `${output.join("\n")}${endsWithNewline ? "\n" : ""}`;
 }
 
 function cleanPatchPath(filePath: string) {

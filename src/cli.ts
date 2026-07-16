@@ -20,7 +20,7 @@ import { runDoctor, type DoctorReport, type DoctorStatus } from "./diagnostics/d
 import { ModelCatalogStore } from "./models/ModelCatalogStore.js";
 import { resolveContextWindowTokens } from "./models/contextResolver.js";
 import type { ModelCatalog } from "./models/modelCatalogSchema.js";
-import { recordContextFromRuntime, runModelCatalogSync, type SyncSummary } from "./models/syncModelCatalog.js";
+import { recordContextFact, recordContextFromRuntime, runModelCatalogSync, type SyncSummary } from "./models/syncModelCatalog.js";
 import { probeContextViaMaxTokens, probeContextViaOversizedInput } from "./models/probe.js";
 import { installLaunchAgent, launchAgentInstalled, launchAgentPath, uninstallLaunchAgent } from "./models/schedule.js";
 import { ApprovalManager } from "./permissions/ApprovalManager.js";
@@ -248,20 +248,67 @@ models
   });
 
 models
+  .command("events")
+  .description("Show recent catalog changes: models added/removed, status flips, resolved windows.")
+  .option("--json", "print the raw events")
+  .option("--limit <count>", "events to show (newest first)", (value) => Number.parseInt(value, 10), 30)
+  .action(async (options: { json?: boolean; limit: number }) => {
+    const events = await new ModelCatalogStore().readEvents(options.limit);
+    if (options.json) {
+      console.log(JSON.stringify(events, null, 2));
+      return;
+    }
+    if (events.length === 0) {
+      console.log("No catalog events yet. Run: arivu models sync");
+      return;
+    }
+    for (const event of events) {
+      const at = chalk.dim(event.at.replace("T", " ").slice(0, 16));
+      switch (event.type) {
+        case "model_added":
+          console.log(`${at} ${chalk.green("+ added")}    ${event.model}`);
+          break;
+        case "model_removed":
+          console.log(`${at} ${chalk.red("- removed")}  ${event.model}`);
+          break;
+        case "status_changed":
+          console.log(`${at} ${chalk.yellow("~ status")}   ${event.model}: ${event.from} → ${event.to}`);
+          break;
+        case "context_resolved":
+          console.log(`${at} ${chalk.cyan("◆ context")}  ${event.model}: ${event.tokens.toLocaleString()} tokens (${event.source})`);
+          break;
+        case "context_changed":
+          console.log(
+            `${at} ${chalk.cyan("◆ context")}  ${event.model}: ${event.from.toLocaleString()} → ${event.to.toLocaleString()} tokens (${event.source})`
+          );
+          break;
+      }
+    }
+  });
+
+models
   .command("probe-context <model>")
   .description("Resolve one model's context length, optionally with the slow oversized-input probe.")
   .option("--deep", "use the reliable oversized-input probe (multi-MB upload)")
-  .action(async (model: string, options: { deep?: boolean }) => {
+  .option(
+    "--approx-tokens <count>",
+    "input size for --deep; must exceed the model's window (1M-context models need ~1200000)",
+    (value) => Number.parseInt(value, 10)
+  )
+  .action(async (model: string, options: { deep?: boolean; approxTokens?: number }) => {
     const config = await loadConfig();
     const { baseUrl, apiKey } = resolveModelListEndpoint(config, { providerId: config.activeProviderId });
     if (!options.deep) {
       console.log(chalk.dim("Tip: --deep uses an oversized input; it is slower but works on models that ignore max_tokens."));
     }
     const result = options.deep
-      ? await probeContextViaOversizedInput({ baseUrl, apiKey, model }, fetch)
+      ? await probeContextViaOversizedInput({ baseUrl, apiKey, model }, fetch, options.approxTokens)
       : await probeContextViaMaxTokens({ baseUrl, apiKey, model }, fetch);
-    if (result.tokens) {
+    if (result.tokens && result.source) {
       console.log(`${chalk.bold(model)}: ${result.tokens.toLocaleString()} tokens (${result.source})`);
+      const store = new ModelCatalogStore();
+      await recordContextFact(store, { baseUrl, model }, { tokens: result.tokens, source: result.source });
+      console.log(chalk.dim(`Recorded in ${store.catalogPath}.`));
       return;
     }
     console.log(`${chalk.bold(model)}: ${chalk.yellow("unresolved")} — ${result.error ?? "no limit reported"}`);
@@ -352,7 +399,8 @@ async function runOneShot(task: string, config: AppConfig) {
     undefined,
     workspacePolicyOverridesForRoot(config, workspace.root),
     undefined,
-    scopePolicyRules
+    scopePolicyRules,
+    workspace.root
   );
   const catalogStore = new ModelCatalogStore();
   const agent = new Agent({

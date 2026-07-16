@@ -89,6 +89,7 @@ export const CatalogEventSchema = z.union([
 ]);
 
 export type ModelStatus = z.infer<typeof ModelStatusSchema>;
+export type ModelContextFact = z.infer<typeof ModelContextSchema>;
 export type CatalogModel = z.infer<typeof CatalogModelSchema>;
 export type ModelCatalog = z.infer<typeof ModelCatalogSchema>;
 export type CatalogEvent = z.infer<typeof CatalogEventSchema>;

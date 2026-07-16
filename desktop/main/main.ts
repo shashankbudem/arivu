@@ -755,7 +755,8 @@ class DesktopController {
       (message, request) => requestApproval(message, request),
       workspacePolicyOverridesForRoot(config, policyWorkspace.root),
       undefined,
-      workspaceScopeRulesForRoot(config, policyWorkspace.root)
+      workspaceScopeRulesForRoot(config, policyWorkspace.root),
+      policyWorkspace.root
     );
     const contextWindowTokens = resolveContextWindowTokens(
       config,
@@ -1362,7 +1363,7 @@ class DesktopController {
     const scopePolicyRules = workspaceScopeRulesForRoot(config, workspace.root);
     const registry = createToolRegistry({
       workspaceRoot: workspace.root,
-      approvals: new ApprovalManager(config.trustMode, async () => false, policyOverrides, undefined, scopePolicyRules),
+      approvals: new ApprovalManager(config.trustMode, async () => false, policyOverrides, undefined, scopePolicyRules, workspace.root),
       tavilyApiKey: config.tavilyApiKey,
       mcpServers: config.mcpServers,
       scopePolicyRules,
@@ -1712,7 +1713,8 @@ class DesktopController {
       (message, request) => requestApproval(message, request),
       policyOverrides,
       (event) => this.recordApprovalEvent(session, taskRunId, event),
-      scopeRules
+      scopeRules,
+      policyWorkspace.root
     );
     // Only checkpoint direct workspace runs; worktree runs are isolated and reverted via git instead.
     const checkpoint = executionCwd === undefined ? new ChangeCheckpoint() : undefined;

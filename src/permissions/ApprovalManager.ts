@@ -24,7 +24,10 @@ export class ApprovalManager {
     private readonly prompt: (message: string, request?: ApprovalPromptRequest) => Promise<boolean> = defaultPrompt,
     private readonly policyOverrides: CapabilityPolicyOverrides = {},
     private readonly audit?: ApprovalAuditSink,
-    private readonly scopePolicyRules: WorkspaceScopePolicyRules = {}
+    private readonly scopePolicyRules: WorkspaceScopePolicyRules = {},
+    // Workspace root for resolving blocked-path scope rules. Without it, an absolute path or a
+    // `../` traversal that lands inside the workspace would evade a workspace-relative block.
+    private readonly workspaceRoot?: string
   ) {}
 
   private serializePrompt(label: string, request: ApprovalPromptRequest): Promise<boolean> {
@@ -44,7 +47,8 @@ export class ApprovalManager {
       shellAnalysis?.destructive ??
       (action.type === "shell" ? isDestructiveCommand(action.command) : action.type === "network");
     const baseDecision = evaluateApprovalPolicy(this.mode, action, { risky: destructive, overrides: this.policyOverrides });
-    const scopeDecision = baseDecision.effect === "deny" ? undefined : evaluateScopePolicy(action, this.scopePolicyRules);
+    const scopeDecision =
+      baseDecision.effect === "deny" ? undefined : evaluateScopePolicy(action, this.scopePolicyRules, this.workspaceRoot);
     const decision = scopeDecision
       ? {
           ...baseDecision,

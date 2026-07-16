@@ -7,8 +7,12 @@
  * retry path, which learns the real window for free whenever a live request overflows.
  */
 export const CONTEXT_LIMIT_PATTERNS: RegExp[] = [
-  // 400, vLLM-style: "This model's maximum context length is 524288 tokens and your request has 9 input tokens"
-  /maximum context length is (\d+)\s*tokens/i,
+  // 400, vLLM-style: "This model's maximum context length is 524288 tokens and your request has 9 input tokens".
+  // "of" variant: "Requested token count exceeds the model's maximum context length of 131072 tokens."
+  /maximum context length (?:is|of) (\d+)\s*tokens/i,
+  // 400, SGLang-style: "max_tokens=99999999cannot be greater than max_model_len=max_total_tokens=128000."
+  // (The missing space before "cannot" is verbatim; some models emit it with the space.)
+  /max_model_len=max_total_tokens=(\d+)/i,
   // 500: "Input value error: prompt is [[440009]] long while only 4096 is supported"
   /prompt is \[\[\d+\]\] long while only (\d+) is supported/i,
   // 422, pydantic-style: "body -> max_tokens Input should be less than or equal to 4096"

@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { ApprovalAction, BrowserTargetClass } from "./types.js";
 
 export type WorkspaceScopePolicyRules = {
@@ -18,9 +19,13 @@ export type ScopePolicySummaryItem = {
   value: string;
 };
 
-export function evaluateScopePolicy(action: ApprovalAction, rules: WorkspaceScopePolicyRules = {}): ScopePolicyDecision | undefined {
+export function evaluateScopePolicy(
+  action: ApprovalAction,
+  rules: WorkspaceScopePolicyRules = {},
+  workspaceRoot?: string
+): ScopePolicyDecision | undefined {
   const normalized = normalizeWorkspaceScopePolicyRules(rules);
-  const blockedPath = blockedPathMatch(action, normalized.blockedPathPrefixes ?? []);
+  const blockedPath = blockedPathMatch(action, normalized.blockedPathPrefixes ?? [], workspaceRoot);
   if (blockedPath) {
     return {
       effect: "deny",
@@ -169,11 +174,11 @@ export function scopePolicySummariesForTool(toolName: string, rules: WorkspaceSc
   return summaries;
 }
 
-function blockedPathMatch(action: ApprovalAction, blockedPrefixes: string[]) {
+function blockedPathMatch(action: ApprovalAction, blockedPrefixes: string[], workspaceRoot: string | undefined) {
   if (blockedPrefixes.length === 0) {
     return undefined;
   }
-  const paths = approvalActionPaths(action);
+  const paths = approvalActionPaths(action, workspaceRoot);
   return paths.find((candidate) => blockedPrefixes.some((prefix) => pathMatchesPrefix(candidate, prefix)));
 }
 
@@ -181,21 +186,54 @@ function pathScopedTool(toolName: string) {
   return ["list", "read", "search", "git_status", "apply_patch", "write_file"].includes(toolName);
 }
 
-function approvalActionPaths(action: ApprovalAction) {
+function approvalActionPaths(action: ApprovalAction, workspaceRoot: string | undefined) {
   if (action.type !== "read" && action.type !== "write") {
     return [];
   }
   return [action.path, ...(action.type === "write" ? (action.paths ?? []) : [])]
     .filter((value): value is string => Boolean(value))
-    .map(normalizeWorkspacePathPrefix)
+    .map((value) => workspaceRelativeCandidatePath(value, workspaceRoot))
     .filter((value): value is string => Boolean(value));
+}
+
+/**
+ * Collapses a tool-supplied path to a normalized, workspace-relative POSIX path for blocked-path
+ * matching. With a workspace root it resolves `.`/`..` and absolute paths against the root — closing
+ * the `sub/../secrets` and `/abs/workspace/secrets` bypasses where the raw string never textually
+ * started with the blocked prefix. Without a root it still normalizes lexically so a relative
+ * traversal cannot slip through.
+ */
+function workspaceRelativeCandidatePath(requested: string, workspaceRoot: string | undefined): string | undefined {
+  const trimmed = requested.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (workspaceRoot) {
+    const root = path.resolve(workspaceRoot);
+    return toPosixRelative(path.relative(root, path.resolve(root, trimmed)));
+  }
+  return toPosixRelative(path.posix.normalize(trimmed.replace(/\\/g, "/")));
+}
+
+function toPosixRelative(value: string): string {
+  return value
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/g, "");
 }
 
 function pathMatchesPrefix(candidate: string, prefix: string) {
   if (prefix === ".") {
     return true;
   }
-  return candidate.startsWith(prefix);
+  if (!candidate) {
+    return false;
+  }
+  // Segment-aware: a blocked prefix matches the path itself or anything beneath it as a directory,
+  // never a sibling that merely shares a textual prefix (e.g. "secrets" must not block
+  // "secrets-public"). Candidates are already collapsed to a workspace-relative POSIX path, so a
+  // "../" or absolute-path traversal can no longer smuggle a blocked file past this check.
+  return candidate === prefix || candidate.startsWith(`${prefix}/`);
 }
 
 function blockedMcpServerMatch(action: Extract<ApprovalAction, { type: "mcp" }>, allowedServers: string[]) {

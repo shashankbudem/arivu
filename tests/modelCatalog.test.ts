@@ -131,7 +131,14 @@ describe("parseContextLimit", () => {
     ["This model's maximum context length is 524288 tokens and your request has 9 input tokens (99999999 > 524288 - 9).", 524_288],
     ['{"error":"body -> max_tokens\\n  Input should be less than or equal to 4096 (type=less_than_equal; le=4096)"}', 4_096],
     ["Input value error: prompt is [[440009]] long while only 4096 is supported", 4_096],
-    ["This model's maximum context length is 131072 tokens. However, your messages resulted in 440035 tokens.", 131_072]
+    ["This model's maximum context length is 131072 tokens. However, your messages resulted in 440035 tokens.", 131_072],
+    [
+      "Requested token count exceeds the model's maximum context length of 131072 tokens. You requested a total of 100000010 tokens.",
+      131_072
+    ],
+    // SGLang emits this both with and without the space before "cannot" — both seen live on NIM.
+    ['{"error":{"message":"max_tokens=99999999cannot be greater than max_model_len=max_total_tokens=128000. Please request fewer output tokens."}}', 128_000],
+    ['{"error":{"message":"max_tokens=99999999 cannot be greater than max_model_len=max_total_tokens=262144. Please request fewer output tokens."}}', 262_144]
   ])("extracts the limit from %j", (body, expected) => {
     expect(parseContextLimit(body)).toBe(expected);
   });
