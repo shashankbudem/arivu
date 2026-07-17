@@ -373,6 +373,16 @@ body.is-resizing .panel-resize-handle::after {
   min-height: 0;
 }
 
+.chats-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+}
+
+.chats-section.collapsed-section {
+  flex: 0 0 auto;
+}
+
 .recent-project-list {
   display: grid;
   gap: 3px;
@@ -382,11 +392,12 @@ body.is-resizing .panel-resize-handle::after {
 }
 
 .recent-chat-list {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 2px;
-  max-height: 190px;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .project-group {
