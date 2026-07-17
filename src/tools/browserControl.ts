@@ -33,11 +33,18 @@ export type BrowserTabState = {
   lastScreenshotAt?: string;
   lastScreenshotPath?: string;
   owner?: "user" | "agent";
+  /** True while a delegated browser_task is running on this tab. */
+  agentActive?: boolean;
 };
 
 export type BrowserTargetState = BrowserTabState & {
   mode: BrowserMode;
   activeTabId?: string;
+  /**
+   * The tab agent tools default to when no tabId is passed. Tracked separately from
+   * activeTabId so agent work never has to steal the tab the user is looking at.
+   */
+  agentTargetTabId?: string;
   tabs?: BrowserTabState[];
 };
 
@@ -67,7 +74,17 @@ export type BrowserTaskModelConfig = {
 export type BrowserToolController = {
   getState(): BrowserState;
   selectTab(args: { tabId: string }): Promise<BrowserToolResult>;
-  open(args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }): Promise<BrowserToolResult>;
+  open(args: {
+    url: string;
+    mode?: BrowserMode;
+    tabId?: string;
+    newTab?: boolean;
+    /**
+     * Who initiated the open. "user" (default) may surface and focus the browser window;
+     * "agent" must never steal focus — the window is at most revealed without activation.
+     */
+    source?: "user" | "agent";
+  }): Promise<BrowserToolResult>;
   screenshot(args: { mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
   snapshot(args: { mode?: BrowserMode; tabId?: string; maxLength?: number }): Promise<BrowserToolResult>;
   console(args: { mode?: BrowserMode; tabId?: string; levels?: string[]; limit?: number }): Promise<BrowserToolResult>;

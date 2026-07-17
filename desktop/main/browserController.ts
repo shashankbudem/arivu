@@ -10,6 +10,7 @@ import {
   clipboard,
   dialog,
   nativeImage,
+  powerSaveBlocker,
   shell,
   type WebContents,
   type ContextMenuParams,
@@ -200,6 +201,17 @@ export class DesktopBrowserController implements BrowserToolController {
   private readonly listeners = new Set<BrowserStateListener>();
   private readonly visibleTabs = new Map<string, BrowserTabRecord>();
   private readonly visibleTabOrder: string[] = [];
+  /**
+   * The tab agent tools default to when no tabId is passed. Deliberately separate from
+   * activeVisibleTabId (the tab the user is looking at): agent work must never switch or
+   * focus the user's view as a side effect of resolving its own target.
+   */
+  private agentTargetTabId: string | undefined;
+  /** Tabs with a delegated browser_task currently running (throttling disabled, badge shown). */
+  private readonly agentTaskTabIds = new Set<string>();
+  /** Where to return the user's view when they leave the agent tab via the Hide control. */
+  private watchReturnTabId: string | undefined;
+  private agentPowerSaveBlockerId: number | undefined;
   private readonly targets: Record<BrowserMode, BrowserTargetRecord> = {
     visible: initialTarget("visible"),
     background: initialTarget("background")
@@ -342,7 +354,21 @@ export class DesktopBrowserController implements BrowserToolController {
   }
 
   async selectTab(args: { tabId: string }): Promise<BrowserToolResult> {
-    const target = this.selectVisibleTabById(args.tabId);
+    // Agent tool: retarget subsequent agent calls only. The user's attached view and focus
+    // stay exactly where they are — an agent choosing its work tab is not a reason to switch
+    // what the user is looking at.
+    const target = this.visibleTabs.get(args.tabId);
+    if (!target) {
+      throw new Error(`Unknown visible browser tab: ${args.tabId}`);
+    }
+    if (target.contents.isDestroyed()) {
+      this.closeVisibleTabById(args.tabId);
+      this.emitState();
+      throw new Error(`Visible browser tab closed before it could be selected: ${args.tabId}`);
+    }
+    this.agentTargetTabId = args.tabId;
+    this.rememberMode("visible");
+    this.updateTargetFromContents("visible", target.contents, target);
     this.emitState();
     return this.resultForMode(
       "visible",
@@ -360,19 +386,37 @@ export class DesktopBrowserController implements BrowserToolController {
     return this.getState();
   }
 
-  async open(args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }): Promise<BrowserToolResult> {
+  async open(args: {
+    url: string;
+    mode?: BrowserMode;
+    tabId?: string;
+    newTab?: boolean;
+    source?: "user" | "agent";
+  }): Promise<BrowserToolResult> {
     const mode = this.targetForMode(args.mode);
     this.rememberMode(mode);
     const url = normalizeBrowserUrl(args.url);
+    const initiator = args.source ?? "user";
     let selectedTabId = args.tabId;
     if (mode === "visible") {
       this.paneOpen = true;
       const window = this.ensureVisibleWindow();
       this.ensureVisibleShellPage(window.webContents);
       this.restoreVisibleSessionOnce();
-      this.showVisibleWindow(window);
-      if (args.newTab || (!selectedTabId && !this.activeVisibleTab())) {
-        selectedTabId = this.createVisibleTab({ activate: true, deferLoad: true }).id;
+      if (initiator === "user") {
+        this.showVisibleWindow(window);
+      } else {
+        // Agent-initiated: the window may appear if it does not exist yet, but it must never
+        // take focus away from whatever app or window the user is currently working in, and
+        // an already-placed window is left exactly where the user put it.
+        this.revealVisibleWindowInactive(window);
+      }
+      if (args.newTab) {
+        // An agent-requested tab loads without becoming the tab the user is looking at; it
+        // becomes the agent's own target instead (resolved below via browserContextForMode).
+        selectedTabId = this.createVisibleTab({ activate: initiator === "user", deferLoad: true }).id;
+      } else if (!selectedTabId && !this.activeVisibleTab()) {
+        selectedTabId = this.createVisibleTab({ activate: true, focus: initiator === "user", deferLoad: true }).id;
       }
     }
     const { contents, target } = this.browserContextForMode(mode, selectedTabId);
@@ -390,10 +434,10 @@ export class DesktopBrowserController implements BrowserToolController {
     this.rememberMode(mode);
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
     assertPageLoaded(contents, mode);
-    this.prepareForScreenshot(mode, contents);
+    this.prepareForScreenshot(contents);
     const preInspectPaint = await waitForFreshPaint(contents);
     const visual = (await this.inspectPage(contents, 6_000)) as BrowserToolResult & { viewport?: BrowserViewport };
-    this.prepareForScreenshot(mode, contents);
+    this.prepareForScreenshot(contents);
     const preCapturePaint = await waitForFreshPaint(contents);
     const image = await this.captureTargetPage(mode, contents);
     const size = image.getSize();
@@ -602,21 +646,27 @@ export class DesktopBrowserController implements BrowserToolController {
     this.rememberMode(mode);
     const { contents, target } = this.browserContextForMode(mode, args.tabId);
     assertPageLoaded(contents, mode);
-    const taskResult = await runBrowserTask(
-      contents,
-      {
-        instruction: args.instruction,
-        maxSteps: args.maxSteps,
-        timeoutMs: args.timeoutMs,
-        allowedDomains: args.allowedDomains,
-        allowJavaScript: args.allowJavaScript,
-        allowSensitiveActions: args.allowSensitiveActions,
-        visible: mode === "visible"
-      },
-      args.modelConfig,
-      args.signal,
-      args.onProgress
-    );
+    this.beginAgentBrowserTask(mode, target.id, contents);
+    let taskResult: BrowserToolResult;
+    try {
+      taskResult = await runBrowserTask(
+        contents,
+        {
+          instruction: args.instruction,
+          maxSteps: args.maxSteps,
+          timeoutMs: args.timeoutMs,
+          allowedDomains: args.allowedDomains,
+          allowJavaScript: args.allowJavaScript,
+          allowSensitiveActions: args.allowSensitiveActions,
+          visible: mode === "visible"
+        },
+        args.modelConfig,
+        args.signal,
+        args.onProgress
+      );
+    } finally {
+      this.endAgentBrowserTask(mode, target.id, contents);
+    }
     // Attach a bounded post-task page snapshot (the same helper the click/type/scroll/select
     // tools use) so the main agent can verify the delegated outcome from text instead of
     // spending a whole extra turn on a heavier browser_screenshot. Never throws:
@@ -633,7 +683,7 @@ export class DesktopBrowserController implements BrowserToolController {
 
   private browserContextForMode(mode: BrowserMode, tabId?: string) {
     if (mode === "visible") {
-      const target = this.ensureVisibleTab(tabId);
+      const target = this.resolveVisibleTabForAgent(tabId);
       return {
         target,
         contents: target.contents
@@ -643,6 +693,110 @@ export class DesktopBrowserController implements BrowserToolController {
       target: this.targets.background,
       contents: this.ensureBackgroundWindow().webContents
     };
+  }
+
+  /**
+   * Resolves the tab a tool call should act on WITHOUT activating, attaching, or focusing
+   * anything. Selecting a target used to run the full user-facing tab switch
+   * (selectVisibleTabById → attachActiveVisibleView → focus), which meant every delegated
+   * browser action yanked the view — and with it the user's keyboard — back to the agent's
+   * tab. Acting on a WebContents needs none of that; the user's view is only ever changed by
+   * the user's own clicks (shell commands) or the explicit Watch control.
+   */
+  private resolveVisibleTabForAgent(tabId?: string) {
+    if (tabId) {
+      const target = this.visibleTabs.get(tabId);
+      if (!target) {
+        throw new Error(`Unknown visible browser tab: ${tabId}`);
+      }
+      if (target.contents.isDestroyed()) {
+        this.closeVisibleTabById(tabId);
+        this.emitState();
+        throw new Error(`Visible browser tab closed before it could be selected: ${tabId}`);
+      }
+      this.agentTargetTabId = tabId;
+      return target;
+    }
+    const remembered = this.agentTargetTabId ? this.visibleTabs.get(this.agentTargetTabId) : undefined;
+    if (remembered && !remembered.contents.isDestroyed()) {
+      return remembered;
+    }
+    const active = this.activeVisibleTab();
+    if (active) {
+      this.agentTargetTabId = active.id;
+      return active;
+    }
+    // No tabs exist at all: create one. It may attach (there is nothing else to show), but it
+    // must not pull keyboard focus into the window.
+    const created = this.createVisibleTab({ activate: true, focus: false });
+    this.agentTargetTabId = created.id;
+    return created;
+  }
+
+  /**
+   * Marks a delegated browser task as running on a tab: the renderer is exempted from
+   * background throttling (a detached or occluded tab otherwise has its timers slowed to a
+   * crawl — the in-page agent lives on timers and a 38-minute background hang came from
+   * exactly this), the app is kept out of macOS App Nap while any task runs, and the shell
+   * shows a working badge. endAgentBrowserTask restores every one of these.
+   */
+  private beginAgentBrowserTask(mode: BrowserMode, tabId: string, contents: WebContents) {
+    if (mode !== "visible") {
+      return;
+    }
+    this.agentTaskTabIds.add(tabId);
+    if (!contents.isDestroyed() && typeof contents.setBackgroundThrottling === "function") {
+      contents.setBackgroundThrottling(false);
+    }
+    if (this.agentPowerSaveBlockerId === undefined) {
+      try {
+        this.agentPowerSaveBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+      } catch {
+        // Power-save exemption is best-effort; throttling exemption above is the main guard.
+      }
+    }
+    this.emitState();
+  }
+
+  private endAgentBrowserTask(mode: BrowserMode, tabId: string, contents: WebContents) {
+    if (mode !== "visible") {
+      return;
+    }
+    this.agentTaskTabIds.delete(tabId);
+    if (!contents.isDestroyed() && typeof contents.setBackgroundThrottling === "function") {
+      contents.setBackgroundThrottling(true);
+    }
+    if (this.agentTaskTabIds.size === 0 && this.agentPowerSaveBlockerId !== undefined) {
+      try {
+        powerSaveBlocker.stop(this.agentPowerSaveBlockerId);
+      } catch {
+        // Releasing the blocker is best-effort.
+      }
+      this.agentPowerSaveBlockerId = undefined;
+      // Polite attention instead of self-surfacing: when the last delegated task finishes
+      // while the user is working elsewhere, bounce the dock icon once. Never show or focus
+      // a window from here.
+      if (process.platform === "darwin" && !BrowserWindow.getFocusedWindow()) {
+        try {
+          app.dock?.bounce("informational");
+        } catch {
+          // Dock signaling is decorative; ignore environments without a dock.
+        }
+      }
+    }
+    this.emitState();
+  }
+
+  /**
+   * Agent-path counterpart to showVisibleWindow: reveal the window only if it is not visible
+   * at all, without activating the app or taking key status, and never resize or reposition a
+   * window the user has placed. Focus stays with whatever the user is doing.
+   */
+  private revealVisibleWindowInactive(window: BrowserWindow) {
+    if (window.isDestroyed() || window.isVisible()) {
+      return;
+    }
+    window.showInactive();
   }
 
   private rememberMode(mode: BrowserMode) {
@@ -819,20 +973,12 @@ export class DesktopBrowserController implements BrowserToolController {
     };
   }
 
-  private prepareForScreenshot(mode: BrowserMode, contents: WebContents) {
-    if (mode === "visible") {
-      const window = this.ensureVisibleWindow();
-      if (window.isMinimized()) {
-        window.restore();
-      }
-      if (!window.isMaximized()) {
-        window.maximize();
-      }
-      if (!window.isVisible()) {
-        window.show();
-      }
-      window.focus();
-    }
+  private prepareForScreenshot(contents: WebContents) {
+    // This used to restore, maximize, show, AND focus the browser window before every
+    // capture — yanking the whole app in front of whatever the user was doing anywhere on
+    // the system. A screenshot never justifies taking the user's screen: capturePage works
+    // on a visible-but-buried surface, and captureTargetPage already falls back to a CDP
+    // capture for hidden or detached contents.
     contents.invalidate();
   }
 
@@ -859,7 +1005,9 @@ export class DesktopBrowserController implements BrowserToolController {
     this.ensureVisibleShellPage(window.webContents);
     window.on("show", () => {
       this.paneOpen = true;
-      this.attachActiveVisibleView();
+      // "show" also fires for the agent path's showInactive(); attaching must not pull
+      // keyboard focus here. User-driven shows focus the window itself in showVisibleWindow.
+      this.attachActiveVisibleView({ focus: false });
       this.emitState();
     });
     window.on("hide", () => {
@@ -964,7 +1112,7 @@ export class DesktopBrowserController implements BrowserToolController {
         // Electron's BrowserView-backed createWindow path stalls window.open in current
         // releases. Keep the native child window alive, but register its WebContents as a
         // normal visible target so Arivu can select, inspect, and close it by tab id.
-        this.registerVisiblePopupWindow(popupWindow, details.disposition);
+        this.registerVisiblePopupWindow(popupWindow, details.disposition, target.id);
       }
     });
     contents.on("will-navigate", (event, url) => {
@@ -1418,30 +1566,39 @@ export class DesktopBrowserController implements BrowserToolController {
       title: target.title,
       loading: target.loading,
       activeTabId: this.activeVisibleTabId,
+      // activeTabId is what the USER is looking at; agent tools default to agentTargetTabId.
+      // Report both so the model never assumes it is acting on the user's tab.
+      ...(mode === "visible" && this.agentTargetTabId ? { agentTargetTabId: this.agentTargetTabId } : {}),
       ...result
     };
   }
 
   private async captureTargetPage(mode: BrowserMode, contents: WebContents) {
-    // A visible BrowserView has a reliable native surface once prepareForScreenshot has
-    // selected and attached it. CDP Page.captureScreenshot can retain stale compositor tiles
-    // after switching away from a native popup window, producing a partly black image even
-    // though the page is painted. Prefer the attached surface for visible tabs and keep CDP
-    // as the fallback; hidden/background contents still need CDP first.
+    // An attached, painted BrowserView has a reliable native surface. CDP
+    // Page.captureScreenshot can retain stale compositor tiles after switching away from a
+    // native popup window, producing a partly black image even though the page is painted.
+    // Prefer the native surface for visible tabs and keep CDP as the fallback.
     if (mode === "visible") {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          const surfaceImage = await contents.capturePage();
-          if (!surfaceImage.isEmpty()) {
-            return surfaceImage;
+      return this.withTemporaryCaptureSurface(contents, async () => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            const surfaceImage = await contents.capturePage();
+            if (!surfaceImage.isEmpty()) {
+              return surfaceImage;
+            }
+          } catch {
+            // BrowserView surfaces can briefly report UnknownVizError while Chromium swaps
+            // compositors. Repaint and retry before falling back to CDP.
           }
-        } catch {
-          // BrowserView surfaces can briefly report UnknownVizError while Chromium swaps
-          // compositors. Repaint and retry before falling back to CDP.
+          contents.invalidate();
+          await delay(120 * (attempt + 1));
         }
-        contents.invalidate();
-        await delay(120 * (attempt + 1));
-      }
+        const debuggerImage = await capturePageWithDebugger(contents);
+        if (debuggerImage && !debuggerImage.isEmpty()) {
+          return debuggerImage;
+        }
+        return contents.capturePage();
+      });
     }
     const debuggerImage = await capturePageWithDebugger(contents);
     if (debuggerImage && !debuggerImage.isEmpty()) {
@@ -1450,15 +1607,58 @@ export class DesktopBrowserController implements BrowserToolController {
     return contents.capturePage();
   }
 
+  /**
+   * A detached tab (agent working out of the user's view) has no compositor surface, so both
+   * capturePage and CDP fromSurface captures can fail or return stale pixels. For the duration
+   * of a capture, attach the view UNDER the user's active view: the active view keeps covering
+   * the content area, nothing is raised, shown, or focused, and the previous attachment state
+   * is restored afterwards. The user sees and loses nothing.
+   */
+  private async withTemporaryCaptureSurface<T>(contents: WebContents, run: () => Promise<T>): Promise<T> {
+    const window = this.visibleWindow;
+    const record = [...this.visibleTabs.values()].find((tab) => tab.contents === contents);
+    const view = record?.view;
+    if (!window || window.isDestroyed() || !view || window.getBrowserViews().includes(view)) {
+      return run();
+    }
+    window.addBrowserView(view);
+    const [width, height] = window.getContentSize();
+    view.setBounds({
+      x: 0,
+      y: this.visibleChromeHeight,
+      width: Math.max(1, width),
+      height: Math.max(1, height - this.visibleChromeHeight)
+    });
+    const active = this.activeVisibleTab();
+    if (active?.view && active.view !== view && window.getBrowserViews().includes(active.view)) {
+      window.setTopBrowserView(active.view);
+    }
+    try {
+      return await run();
+    } finally {
+      if (!window.isDestroyed()) {
+        try {
+          window.removeBrowserView(view);
+        } catch {
+          // The view may already be detached; capture cleanup continues regardless.
+        }
+      }
+    }
+  }
+
   private publicVisibleTarget(): BrowserTargetState {
     const active = this.activeVisibleTab() ?? this.targets.visible;
     return {
       ...publicTarget(active),
       activeTabId: this.activeVisibleTabId,
+      ...(this.agentTargetTabId ? { agentTargetTabId: this.agentTargetTabId } : {}),
       tabs: this.visibleTabOrder
         .map((id) => this.visibleTabs.get(id))
         .filter((tab): tab is BrowserTabRecord => Boolean(tab))
-        .map(publicTab)
+        .map((tab) => ({
+          ...publicTab(tab),
+          ...(this.agentTaskTabIds.has(tab.id) ? { agentActive: true } : {})
+        }))
     };
   }
 
@@ -1477,7 +1677,7 @@ export class DesktopBrowserController implements BrowserToolController {
     return this.createVisibleTab({ activate: true });
   }
 
-  private createVisibleTab(options: { url?: string; activate?: boolean; deferLoad?: boolean } = {}) {
+  private createVisibleTab(options: { url?: string; activate?: boolean; focus?: boolean; deferLoad?: boolean } = {}) {
     const id = `tab-${this.nextVisibleTabNumber++}`;
     const view = new BrowserView({
       webPreferences: browserWebPreferences("visible")
@@ -1494,7 +1694,7 @@ export class DesktopBrowserController implements BrowserToolController {
     this.configureWebContents("visible", target, view.webContents);
     if (options.activate !== false) {
       this.activeVisibleTabId = id;
-      this.attachActiveVisibleView();
+      this.attachActiveVisibleView({ focus: options.focus });
     }
     if (!options.deferLoad) {
       const url = options.url ? normalizeBrowserUrl(options.url) : visibleStartPageUrl();
@@ -1513,7 +1713,8 @@ export class DesktopBrowserController implements BrowserToolController {
 
   private registerVisiblePopupWindow(
     popupWindow: BrowserWindow,
-    disposition: "default" | "foreground-tab" | "background-tab" | "new-window" | "other"
+    disposition: "default" | "foreground-tab" | "background-tab" | "new-window" | "other",
+    originTabId?: string
   ) {
     const id = `tab-${this.nextVisibleTabNumber++}`;
     const target: BrowserTabRecord = {
@@ -1526,6 +1727,17 @@ export class DesktopBrowserController implements BrowserToolController {
     this.configureWebContents("visible", target, popupWindow.webContents);
     popupWindow.on("closed", () => this.forgetVisiblePopupTab(id));
     popupWindow.webContents.once("destroyed", () => this.forgetVisiblePopupTab(id));
+    // A popup spawned while a delegated task runs on the opener belongs to the agent, not the
+    // user: it becomes the agent's next target (the supervisor ends the opener's task with an
+    // explicit handoff) but stays out of the user's view and never takes focus.
+    const agentDriven = Boolean(originTabId && this.agentTaskTabIds.has(originTabId));
+    if (agentDriven) {
+      this.agentTargetTabId = id;
+      popupWindow.hide();
+      this.updateTargetFromContents("visible", popupWindow.webContents, target);
+      this.emitState();
+      return;
+    }
     if (disposition !== "background-tab") {
       this.activeVisibleTabId = id;
     }
@@ -1579,6 +1791,7 @@ export class DesktopBrowserController implements BrowserToolController {
       }
     }
     this.visibleTabs.delete(tabId);
+    this.forgetAgentTabState(tabId);
     const orderIndex = this.visibleTabOrder.indexOf(tabId);
     if (orderIndex >= 0) {
       this.visibleTabOrder.splice(orderIndex, 1);
@@ -1600,12 +1813,24 @@ export class DesktopBrowserController implements BrowserToolController {
     this.emitState();
   }
 
+  /** Drops per-tab agent bookkeeping when a tab is closed or forgotten. */
+  private forgetAgentTabState(tabId: string) {
+    this.agentTaskTabIds.delete(tabId);
+    if (this.agentTargetTabId === tabId) {
+      this.agentTargetTabId = undefined;
+    }
+    if (this.watchReturnTabId === tabId) {
+      this.watchReturnTabId = undefined;
+    }
+  }
+
   private forgetVisiblePopupTab(tabId: string) {
     const target = this.visibleTabs.get(tabId);
     if (!target?.popupWindow) {
       return;
     }
     this.visibleTabs.delete(tabId);
+    this.forgetAgentTabState(tabId);
     const orderIndex = this.visibleTabOrder.indexOf(tabId);
     if (orderIndex >= 0) {
       this.visibleTabOrder.splice(orderIndex, 1);
@@ -1636,6 +1861,9 @@ export class DesktopBrowserController implements BrowserToolController {
     this.visibleTabs.clear();
     this.visibleTabOrder.splice(0);
     this.activeVisibleTabId = undefined;
+    this.agentTargetTabId = undefined;
+    this.agentTaskTabIds.clear();
+    this.watchReturnTabId = undefined;
   }
 
   private restoreVisibleSessionOnce() {
@@ -1754,7 +1982,10 @@ export class DesktopBrowserController implements BrowserToolController {
     return process.env.ARIVU_BROWSER_SMOKE !== "1" && process.env.ARIVU_DESKTOP_SMOKE !== "1";
   }
 
-  private attachActiveVisibleView() {
+  private attachActiveVisibleView(options: { focus?: boolean } = {}) {
+    // Focus defaults to true for user-driven switches (tab clicks, watch, close). Agent-driven
+    // attaches pass focus: false — presenting a view is fine, moving the keyboard is not.
+    const focus = options.focus !== false;
     const window = this.visibleWindow;
     const active = this.activeVisibleTab();
     if (!window || window.isDestroyed() || !active) {
@@ -1772,9 +2003,13 @@ export class DesktopBrowserController implements BrowserToolController {
       }
     }
     if (active.popupWindow && !active.popupWindow.isDestroyed()) {
-      active.popupWindow.maximize();
-      active.popupWindow.show();
-      active.popupWindow.focus();
+      if (focus) {
+        active.popupWindow.maximize();
+        active.popupWindow.show();
+        active.popupWindow.focus();
+      } else if (!active.popupWindow.isVisible()) {
+        active.popupWindow.showInactive();
+      }
       return;
     }
     if (!active.view) {
@@ -1785,7 +2020,9 @@ export class DesktopBrowserController implements BrowserToolController {
     }
     window.setTopBrowserView(active.view);
     this.updateVisibleViewLayout();
-    active.view.webContents.focus();
+    if (focus) {
+      active.view.webContents.focus();
+    }
   }
 
   private updateVisibleViewLayout() {
@@ -1867,8 +2104,34 @@ export class DesktopBrowserController implements BrowserToolController {
         case "select-tab": {
           const tabId = command.params.get("id");
           if (tabId) {
+            // Clicking the working tab is an implicit Watch: remember where to return to.
+            // Any other manual switch invalidates a stale return point.
+            this.watchReturnTabId =
+              this.agentTaskTabIds.has(tabId) && this.activeVisibleTabId && this.activeVisibleTabId !== tabId
+                ? this.activeVisibleTabId
+                : undefined;
             this.selectVisibleTabById(tabId);
           }
+          break;
+        }
+        case "watch-agent": {
+          const tabId = command.params.get("id") || [...this.agentTaskTabIds][0] || this.agentTargetTabId;
+          if (tabId && this.visibleTabs.has(tabId) && tabId !== this.activeVisibleTabId) {
+            this.watchReturnTabId = this.activeVisibleTabId;
+            this.selectVisibleTabById(tabId);
+            this.emitState();
+          }
+          break;
+        }
+        case "hide-agent": {
+          // Give the user's view back: return to the tab they were on before watching. The
+          // agent keeps working on its tab either way.
+          const returnTabId = this.watchReturnTabId;
+          this.watchReturnTabId = undefined;
+          if (returnTabId && this.visibleTabs.has(returnTabId)) {
+            this.selectVisibleTabById(returnTabId);
+          }
+          this.emitState();
           break;
         }
         case "close-tab": {
@@ -2855,6 +3118,7 @@ export class DesktopBrowserController implements BrowserToolController {
           title: this.targets.background.title,
           loading: this.targets.background.loading
         },
+        agentWork: this.agentWorkChromeState(),
         notice: this.shellNotice,
         downloadCount: this.browserDownloads.length,
         activeDownloadCount: this.browserDownloads.filter((download) => download.state === "progressing").length
@@ -2869,6 +3133,21 @@ export class DesktopBrowserController implements BrowserToolController {
           this.renderVisibleShellState();
         }
       });
+  }
+
+  /** Chip state for the shell: the first working tab, and whether the user is viewing it. */
+  private agentWorkChromeState() {
+    const workingTabId = [...this.agentTaskTabIds].find((id) => this.visibleTabs.has(id));
+    if (!workingTabId) {
+      return undefined;
+    }
+    const tab = this.visibleTabs.get(workingTabId);
+    return {
+      tabId: workingTabId,
+      title: tab?.title ?? "",
+      watching: this.activeVisibleTabId === workingTabId,
+      count: this.agentTaskTabIds.size
+    };
   }
 
   private showVisibleWindow(window: BrowserWindow) {

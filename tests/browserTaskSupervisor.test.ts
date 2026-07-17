@@ -596,7 +596,7 @@ describe("runBrowserTask", () => {
     expect(result.data).toMatch(/expected result of selecting a value in a popup lookup/i);
   }, 10_000);
 
-  it("stops the parent task and returns an active-tab handoff when an action opens a popup", async () => {
+  it("stops the parent task and returns an agent-target handoff when an action opens a popup", async () => {
     const { contents, scripts, firePopup } = createFakeContents((script) => {
       if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
         return true;
@@ -613,10 +613,44 @@ describe("runBrowserTask", () => {
     const result = await runPromise;
 
     expect(result).toMatchObject({ success: false, stopped: false, popupOpened: true });
-    expect(result.data).toMatch(/continue .* on the active tab/i);
+    expect(result.data).toMatch(/agent target tab \(agentTargetTabId in browser_state\)/i);
     expect(result.data).toMatch(/do not repeat the popup-opening action/i);
     expect(scripts.some((script) => script.includes("typeof window.__arivuPageAgentTask.stop"))).toBe(true);
   }, 10_000);
+
+  it("never stacks progress polls while a poll is outstanding against an unresponsive renderer", async () => {
+    // Regression: a throttled/backgrounded renderer that stops answering executeJavaScript
+    // used to accumulate one queued poll per second for the whole hang (~2,300 over 38
+    // minutes), all of which flooded back when the renderer woke. With the in-flight guard,
+    // an unanswered poll blocks further polls entirely.
+    let pollCount = 0;
+    const { contents } = createFakeContents(
+      (script) => {
+        if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+          return true;
+        }
+        return new Promise(() => undefined);
+      },
+      () => {
+        pollCount += 1;
+        return new Promise(() => undefined);
+      }
+    );
+
+    const abort = new AbortController();
+    const runPromise = runBrowserTask(
+      contents,
+      { instruction: "count progress polls" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY },
+      abort.signal
+    );
+    // Three poll intervals elapse; without the guard this dispatches three polls.
+    await new Promise((resolve) => setTimeout(resolve, 3_400));
+    abort.abort();
+    await runPromise;
+
+    expect(pollCount).toBe(1);
+  }, 15_000);
 
   it("resumes on a fresh document after a cross-document navigation destroys the context", async () => {
     let attempt = 0;

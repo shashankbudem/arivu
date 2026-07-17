@@ -3465,7 +3465,18 @@ async function captureBrowserSmoke(window: BrowserWindow | undefined) {
     throw new Error("browser smoke: a self-closed popup remained in visible tab state");
   }
   console.log("browser smoke: capturing second tab");
+  // selectTab is the agent tool: it retargets agent defaults WITHOUT switching the user's
+  // view. Verify that, then switch the visible tab through the user path so the shell
+  // assertions below (tab cycling, review panel) run against the expected active tab.
+  const activeBeforeAgentSelect = browserController.getState().visible.activeTabId;
   const selectedSecond = await browserController.selectTab({ tabId: secondTabId });
+  if (browserController.getState().visible.activeTabId !== activeBeforeAgentSelect) {
+    throw new Error("browser smoke: agent selectTab must not change the user's active tab");
+  }
+  if (browserController.getState().visible.agentTargetTabId !== secondTabId) {
+    throw new Error("browser smoke: agent selectTab did not retarget the agent's default tab");
+  }
+  browserController.selectVisibleTab(secondTabId);
   const secondScreenshot = await browserController.screenshot({ mode: "visible", tabId: secondTabId });
   await assertLightBrowserSmokeScreenshot(firstScreenshot.screenshotPath, "first tab");
   await assertLightBrowserSmokeScreenshot(secondScreenshot.screenshotPath, "second tab after popup switch");

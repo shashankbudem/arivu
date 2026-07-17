@@ -314,7 +314,7 @@ export function createToolRegistry(context: ToolContext) {
       schema: {
         name: "browser_select_tab",
         description:
-          "Select a visible Arivu browser tab by tabId. Use browser_state first to discover tab ids, then select the intended tab before browser_screenshot or browser_task.",
+          "Set the agent's target tab by tabId: later browser tools without an explicit tabId act on it. Does not change which tab the user sees — the user's view and focus are never taken by agent actions. Use browser_state first to discover tab ids.",
         parameters: objectSchema({
           tabId: { type: "string", description: "Visible browser tab id from browser_state." }
         })
@@ -349,8 +349,12 @@ export function createToolRegistry(context: ToolContext) {
             enum: ["visible", "background"],
             description: "Optional browser mode. Defaults to hidden background mode."
           },
-          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
-          newTab: { type: "boolean", description: "Create and activate a new visible browser tab before opening the URL." }
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the agent's target tab." },
+          newTab: {
+            type: "boolean",
+            description:
+              "Create a new visible browser tab for the URL. The tab becomes the agent's target without disturbing the tab the user is viewing."
+          }
         })
       },
       async execute(args) {
@@ -372,7 +376,10 @@ export function createToolRegistry(context: ToolContext) {
           mode,
           destructive: !isLocalBrowserUrl(url)
         });
-        return formatBrowserToolResult("open", await browser.open({ url, mode, tabId: parsed.tabId, newTab: parsed.newTab }));
+        return formatBrowserToolResult(
+          "open",
+          await browser.open({ url, mode, tabId: parsed.tabId, newTab: parsed.newTab, source: "agent" })
+        );
       }
     });
 

@@ -184,7 +184,7 @@ export async function runBrowserTask(
       resolve({
         ok: true,
         success: false,
-        data: "The browser action opened a new tab or popup. Continue the remaining lookup or dialog work on the active tab from browser_state; do not repeat the popup-opening action."
+        data: "The browser action opened a new tab or popup. It is now the agent target tab (agentTargetTabId in browser_state); continue the remaining lookup or dialog work there. Do not repeat the popup-opening action."
       });
     };
     contents.on("did-create-window", onPopupCreated);
@@ -270,24 +270,36 @@ export async function runBrowserTask(
       contents.on("did-navigate", onNavigate);
       let lastProgress: PolledProgress | undefined;
       let instanceSettled = false;
+      // One poll in flight at a time: a throttled or wedged renderer answers executeJavaScript
+      // late or never, and dispatching a fresh poll every tick regardless once queued ~2,300
+      // calls over a 38-minute background hang — all of which flooded back at once when the
+      // renderer woke. Skipping ticks while a poll is outstanding costs nothing (the next
+      // answered tick reads the same cumulative history) and bounds the backlog at one.
+      let pollInFlight = false;
       const pollTimer = setInterval(() => {
-        void pollProgress(contents)
-          .then((progress) => {
-            // An in-flight poll can resolve after the instance settled (and, on a navigation
-            // resume, after its steps were folded into stepsUsedSoFar) — drop it.
-            if (!progress || instanceSettled) {
-              return;
-            }
-            const isNewStep = progress.stepCount !== lastProgress?.stepCount;
-            lastProgress = progress;
-            if (isNewStep && progress.stepCount > 0) {
-              onProgress?.({
-                stepIndex: stepsUsedSoFar + progress.stepCount,
-                summary: progress.lastGoal ?? progress.lastAction ?? `step ${progress.stepCount}`
-              });
-            }
-          })
-          .catch(() => undefined);
+        if (!pollInFlight) {
+          pollInFlight = true;
+          void pollProgress(contents)
+            .then((progress) => {
+              // An in-flight poll can resolve after the instance settled (and, on a navigation
+              // resume, after its steps were folded into stepsUsedSoFar) — drop it.
+              if (!progress || instanceSettled) {
+                return;
+              }
+              const isNewStep = progress.stepCount !== lastProgress?.stepCount;
+              lastProgress = progress;
+              if (isNewStep && progress.stepCount > 0) {
+                onProgress?.({
+                  stepIndex: stepsUsedSoFar + progress.stepCount,
+                  summary: progress.lastGoal ?? progress.lastAction ?? `step ${progress.stepCount}`
+                });
+              }
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              pollInFlight = false;
+            });
+        }
         const circuitFailure = circuitFailureFromDiagnostics(getBrowserTaskProxyDiagnostics(token));
         if (circuitFailure && !stopReason) {
           stopReason = "infrastructure";
