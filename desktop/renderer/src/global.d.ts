@@ -752,6 +752,44 @@ type ApprovalRequest = {
   request?: ApprovalPromptRequest;
 };
 
+// Mirrors src/tools/elicitation.ts: structured ask_user questions from the agent.
+type ElicitationQuestion = {
+  id: string;
+  type: "select" | "multiselect" | "text" | "url" | "number" | "images" | "files";
+  label: string;
+  description?: string;
+  required?: boolean;
+  options?: { value: string; label?: string; description?: string }[];
+  allowOther?: boolean;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  minCount?: number;
+  maxCount?: number;
+};
+
+type ElicitationPrompt = {
+  id: string;
+  request: {
+    title?: string;
+    reason?: string;
+    questions: ElicitationQuestion[];
+  };
+};
+
+type ElicitationAnswerValue = string | string[] | number | undefined;
+
+type ElicitationResponse = {
+  status: "answered" | "declined";
+  answers?: { id: string; value?: ElicitationAnswerValue; skipped?: boolean }[];
+};
+
+type ElicitationPickedFile = {
+  path: string;
+  name: string;
+  previewDataUrl?: string;
+};
+
 type BrowserTaskModelSettings = {
   providerId?: string;
   baseUrl?: string;
@@ -1034,6 +1072,9 @@ type DesktopApi = {
   captureBrowserScreenshot(args?: { mode?: BrowserMode; tabId?: string }): Promise<Record<string, unknown>>;
   respondApproval(id: string, approved: boolean): Promise<void>;
   onApprovalRequest(callback: (payload: ApprovalRequest) => void): () => void;
+  respondElicitation(id: string, response: ElicitationResponse): Promise<void>;
+  elicitationChooseFiles(kind: "images" | "files"): Promise<{ files: ElicitationPickedFile[] }>;
+  onElicitationRequest(callback: (payload: ElicitationPrompt) => void): () => void;
   onAgentEvent(callback: (payload: AgentStreamEvent) => void): () => void;
   onSessionEvent(callback: (payload: SessionLifecycleEvent) => void): () => void;
   onBrowserState(callback: (payload: BrowserState) => void): () => void;

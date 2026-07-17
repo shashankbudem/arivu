@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { WebContents } from "electron";
+import type { WebContents, WebFrameMain } from "electron";
 import type { BrowserTaskModelConfig, BrowserToolResult } from "../../src/tools/browserControl.js";
 import {
   getBrowserTaskProxyDiagnostics,
@@ -10,11 +10,14 @@ import {
   type BrowserTaskProxyDiagnostic
 } from "./browserTaskProxy.js";
 import {
+  ANNOTATE_CUSTOM_CONTROLS_SNIPPET,
   ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS,
   BACKFILL_REFLECTION_SNIPPET,
   BUILD_TRACE_SNIPPET,
   CAP_PAGE_CONTENT_SNIPPET,
-  INSTALL_AGENT_VISUAL_THEME_SNIPPET
+  INSTALL_AGENT_VISUAL_THEME_SNIPPET,
+  INSTALL_SERVICE_NOW_VARIABLE_TYPE_GUARD_SNIPPET,
+  INSTALL_UNRELATED_CHECKBOX_LABEL_GUARD_SNIPPET
 } from "./pageAgentInPageSnippets.js";
 
 /**
@@ -26,11 +29,12 @@ import {
  * injected instance with it), so there is no way to reactively capture exact state at the
  * instant before navigation. Instead a background poll reads a condensed progress snapshot
  * off the running instance every PROGRESS_POLL_INTERVAL_MS; on a confirmed `did-navigate`,
- * the last-polled snapshot seeds a resume instruction for a fresh instance on the new
- * document, under a shrunk step budget and a separate navigation-resume cap. A same-page
- * (`did-navigate-in-page`) navigation is a no-op: the JS context survives those. A child
- * window is a different target entirely, so opening one ends the originating instance with
- * an explicit active-tab handoff instead of letting it reason against the stale parent page.
+ * the destination is allowed to settle and the task returns at that safe action boundary.
+ * BrowserController then attaches snapshotAfter for the supervising agent, avoiding a second
+ * model call solely to describe the new document. A same-page (`did-navigate-in-page`)
+ * navigation is a no-op because the JS context survives it. A child window is a different
+ * target entirely, so opening one ends the originating instance with an explicit active-tab
+ * handoff instead of letting it reason against the stale parent page.
  */
 
 export type BrowserTaskArgs = {
@@ -76,11 +80,45 @@ const LLM_MAX_RETRIES = 4;
 const PROGRESS_POLL_INTERVAL_MS = 1_000;
 const NAVIGATION_SETTLE_TIMEOUT_MS = 10_000;
 const NAVIGATION_STABLE_MS = 300;
-const MAX_NAVIGATION_RESUMES = 6;
+const POST_SUBMIT_NAVIGATION_SETTLE_TIMEOUT_MS = 30_000;
+const POST_SUBMIT_NAVIGATION_STABLE_MS = 1_000;
 const TRANSIENT_FAILURE_THRESHOLD = 3;
 const TRANSIENT_CIRCUIT_TTL_MS = 2 * 60_000;
 const CONFIG_CIRCUIT_TTL_MS = 15 * 60_000;
 const MAX_RESULT_PROXY_DIAGNOSTICS = 10;
+// A rotation attempt still needs to register a proxy, inject a fresh instance, and get at
+// least one model round-trip; below this much of the shared timeoutMs budget left, trying a
+// fallback candidate can't accomplish anything and just burns the remainder on a doomed attempt.
+const MIN_ROTATION_REMAINING_MS = 5_000;
+const FRAME_PROBE_TIMEOUT_MS = 1_500;
+const FRAME_PROBE_SCRIPT = `(function() {
+  var selector = 'input:not([type="hidden"]),button,select,textarea,a[href],[role="button"],[role="combobox"],[contenteditable="true"]';
+  var elements = document.querySelectorAll ? document.querySelectorAll(selector) : [];
+  var visibleInteractiveCount = 0;
+  var limit = Math.min(elements.length, 1000);
+  for (var i = 0; i < limit; i++) {
+    var element = elements[i];
+    var rect = element.getBoundingClientRect ? element.getBoundingClientRect() : null;
+    var style = typeof getComputedStyle === "function" ? getComputedStyle(element) : null;
+    if (
+      rect &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      (!style || (style.display !== "none" && style.visibility !== "hidden"))
+    ) {
+      visibleInteractiveCount++;
+    }
+  }
+  return {
+    readyState: document.readyState || "",
+    visible: document.visibilityState !== "hidden",
+    width: Math.max(0, window.innerWidth || 0),
+    height: Math.max(0, window.innerHeight || 0),
+    formCount: document.forms ? document.forms.length : 0,
+    visibleInteractiveCount: visibleInteractiveCount,
+    textLength: document.body && document.body.innerText ? document.body.innerText.length : 0
+  };
+})()`;
 
 type BrowserTaskStopReason = "timeout" | "cancelled" | "infrastructure" | "target_closed";
 type ModelCircuit = { openedAt: number; expiresAt: number; reason: string };
@@ -102,6 +140,32 @@ type PolledProgress = {
   lastGoal?: string;
 };
 
+export type JavaScriptExecutionTarget = {
+  executeJavaScript(code: string, userGesture?: boolean): Promise<unknown>;
+};
+
+export type BrowserTaskExecutionTarget = {
+  target: JavaScriptExecutionTarget;
+  frame?: WebFrameMain;
+  isMainFrame: boolean;
+  processId?: number;
+  routingId?: number;
+  url: string;
+};
+
+type FrameProbe = {
+  readyState?: string;
+  visible?: boolean;
+  width?: number;
+  height?: number;
+  formCount?: number;
+  visibleInteractiveCount?: number;
+  textLength?: number;
+};
+
+const NAVIGATION_SHELL_INSTRUCTION_PATTERN =
+  /(?:\b(?:application\s+navigator|navigator\s+(?:filter|search|menu)|polaris\s+navigation|main\s+navigation|left(?:-hand)?\s+navigation)\b|["']?(?:all|favorites|history|workspaces)["']?\s+(?:menu|tab)\b)/i;
+
 let cachedBundleText: string | undefined;
 
 async function loadPageAgentBundle(): Promise<string> {
@@ -120,6 +184,161 @@ export function __setPageAgentBundleTextForTests(text: string | undefined): void
   cachedBundleText = text;
 }
 
+function frameDepth(frame: WebFrameMain): number {
+  let depth = 0;
+  let parent = frame.parent;
+  while (parent) {
+    depth += 1;
+    parent = parent.parent;
+  }
+  return depth;
+}
+
+function frameProbeScore(frame: WebFrameMain, probe: FrameProbe): number {
+  if (!probe.visible || (probe.width ?? 0) <= 0 || (probe.height ?? 0) <= 0) {
+    return 0;
+  }
+  const nameBonus = /^(?:gsft_main|content|workspace|main)$/i.test(frame.name || "") ? 10_000 : 0;
+  const formBonus = Math.min(Math.max(probe.formCount ?? 0, 0), 10) * 2_000;
+  const interactionBonus = Math.min(Math.max(probe.visibleInteractiveCount ?? 0, 0), 500) * 25;
+  const areaBonus = (probe.width ?? 0) * (probe.height ?? 0) >= 50_000 ? 500 : 0;
+  const readyBonus = probe.readyState === "complete" || probe.readyState === "interactive" ? 200 : 0;
+  const textBonus = (probe.textLength ?? 0) > 0 ? 100 : 0;
+  return nameBonus + formBonus + interactionBonus + areaBonus + readyBonus + textBonus + frameDepth(frame) * 50;
+}
+
+async function probeFrame(frame: WebFrameMain): Promise<FrameProbe | undefined> {
+  if (frame.detached || frame.isDestroyed()) {
+    return undefined;
+  }
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const result = await Promise.race([
+      frame.executeJavaScript(FRAME_PROBE_SCRIPT, false),
+      new Promise<undefined>((resolve) => {
+        timeout = setTimeout(() => resolve(undefined), FRAME_PROBE_TIMEOUT_MS);
+      })
+    ]);
+    return result && typeof result === "object" ? (result as FrameProbe) : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+/**
+ * Some app shells keep global navigation outside their substantial work iframe.
+ * Those instructions must start in the main document; otherwise the model sees
+ * only the current form/home card and may click an unrelated element with a
+ * vaguely similar label.
+ */
+export function browserTaskTargetsNavigationShell(instruction: string): boolean {
+  return NAVIGATION_SHELL_INSTRUCTION_PATTERN.test(instruction);
+}
+
+/**
+ * A global-navigation task is impossible on a standalone ServiceNow content
+ * document such as catalog_home.do: the Application Navigator exists only in
+ * navpage/the unified navigation shell. Reject before spending browser-model
+ * steps against a similarly named page-local search box.
+ */
+export function serviceNowNavigationSurfaceMismatch(instruction: string, currentUrl: string): string | undefined {
+  if (!browserTaskTargetsNavigationShell(instruction)) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(currentUrl);
+  } catch {
+    return undefined;
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host !== "service-now.com" && !host.endsWith(".service-now.com")) {
+    return undefined;
+  }
+  const path = parsed.pathname.toLowerCase();
+  if (path.endsWith("/navpage.do") || path === "/now/nav/ui" || path.startsWith("/now/nav/ui/")) {
+    return undefined;
+  }
+  return `Stopped before browser-agent execution: this task requires ServiceNow's global Application Navigator, but the active document is the standalone page ${currentUrl.slice(0, 1_000)} and has no navigator. Use browser_open on the exact navpage.do URL supplied by the user, then retry the global-navigation task; do not use this page's local search box.`;
+}
+
+/**
+ * PageController can pierce ordinary same-origin iframes, but a browser shell may
+ * place its work iframe beneath a shadow root. Electron still exposes that frame
+ * through WebFrameMain, so run the page agent directly in the most substantial
+ * visible work frame. This keeps the model's snapshot scoped to the real form
+ * instead of an empty outer app shell. Global-navigation instructions are the
+ * exception: their controls live in that outer document.
+ */
+export async function selectBrowserTaskExecutionTarget(
+  contents: WebContents,
+  allowedDomains: string[],
+  instruction = ""
+): Promise<BrowserTaskExecutionTarget> {
+  let contentsUrl = "";
+  try {
+    contentsUrl = contents.getURL();
+  } catch {
+    // A partially destroyed target or a small test double may not expose a URL.
+  }
+  const fallback: BrowserTaskExecutionTarget = {
+    target: contents,
+    isMainFrame: true,
+    url: contentsUrl
+  };
+  if (browserTaskTargetsNavigationShell(instruction)) {
+    return fallback;
+  }
+  let mainFrame: WebFrameMain | undefined;
+  let frames: WebFrameMain[] = [];
+  try {
+    mainFrame = contents.mainFrame;
+    frames = mainFrame?.framesInSubtree ?? [];
+  } catch {
+    return fallback;
+  }
+  if (!mainFrame || frames.length <= 1) {
+    return fallback;
+  }
+
+  const candidates = frames.filter((frame) => {
+    if (frame === mainFrame || frame.detached || frame.isDestroyed()) {
+      return false;
+    }
+    try {
+      const host = new URL(frame.url).hostname.toLowerCase();
+      return Boolean(host && hostAllowed(host, allowedDomains));
+    } catch {
+      return false;
+    }
+  });
+  const probed = await Promise.all(
+    candidates.map(async (frame) => ({
+      frame,
+      score: frameProbeScore(frame, (await probeFrame(frame)) ?? {})
+    }))
+  );
+  const best = probed.sort((left, right) => right.score - left.score)[0];
+  // Avoid moving the agent into incidental analytics, media, or tiny helper
+  // frames. A named work frame, a real form, or a sufficiently interactive app
+  // comfortably exceeds this threshold.
+  if (!best || best.score < 1_200) {
+    return fallback;
+  }
+  return {
+    target: best.frame,
+    frame: best.frame,
+    isMainFrame: false,
+    processId: best.frame.processId,
+    routingId: best.frame.routingId,
+    url: best.frame.url
+  };
+}
+
 export async function runBrowserTask(
   contents: WebContents,
   args: BrowserTaskArgs,
@@ -127,31 +346,67 @@ export async function runBrowserTask(
   signal?: AbortSignal,
   onProgress?: (progress: { stepIndex: number; summary: string }) => void
 ): Promise<BrowserToolResult> {
-  const maxSteps = clamp(Math.trunc(args.maxSteps ?? modelConfig.maxSteps ?? DEFAULT_MAX_STEPS), MIN_MAX_STEPS, MAX_MAX_STEPS);
-  const stepDelaySeconds = Math.max(0, (modelConfig.stepDelayMs ?? STEP_DELAY_SECONDS * 1_000) / 1_000);
+  const instruction = stripStaleBrowserTaskIndices(args.instruction);
   const timeoutMs = clamp(Math.trunc(args.timeoutMs ?? DEFAULT_TIMEOUT_MS), MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
-  const modelMetadata = {
-    providerId: modelConfig.providerId,
-    providerName: modelConfig.providerName,
-    model: modelConfig.model,
-    endpoint: safeEndpoint(modelConfig.baseUrl),
-    contextWindowTokens: modelConfig.contextWindowTokens,
-    maxSteps,
+  const primaryMaxSteps = clamp(Math.trunc(args.maxSteps ?? modelConfig.maxSteps ?? DEFAULT_MAX_STEPS), MIN_MAX_STEPS, MAX_MAX_STEPS);
+  const primaryStepDelaySeconds = Math.max(0, (modelConfig.stepDelayMs ?? STEP_DELAY_SECONDS * 1_000) / 1_000);
+  const candidateMetadata = (candidate: BrowserTaskModelConfig, candidateMaxSteps: number, candidateStepDelaySeconds: number) => ({
+    providerId: candidate.providerId,
+    providerName: candidate.providerName,
+    model: candidate.model,
+    endpoint: safeEndpoint(candidate.baseUrl),
+    contextWindowTokens: candidate.contextWindowTokens,
+    maxSteps: candidateMaxSteps,
     timeoutMs,
-    stepDelayMs: Math.round(stepDelaySeconds * 1_000)
-  };
-  const circuitKey = modelCircuitKey(modelConfig);
-  const openCircuit = activeModelCircuit(circuitKey);
-  if (openCircuit) {
+    stepDelayMs: Math.round(candidateStepDelaySeconds * 1_000)
+  });
+  const navigationSurfaceMismatch = serviceNowNavigationSurfaceMismatch(instruction, contents.getURL());
+  if (navigationSurfaceMismatch) {
     return {
       success: false,
-      data: `Browser task model is temporarily unavailable: ${openCircuit.reason} Retry after ${new Date(openCircuit.expiresAt).toISOString()} or select another browser-task model/provider.`,
+      data: navigationSurfaceMismatch,
+      stepCount: 0,
+      stopped: false,
+      navigationCount: 0,
+      durationMs: 0,
+      browserTaskModel: candidateMetadata(modelConfig, primaryMaxSteps, primaryStepDelaySeconds),
+      proxyDiagnostics: []
+    };
+  }
+
+  // Primary first, then configured fallbacks in order. A candidate whose circuit is already
+  // open from an earlier call is dropped up front — it would only fail the same way again.
+  const modelCandidates = dedupeModelCandidates([modelConfig, ...(modelConfig.fallbacks ?? [])]);
+  const viableCandidates = modelCandidates.filter((candidate) => !activeModelCircuit(modelCircuitKey(candidate)));
+  if (viableCandidates.length === 0) {
+    const primaryMetadata = candidateMetadata(modelConfig, primaryMaxSteps, primaryStepDelaySeconds);
+    if (modelCandidates.length === 1) {
+      const openCircuit = activeModelCircuit(modelCircuitKey(modelConfig))!;
+      return {
+        success: false,
+        data: `Browser task model is temporarily unavailable: ${openCircuit.reason} Retry after ${new Date(openCircuit.expiresAt).toISOString()} or select another browser-task model/provider.`,
+        stepCount: 0,
+        stopped: true,
+        stopReason: "infrastructure",
+        navigationCount: 0,
+        durationMs: 0,
+        browserTaskModel: primaryMetadata,
+        proxyDiagnostics: []
+      };
+    }
+    const reasons = modelCandidates.flatMap((candidate) => {
+      const circuit = activeModelCircuit(modelCircuitKey(candidate));
+      return circuit ? [`${candidate.model} (${circuit.reason})`] : [];
+    });
+    return {
+      success: false,
+      data: `All configured browser-task models are temporarily unavailable: ${reasons.join(" ")} Select another browser-task model/provider, or retry after a circuit cools down.`,
       stepCount: 0,
       stopped: true,
       stopReason: "infrastructure",
       navigationCount: 0,
       durationMs: 0,
-      browserTaskModel: modelMetadata,
+      browserTaskModel: primaryMetadata,
       proxyDiagnostics: []
     };
   }
@@ -159,11 +414,6 @@ export async function runBrowserTask(
   // ("Example.COM", ".example.com") cannot make the in-page host check reject every page.
   const allowedDomains = normalizeAllowedDomains(args.allowedDomains?.length ? args.allowedDomains : defaultAllowedDomains(contents));
   const bundleText = await loadPageAgentBundle();
-  const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
-    realBaseUrl: modelConfig.baseUrl,
-    realApiKey: modelConfig.apiKey,
-    ttlMs: timeoutMs + PROXY_TOKEN_TTL_SLOP_MS
-  });
 
   const startedAt = Date.now();
   let deadlineTimer: NodeJS.Timeout | undefined;
@@ -211,18 +461,35 @@ export async function runBrowserTask(
 
   let stepsUsedSoFar = 0;
   let navigationResumeCount = 0;
-  let resumeInstruction: string | undefined;
   let finalResult: InjectedTaskResult = { ok: false, error: "Browser task did not run." };
   // Progress last polled off the current instance; used to report how far the task got when
   // it is stopped without returning a result of its own (timeout/cancel before settle).
   // Assigned per iteration so a previous instance's steps (already folded into
   // stepsUsedSoFar on navigation resume) are never counted twice.
   let lastKnownProgress: PolledProgress | undefined;
+  // One proxy token per attempted candidate; every one of them is torn down below regardless
+  // of which attempt finalResult came from.
+  const registeredTokens: string[] = [];
+  // Only populated when a candidate actually failed and rotation moved to the next one; a
+  // single-candidate call (the default, no fallbackModels configured) never touches this.
+  const rotatedFrom: string[] = [];
+  let modelMetadata = candidateMetadata(modelConfig, primaryMaxSteps, primaryStepDelaySeconds);
+  let circuitKey = modelCircuitKey(modelConfig);
+  let token = "";
 
   try {
-    while (true) {
+    for (let candidateIndex = 0; candidateIndex < viableCandidates.length; candidateIndex += 1) {
+      const candidate = viableCandidates[candidateIndex];
+      const hasNextCandidate = candidateIndex < viableCandidates.length - 1;
+      circuitKey = modelCircuitKey(candidate);
+      const candidateMaxSteps = clamp(Math.trunc(args.maxSteps ?? candidate.maxSteps ?? DEFAULT_MAX_STEPS), MIN_MAX_STEPS, MAX_MAX_STEPS);
+      const candidateStepDelaySeconds = Math.max(0, (candidate.stepDelayMs ?? STEP_DELAY_SECONDS * 1_000) / 1_000);
+      modelMetadata = candidateMetadata(candidate, candidateMaxSteps, candidateStepDelaySeconds);
+
       // The stop can fire before the first injection (pre-aborted signal) or between
-      // navigation resumes; never hand the page a fresh task after that.
+      // rotation attempts; never hand the page a fresh task after that. (Rotation always
+      // resets stopReason to undefined before continuing, so "infrastructure" can never be
+      // seen here — that case is handled, and decided, within the attempt that raised it.)
       if (stopReason) {
         finalResult = {
           ok: false,
@@ -231,20 +498,28 @@ export async function runBrowserTask(
               ? "Browser task was cancelled."
               : stopReason === "target_closed"
                 ? "The browser tab closed while the delegated task was running. Inspect browser_state and continue on the originating tab."
-                : stopReason === "infrastructure"
-                  ? "Browser task stopped because its model endpoint became unavailable."
-                  : `Browser task exceeded its ${timeoutMs}ms budget.`
+                : `Browser task exceeded its ${timeoutMs}ms budget.`
         };
         break;
       }
-      const remainingSteps = clamp(maxSteps - stepsUsedSoFar, 1, MAX_MAX_STEPS);
+
+      const registered = await registerBrowserTaskProxyEntry({
+        realBaseUrl: candidate.baseUrl,
+        realApiKey: candidate.apiKey,
+        ttlMs: timeoutMs + PROXY_TOKEN_TTL_SLOP_MS
+      });
+      token = registered.token;
+      const proxyBaseUrl = registered.proxyBaseUrl;
+      registeredTokens.push(token);
+
+      const remainingSteps = clamp(candidateMaxSteps - stepsUsedSoFar, 1, MAX_MAX_STEPS);
       const script = injectedTaskScript(bundleText, {
-        instruction: resumeInstruction ?? args.instruction,
+        instruction,
         proxyBaseUrl,
         token,
-        model: modelConfig.model,
+        model: candidate.model,
         maxSteps: remainingSteps,
-        stepDelaySeconds,
+        stepDelaySeconds: candidateStepDelaySeconds,
         // Steps already completed by pre-navigation instances; keeps trace step numbers
         // aligned with the cumulative stepCount in the tool result.
         stepIndexOffset: stepsUsedSoFar,
@@ -253,6 +528,7 @@ export async function runBrowserTask(
         allowSensitiveActions: Boolean(args.allowSensitiveActions),
         visible: Boolean(args.visible)
       });
+      const executionTarget = await selectBrowserTaskExecutionTarget(contents, allowedDomains, instruction);
 
       let navigated = false;
       let settleNavigation: ((result: InjectedTaskResult) => void) | undefined;
@@ -260,6 +536,9 @@ export async function runBrowserTask(
         settleNavigation = resolve;
       });
       const onNavigate = () => {
+        if (navigated) {
+          return;
+        }
         navigated = true;
         // Electron does not consistently reject an in-flight executeJavaScript promise when a
         // navigation destroys its execution context. Treat the navigation event itself as the
@@ -267,7 +546,55 @@ export async function runBrowserTask(
         // immediately instead of waiting for the outer task deadline.
         settleNavigation?.({ ok: false, error: "The page navigated while the browser task was running." });
       };
+      const onFrameNavigate = (
+        _event: unknown,
+        url: string,
+        _httpResponseCode: number,
+        _httpStatusText: string,
+        isMainFrame: boolean,
+        frameProcessId: number,
+        frameRoutingId: number
+      ) => {
+        if (executionTarget.isMainFrame || isMainFrame) {
+          return;
+        }
+        const exactFrame = frameProcessId === executionTarget.processId && frameRoutingId === executionTarget.routingId;
+        let replacementFrame: WebFrameMain | undefined;
+        try {
+          replacementFrame = contents.mainFrame.framesInSubtree.find(
+            (frame) => frame.processId === frameProcessId && frame.routingId === frameRoutingId
+          );
+        } catch {
+          // The old frame can be detached while Electron is publishing its replacement.
+        }
+        const sameWorkFrame = Boolean(executionTarget.frame?.name) && replacementFrame?.name === executionTarget.frame?.name;
+        const sameTreeNode =
+          executionTarget.frame?.frameTreeNodeId !== undefined &&
+          replacementFrame?.frameTreeNodeId === executionTarget.frame.frameTreeNodeId;
+        let allowedDestination = false;
+        try {
+          allowedDestination = hostAllowed(new URL(url).hostname.toLowerCase(), allowedDomains);
+        } catch {
+          // Non-URL frame events are not useful navigation boundaries.
+        }
+        if (allowedDestination && (exactFrame || sameWorkFrame || sameTreeNode)) {
+          onNavigate();
+        }
+      };
+      const initialMainUrl = contents.getURL();
+      const onNavigateInPage = (_event: unknown, url: string, isMainFrame: boolean) => {
+        // ServiceNow updates the Polaris shell route in-place while replacing
+        // gsft_main. The top document survives, but the child document containing
+        // PageAgent does not, so this is a real task navigation boundary.
+        if (!executionTarget.isMainFrame && isMainFrame && url !== initialMainUrl) {
+          onNavigate();
+        }
+      };
       contents.on("did-navigate", onNavigate);
+      if (!executionTarget.isMainFrame) {
+        contents.on("did-frame-navigate", onFrameNavigate);
+        contents.on("did-navigate-in-page", onNavigateInPage);
+      }
       let lastProgress: PolledProgress | undefined;
       let instanceSettled = false;
       // One poll in flight at a time: a throttled or wedged renderer answers executeJavaScript
@@ -279,11 +606,20 @@ export async function runBrowserTask(
       const pollTimer = setInterval(() => {
         if (!pollInFlight) {
           pollInFlight = true;
-          void pollProgress(contents)
+          void pollProgress(executionTarget.target)
             .then((progress) => {
               // An in-flight poll can resolve after the instance settled (and, on a navigation
               // resume, after its steps were folded into stepsUsedSoFar) — drop it.
-              if (!progress || instanceSettled) {
+              if (instanceSettled) {
+                return;
+              }
+              // A child-frame navigation can swap routing ids without emitting a
+              // matchable event. The replacement document has no task global, which
+              // is an unambiguous context-loss signal after injection.
+              if (!progress) {
+                if (!executionTarget.isMainFrame) {
+                  onNavigate();
+                }
                 return;
               }
               const isNewStep = progress.stepCount !== lastProgress?.stepCount;
@@ -295,7 +631,11 @@ export async function runBrowserTask(
                 });
               }
             })
-            .catch(() => undefined)
+            .catch(() => {
+              if (!instanceSettled && !executionTarget.isMainFrame) {
+                onNavigate();
+              }
+            })
             .finally(() => {
               pollInFlight = false;
             });
@@ -312,7 +652,7 @@ export async function runBrowserTask(
         }
       }, PROGRESS_POLL_INTERVAL_MS);
 
-      const taskPromise = executeInjectedTask(contents, script);
+      const taskPromise = executeInjectedTask(executionTarget.target, script);
       let result: InjectedTaskResult;
       try {
         result = await Promise.race([taskPromise, navigationPromise, popupPromise, stopPromise, infrastructureStopPromise]);
@@ -320,6 +660,10 @@ export async function runBrowserTask(
         instanceSettled = true;
         clearInterval(pollTimer);
         contents.off("did-navigate", onNavigate);
+        if (!executionTarget.isMainFrame) {
+          contents.off("did-frame-navigate", onFrameNavigate);
+          contents.off("did-navigate-in-page", onNavigateInPage);
+        }
       }
       lastKnownProgress = lastProgress;
 
@@ -327,8 +671,8 @@ export async function runBrowserTask(
         // The page agent is scoped to the originating WebContents and cannot observe the child
         // tab. Stop it promptly so it cannot keep scrolling/clicking the parent while the popup
         // is active, then preserve any action progress that became visible during the stop.
-        await Promise.race([stopInjectedTask(contents).catch(() => undefined), delay(STOP_GRACE_MS)]);
-        const popupProgress = await pollProgress(contents).catch(() => undefined);
+        await Promise.race([stopInjectedTask(executionTarget.target).catch(() => undefined), delay(STOP_GRACE_MS)]);
+        const popupProgress = await pollProgress(executionTarget.target).catch(() => undefined);
         if (popupProgress) {
           lastKnownProgress = popupProgress;
         }
@@ -339,40 +683,39 @@ export async function runBrowserTask(
         break;
       }
 
-      if (stopReason) {
-        if (stopReason === "target_closed") {
-          finalResult = result;
-          break;
-        }
+      if (stopReason === "target_closed") {
+        finalResult = result;
+        break;
+      }
+
+      if (stopReason === "timeout" || stopReason === "cancelled" || stopReason === "infrastructure") {
         // A wedged renderer can make executeJavaScript never resolve; the stop request and
         // the settle wait share the same bound so a timeout can never hang the tool call.
-        await Promise.race([stopInjectedTask(contents).catch(() => undefined), delay(STOP_GRACE_MS)]);
+        await Promise.race([stopInjectedTask(executionTarget.target).catch(() => undefined), delay(STOP_GRACE_MS)]);
         const settled = await Promise.race([taskPromise, delay(STOP_GRACE_MS).then(() => undefined)]);
         finalResult = settled ?? result;
+        if (stopReason === "infrastructure" && !finalResult.ok) {
+          const progressStepCount = stepsUsedSoFar + (finalResult.stepCount ?? lastKnownProgress?.stepCount ?? 0);
+          const remainingMs = timeoutMs - (Date.now() - startedAt);
+          if (canRotateToNextCandidate(progressStepCount, hasNextCandidate, remainingMs)) {
+            rotatedFrom.push(`${candidate.model} (${activeModelCircuit(circuitKey)?.reason ?? finalResult.error ?? "endpoint unavailable"})`);
+            stopReason = undefined;
+            continue;
+          }
+        }
         break;
       }
 
       if (!result.ok && navigated) {
-        // did-navigate can be the first hop of a redirect/reload chain. Re-injecting while the
-        // destination is still loading makes each later hop look like another agent action and
-        // wastes the navigation-resume budget. Wait for a short stable, non-loading window.
-        await waitForNavigationToSettle(contents);
+        // did-navigate can be the first hop of a redirect/reload chain. Wait for the final
+        // destination, then stop at this safe action boundary. BrowserController attaches a
+        // fresh snapshotAfter; another in-page LLM call merely to describe the destination
+        // adds latency and another opportunity for a stale-index action.
+        await waitForNavigationToSettle(contents, lastProgress);
         navigationResumeCount += 1;
         stepsUsedSoFar += lastProgress?.stepCount ?? 0;
-        // Folded into stepsUsedSoFar above; must not be re-added via the fallback below.
         lastKnownProgress = undefined;
-        if (navigationResumeCount > MAX_NAVIGATION_RESUMES || stepsUsedSoFar >= maxSteps) {
-          finalResult = {
-            ok: false,
-            error: `Browser task stopped after ${navigationResumeCount} navigations without finishing (last known progress: ${
-              lastProgress?.stepCount ?? 0
-            } step(s)).`
-          };
-          break;
-        }
-        // Check the post-navigation host BEFORE re-injecting: the injected script carries the
-        // live proxy token, and the in-page allowlist check only stops the agent after the
-        // script (and token) are already in the new page's context.
+        // Check the post-navigation host before treating the boundary as successful.
         const nextHost = currentHost(contents);
         if (nextHost && !hostAllowed(nextHost, allowedDomains)) {
           finalResult = {
@@ -381,11 +724,47 @@ export async function runBrowserTask(
           };
           break;
         }
-        resumeInstruction = buildResumeInstruction(lastProgress, navigationResumeCount, contents.getURL());
-        continue;
+        const newRecordMismatch = newRecordNavigationMismatch(instruction, contents.getURL());
+        if (newRecordMismatch) {
+          finalResult = {
+            ok: true,
+            success: false,
+            data: newRecordMismatch,
+            stepCount: 0
+          };
+          break;
+        }
+        finalResult = {
+          ok: true,
+          success: true,
+          data: buildNavigationCheckpointResult(lastProgress, navigationResumeCount, contents.getURL()),
+          stepCount: 0
+        };
+        break;
       }
 
       finalResult = result;
+      if (!finalResult.ok) {
+        // The mid-run poll ticks every second and may not have caught a failure the whole
+        // call already settled from (a fast-failing first request, or executeJavaScript
+        // itself rejecting). Check once more so this attempt is still rotation-eligible.
+        const freshCircuitFailure = circuitFailureFromDiagnostics(getBrowserTaskProxyDiagnostics(token));
+        if (freshCircuitFailure) {
+          stopReason = "infrastructure";
+          modelCircuits.set(circuitKey, {
+            openedAt: Date.now(),
+            expiresAt: Date.now() + freshCircuitFailure.ttlMs,
+            reason: freshCircuitFailure.reason
+          });
+          const progressStepCount = stepsUsedSoFar + (finalResult.stepCount ?? lastKnownProgress?.stepCount ?? 0);
+          const remainingMs = timeoutMs - (Date.now() - startedAt);
+          if (canRotateToNextCandidate(progressStepCount, hasNextCandidate, remainingMs)) {
+            rotatedFrom.push(`${candidate.model} (${freshCircuitFailure.reason})`);
+            stopReason = undefined;
+            continue;
+          }
+        }
+      }
       break;
     }
 
@@ -393,15 +772,6 @@ export async function runBrowserTask(
     const success = finalResult.ok ? Boolean(finalResult.success) : false;
     const stepCount = stepsUsedSoFar + (finalResult.stepCount ?? lastKnownProgress?.stepCount ?? 0);
     let data = finalResult.ok ? (finalResult.data ?? "") : (finalResult.error ?? "Browser task failed.");
-    const terminalCircuitFailure = !success ? circuitFailureFromDiagnostics(getBrowserTaskProxyDiagnostics(token)) : undefined;
-    if (terminalCircuitFailure && !stopReason) {
-      stopReason = "infrastructure";
-      modelCircuits.set(circuitKey, {
-        openedAt: Date.now(),
-        expiresAt: Date.now() + terminalCircuitFailure.ttlMs,
-        reason: terminalCircuitFailure.reason
-      });
-    }
     // Only when the task did NOT succeed: a task that completed during the stop grace window
     // keeps its real answer as data (stopReason still records that the deadline fired).
     if (stopReason === "timeout" && !success) {
@@ -442,6 +812,9 @@ export async function runBrowserTask(
     if (finalResult.tokensUsed) {
       result.tokensUsed = finalResult.tokensUsed;
     }
+    if (rotatedFrom.length > 0) {
+      result.rotatedModels = rotatedFrom;
+    }
     return result;
   } finally {
     if (deadlineTimer) {
@@ -453,7 +826,9 @@ export async function runBrowserTask(
     if (onPopupCreated) {
       contents.off("did-create-window", onPopupCreated);
     }
-    unregisterBrowserTaskProxyEntry(token);
+    for (const registeredToken of registeredTokens) {
+      unregisterBrowserTaskProxyEntry(registeredToken);
+    }
   }
 }
 
@@ -468,6 +843,32 @@ function activeModelCircuit(key: string): ModelCircuit | undefined {
     return undefined;
   }
   return circuit;
+}
+
+/** Primary first, each fallback in configured order; a repeated (baseUrl, model) pair collapses to its first occurrence. */
+function dedupeModelCandidates(candidates: BrowserTaskModelConfig[]): BrowserTaskModelConfig[] {
+  const seen = new Set<string>();
+  const deduped: BrowserTaskModelConfig[] = [];
+  for (const candidate of candidates) {
+    const key = modelCircuitKey(candidate);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(candidate);
+  }
+  return deduped;
+}
+
+/**
+ * Rotation is only safe when the failed attempt made zero observable progress: page-agent's
+ * history/memory lives inside the instance that just died, so resuming on a different model
+ * would mean guessing at continuation instead of replaying, the exact risk navigation
+ * checkpoints already stop short of. A candidate with real steps taken instead returns its
+ * checkpoint as final, same as a navigation boundary, and leaves the follow-up call to rotate.
+ */
+function canRotateToNextCandidate(progressStepCount: number, hasNextCandidate: boolean, remainingMs: number): boolean {
+  return progressStepCount === 0 && hasNextCandidate && remainingMs >= MIN_ROTATION_REMAINING_MS;
 }
 
 export function circuitFailureFromDiagnostics(diagnostics: BrowserTaskProxyDiagnostic[]): { reason: string; ttlMs: number } | undefined {
@@ -527,45 +928,61 @@ function isModelConnectivityFailure(data: string): boolean {
   return /network request failed|failed to fetch|networkerror|err_connection|load failed/i.test(data);
 }
 
-function buildResumeInstruction(progress: PolledProgress | undefined, navigationResumeCount: number, currentUrl: string): string {
+function buildNavigationCheckpointResult(progress: PolledProgress | undefined, navigationResumeCount: number, currentUrl: string): string {
   const stepCount = progress?.stepCount ?? 0;
-  // lastAction/lastGoal are model-generated under page influence and end up inside the resumed
-  // agent's <user_request>; condensing bounds what a hostile page can steer into that slot.
+  // lastAction/lastGoal are model-generated under page influence and end up in a tool result;
+  // condensing bounds what a hostile page can steer into that slot.
   const lastAction = condenseForPrompt(progress?.lastAction, 100);
   const lastGoal = condenseForPrompt(progress?.lastGoal, 200);
   const actionNote = lastAction ? ` (last action: ${lastAction}${lastGoal ? `, aiming to ${lastGoal}` : ""})` : "";
   const safeCurrentUrl = condenseForPrompt(currentUrl, 1_000) ?? "unknown";
-  // A cross-document navigation is always an action boundary, even when polling captured
-  // earlier steps. Repeating the original imperative on the destination is unsafe: a smaller
-  // model can replay form-field actions against unrelated controls on the parent/list page
-  // after a successful Submit. End at a read-only checkpoint and let the supervising model use
-  // snapshotAfter to issue a fresh, destination-specific task.
   const progressNote =
     stepCount > 0
       ? `The previous document recorded ${stepCount} completed step(s)${actionNote}.`
       : "The previous action replaced the document before progress polling could record it.";
-  return `Navigation checkpoint ${navigationResumeCount}: the previous document was replaced while this task was running.\n${progressNote}\nCurrent page URL: ${safeCurrentUrl}\n\nREAD-ONLY CHECKPOINT: Do not click, type, scroll, submit, select, or navigate. Do not attempt or repeat any action from the previous document. Inspect the current page, then choose done in your next response. Report the current page title, URL, and visible state, and say that the calling agent should use snapshotAfter to decide whether any follow-up browser_task is needed.`;
+  return `Navigation checkpoint ${navigationResumeCount}: the previous document was replaced while this task was running.\n${progressNote}\nCurrent page URL: ${safeCurrentUrl}\nThe browser task stopped at this safe navigation boundary. The calling agent must inspect snapshotAfter and issue a fresh, destination-specific browser_task only if more work is needed; do not repeat the completed action.`;
 }
 
-async function waitForNavigationToSettle(contents: WebContents): Promise<void> {
+function isLikelyPostSubmitProgress(progress: PolledProgress | undefined): boolean {
+  const latestIntent = `${progress?.lastAction ?? ""} ${progress?.lastGoal ?? ""}`;
+  return /\b(?:submit|save|insert|update|create)\b/i.test(latestIntent);
+}
+
+function isTransientPostSubmitUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return url.pathname.endsWith(".do") && url.searchParams.has("sysparm_now_ui_interaction");
+  } catch {
+    return false;
+  }
+}
+
+async function waitForNavigationToSettle(contents: WebContents, progress?: PolledProgress): Promise<void> {
   // Older Electron test doubles (and any alternate WebContents-compatible target) may not
   // expose isLoading; their navigation event is already the only available boundary.
   if (typeof contents.isLoading !== "function") {
     return;
   }
-  const deadline = Date.now() + NAVIGATION_SETTLE_TIMEOUT_MS;
+  const initialUrl = contents.getURL();
+  // ServiceNow first redirects a submitted form through a short-lived *.do URL carrying
+  // sysparm_now_ui_interaction, then performs a delayed redirect to the saved parent/list.
+  // A normal New-record form may also use sys_id=-1, so only the interaction marker (or
+  // explicit last-step submit intent) earns the longer window.
+  const postSubmit = isLikelyPostSubmitProgress(progress) || isTransientPostSubmitUrl(initialUrl);
+  const deadline = Date.now() + (postSubmit ? POST_SUBMIT_NAVIGATION_SETTLE_TIMEOUT_MS : NAVIGATION_SETTLE_TIMEOUT_MS);
+  const stableWindow = postSubmit ? POST_SUBMIT_NAVIGATION_STABLE_MS : NAVIGATION_STABLE_MS;
   let stableSince: number | undefined;
-  let lastUrl = contents.getURL();
+  let lastUrl = initialUrl;
   while (Date.now() < deadline) {
     await delay(100);
     const currentUrl = contents.getURL();
-    if (contents.isLoading() || currentUrl !== lastUrl) {
+    if (contents.isLoading() || currentUrl !== lastUrl || (postSubmit && isTransientPostSubmitUrl(currentUrl))) {
       lastUrl = currentUrl;
       stableSince = undefined;
       continue;
     }
     stableSince ??= Date.now();
-    if (Date.now() - stableSince >= NAVIGATION_STABLE_MS) {
+    if (Date.now() - stableSince >= stableWindow) {
       return;
     }
   }
@@ -631,7 +1048,13 @@ function arivuHostAllowed(host) {
     return normalized === domain || normalized.endsWith("." + domain);
   });
 }
+var arivuAnnotateCustomControls = ${ANNOTATE_CUSTOM_CONTROLS_SNIPPET};
 var arivuOnBeforeStep = async function(agentInstance) {
+  try {
+    arivuAnnotateCustomControls(document);
+  } catch (err) {
+    console.warn("[Arivu] Custom control snapshot annotation unavailable:", err);
+  }
   var url = await agentInstance.pageController.getCurrentUrl();
   var host;
   try {
@@ -659,6 +1082,8 @@ var arivuCapPageContent = ${CAP_PAGE_CONTENT_SNIPPET};
 var arivuBackfillReflection = ${BACKFILL_REFLECTION_SNIPPET};
 var arivuBuildTrace = ${BUILD_TRACE_SNIPPET};
 var arivuInstallAgentVisualTheme = ${INSTALL_AGENT_VISUAL_THEME_SNIPPET};
+var arivuInstallServiceNowVariableTypeGuard = ${INSTALL_SERVICE_NOW_VARIABLE_TYPE_GUARD_SNIPPET};
+var arivuInstallUnrelatedCheckboxLabelGuard = ${INSTALL_UNRELATED_CHECKBOX_LABEL_GUARD_SNIPPET};
 var arivuAgentVisualThemeInstalled = false;
 if (${JSON.stringify(options.visible)}) {
   try {
@@ -708,7 +1133,36 @@ if (${JSON.stringify(options.visible)}) {
   }
 }
 window.__arivuPageAgentTask = core;
+var arivuCleanupServiceNowVariableTypeGuard = function() {};
+var arivuCleanupUnrelatedCheckboxLabelGuard = function() {};
+try {
+  arivuCleanupServiceNowVariableTypeGuard = arivuInstallServiceNowVariableTypeGuard(
+    core,
+    ${JSON.stringify(options.instruction)}
+  );
+} catch (err) {
+  console.warn("[Arivu] ServiceNow variable type guard unavailable:", err);
+}
+try {
+  arivuCleanupUnrelatedCheckboxLabelGuard = arivuInstallUnrelatedCheckboxLabelGuard(
+    core,
+    ${JSON.stringify(options.instruction)}
+  );
+} catch (err) {
+  console.warn("[Arivu] Unrelated checkbox label guard unavailable:", err);
+}
+try {
+  arivuAnnotateCustomControls(document);
+} catch (err) {
+  console.warn("[Arivu] Initial custom control snapshot annotation unavailable:", err);
+}
 return core.execute(${JSON.stringify(options.instruction)}).then(function(result) {
+  try {
+    arivuCleanupServiceNowVariableTypeGuard();
+  } catch {}
+  try {
+    arivuCleanupUnrelatedCheckboxLabelGuard();
+  } catch {}
   var history = (result && result.history) || [];
   var stepCount = 0;
   for (var i = 0; i < history.length; i++) {
@@ -735,6 +1189,12 @@ return core.execute(${JSON.stringify(options.instruction)}).then(function(result
     tokensUsed: trace.tokensUsed
   };
 }).catch(function(err) {
+  try {
+    arivuCleanupServiceNowVariableTypeGuard();
+  } catch {}
+  try {
+    arivuCleanupUnrelatedCheckboxLabelGuard();
+  } catch {}
   return { ok: false, error: String(err && err.message ? err.message : err) };
 });
 })()`;
@@ -759,6 +1219,93 @@ function currentHost(contents: WebContents): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Browser-state indices are regenerated after every DOM change. Supervising
+ * models sometimes copy an index from snapshotAfter into the next instruction;
+ * leaving that hint in place makes a small DOM model obey the stale number even
+ * when the current element at that index has a different label. Preserve the
+ * semantic instruction while removing only explicit index annotations.
+ */
+export function stripStaleBrowserTaskIndices(instruction: string): string {
+  return instruction
+    .replace(/\s*[[(]\s*index\s*:?\s*#?\d+\s*[\])]/gi, "")
+    .replace(/\bindex\s*:?\s*#?\d+\b/gi, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([,.;:])/g, "$1")
+    .trim();
+}
+
+/**
+ * A stale related-list index can point at the first existing row after records are
+ * added, even though the instruction says to click New. Navigation destroys the
+ * page-agent context before its after-step guard can inspect the clicked element,
+ * so validate the destination at the supervisor boundary.
+ */
+export function newRecordNavigationMismatch(instruction: string, destinationUrl: string): string | undefined {
+  const asksToClickNew =
+    /\bclick\b[\s\S]{0,80}\bnew\b[\s\S]{0,40}\bbutton\b/i.test(instruction) ||
+    /\bclick\b[\s\S]{0,80}\bbutton\b[\s\S]{0,40}\bnew\b/i.test(instruction);
+  let decodedUrl = destinationUrl;
+  for (let decodeAttempt = 0; decodeAttempt < 2; decodeAttempt++) {
+    try {
+      const next = decodeURIComponent(decodedUrl);
+      if (next === decodedUrl) {
+        break;
+      }
+      decodedUrl = next;
+    } catch {
+      // Keep the last valid decoding for malformed escape sequences.
+      break;
+    }
+  }
+  let destinationPath = "";
+  let destinationSysId: string | null = null;
+  try {
+    const parsed = new URL(decodedUrl);
+    destinationPath = parsed.pathname;
+    destinationSysId = parsed.searchParams.get("sys_id");
+  } catch {
+    destinationPath = /^https?:\/\/[^/]+([^?#]*)/i.exec(decodedUrl)?.[1] ?? "";
+    destinationSysId = /[?&]sys_id=([^&#]+)/i.exec(decodedUrl)?.[1] ?? null;
+  }
+  const blankRecordTable = /\/([a-z0-9_]+\.do)$/i.exec(destinationPath)?.[1];
+  const asksToSelectExisting =
+    /\b(?:select(?:ed|ing)?|choos(?:e|ing)|pick(?:ed|ing)?)\b[\s\S]{0,140}\b(?:existing|available|matching|row|record|result|category|option|entry)\b/i.test(
+      instruction
+    ) ||
+    /\bclick\b[\s\S]{0,140}\b(?:existing|available|matching|row|record|result|category|option|entry)\b/i.test(instruction) ||
+    /\b(?:existing|available|matching|row|record|result|category|option|entry)\b[\s\S]{0,140}\bclick\b/i.test(instruction);
+  const asksToCreateRecord =
+    asksToClickNew ||
+    /\bcreate\b[\s\S]{0,80}\b(?:record|category|choice|variable|item)\b/i.test(instruction) ||
+    /\badd\b[\s\S]{0,80}\b(?:new|blank)\b[\s\S]{0,80}\b(?:record|category|choice|variable|item)\b/i.test(instruction);
+  if (blankRecordTable && destinationSysId === "-1" && asksToSelectExisting && !asksToCreateRecord) {
+    return `Stopped for correction: a task to select an existing list/lookup record opened a blank new ${blankRecordTable} record instead (${destinationUrl}). Use Back, clear unwanted list conditions with the All breadcrumb if needed, and click the exact existing linked row; never use New for a selection task.`;
+  }
+  if (!asksToClickNew) {
+    return undefined;
+  }
+  let expectedPath: "question_choice.do" | "item_option_new.do" | undefined;
+  const addsChoiceRecord = /\b(?:add|create)\s+(?:(?:a|the)\s+)?(?:(?:new|first|next|another)\s+)?choice\b(?!\s+variable)/i.test(
+    instruction
+  );
+  if (/\bquestion choices?\b/i.test(instruction) || addsChoiceRecord) {
+    expectedPath = "question_choice.do";
+  } else if (/\bvariables?\b|\bcheckbox\b/i.test(instruction)) {
+    expectedPath = "item_option_new.do";
+  }
+  if (!expectedPath) {
+    return undefined;
+  }
+  const landedOnExpectedTable = decodedUrl.toLowerCase().includes(`/${expectedPath}`);
+  const sysId = /[?&]sys_id=([^&#]+)/i.exec(decodedUrl)?.[1];
+  if (landedOnExpectedTable && sysId === "-1") {
+    return undefined;
+  }
+  const recordKind = expectedPath === "question_choice.do" ? "Question Choice" : "Variable";
+  return `Stopped for correction: the requested related-list New button did not open a blank ${recordKind} form (expected ${expectedPath}?sys_id=-1), and instead navigated to ${destinationUrl}. The prior index was stale. Inspect snapshotAfter and click the exact current button type=submit value=sysverb_new; do not click an existing row.`;
 }
 
 /** Mirrors the in-page arivuHostAllowed check; `domains` must already be normalized. */
@@ -808,17 +1355,17 @@ function boundText(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}… (truncated)` : text;
 }
 
-async function executeInjectedTask(contents: WebContents, script: string): Promise<InjectedTaskResult> {
+async function executeInjectedTask(target: JavaScriptExecutionTarget, script: string): Promise<InjectedTaskResult> {
   try {
-    const result = await contents.executeJavaScript(script, true);
+    const result = await target.executeJavaScript(script, true);
     return sanitizeInjectedResult(result);
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-async function stopInjectedTask(contents: WebContents): Promise<void> {
-  await contents.executeJavaScript(
+async function stopInjectedTask(target: JavaScriptExecutionTarget): Promise<void> {
+  await target.executeJavaScript(
     `(function() {
       if (window.__arivuPageAgentTask && typeof window.__arivuPageAgentTask.stop === "function") {
         return window.__arivuPageAgentTask.stop().then(function() { return true; }).catch(function() { return false; });
@@ -829,8 +1376,8 @@ async function stopInjectedTask(contents: WebContents): Promise<void> {
   );
 }
 
-async function pollProgress(contents: WebContents): Promise<PolledProgress | undefined> {
-  const result = (await contents.executeJavaScript(
+async function pollProgress(target: JavaScriptExecutionTarget): Promise<PolledProgress | undefined> {
+  const result = (await target.executeJavaScript(
     `(function() {
       if (!window.__arivuPageAgentTask) {
         return null;

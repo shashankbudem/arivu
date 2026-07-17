@@ -44,6 +44,15 @@ import {
   type AppleScriptOperation
 } from "./applescript.js";
 import { assertRealPathInsideWorkspace, resolveSafeWorkspacePath } from "./pathSafety.js";
+import {
+  elicitationRequestSchema,
+  findCredentialRequest,
+  formatElicitationResponse,
+  MAX_ELICITATION_FILE_COUNT,
+  MAX_ELICITATION_OPTIONS,
+  MAX_ELICITATION_QUESTIONS,
+  type Elicitor
+} from "./elicitation.js";
 import { formatWebSearchResults, searchWeb } from "./webSearch.js";
 import {
   formatBrowserToolResult,
@@ -65,6 +74,11 @@ type ToolContext = {
   browserTaskModel?: BrowserTaskModelConfig;
   onBrowserTaskProgress?: (progress: { stepIndex: number; summary: string }) => void;
   directEditReview?: boolean;
+  /**
+   * Frontend-provided renderer for structured user questions (ask_user tool). Absent in
+   * headless runs; the tool then tells the model to ask in prose instead.
+   */
+  elicit?: Elicitor;
   /** Aborts long-running commands and searches when the run is stopped. */
   signal?: AbortSignal;
   /** Captures pre-modification file state so a run's direct edits can be undone. */
@@ -337,7 +351,7 @@ export function createToolRegistry(context: ToolContext) {
       schema: {
         name: "browser_open",
         description:
-          "Open a URL or search text in Arivu's isolated browser. Defaults to hidden background mode; use visible mode only when the user explicitly asks to see a separate browser window. In visible mode, pass newTab to create a new browser tab or tabId to target an existing tab.",
+          'Open a URL or search text in Arivu\'s isolated browser. Defaults to hidden background mode. When continuing a visible page, explicitly pass mode="visible" and its tabId from browser_state; omitting mode opens the hidden browser. In visible mode, pass newTab to create a new browser tab or tabId to target an existing tab.',
         parameters: objectSchema({
           url: {
             type: "string",
@@ -347,7 +361,8 @@ export function createToolRegistry(context: ToolContext) {
           mode: {
             type: "string",
             enum: ["visible", "background"],
-            description: "Optional browser mode. Defaults to hidden background mode."
+            description:
+              "Optional browser mode. Defaults to hidden background mode; always pass visible when continuing an existing visible tab."
           },
           tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the agent's target tab." },
           newTab: {
@@ -751,7 +766,7 @@ export function createToolRegistry(context: ToolContext) {
         })
       },
       async execute(args) {
-        const parsed = z
+        const rawParsed = z
           .object({
             instruction: z.string().trim().min(1),
             mode: z.enum(["visible", "background"]).optional(),
@@ -763,8 +778,24 @@ export function createToolRegistry(context: ToolContext) {
             allowSensitiveActions: z.boolean().optional()
           })
           .parse(args);
+        const repaired = recoverLeakedBrowserTaskMode(rawParsed.instruction, rawParsed.mode);
+        const parsed = {
+          ...rawParsed,
+          instruction: repaired.instruction,
+          mode: repaired.mode
+        };
         if (!context.browserTaskModel) {
           throw new Error("browser_task has no model configured for this run.");
+        }
+        if (browserTaskInstructionAttemptsDirectUrlNavigation(parsed.instruction)) {
+          throw new Error(
+            "browser_task cannot navigate to an explicit URL or control the address bar. Use browser_open with the correct mode/tabId only when the exact URL came from current browser evidence; never guess or construct an endpoint. Otherwise call browser_state and navigate through an exact visible link, tab, Back control, or related-list New button."
+          );
+        }
+        if (browserTaskInstructionContradictsMrvsChildCreation(parsed.instruction)) {
+          throw new Error(
+            "browser_task instruction contradicts MRVS child creation: do not create a catalog-item variable whose Type is Multi Row Variable Set. Open the existing Variable Set record, use its Variables related-list New button, and create the child with its requested own Type while keeping that Variable Set as the parent."
+          );
         }
         const mode = browserActionMode(browser, parsed.mode);
         if (mode === "visible" && parsed.tabId === "background") {
@@ -1399,6 +1430,98 @@ export function createToolRegistry(context: ToolContext) {
     }
   });
 
+  register({
+    schema: {
+      name: "ask_user",
+      description:
+        "Ask the user structured questions and wait for their answers. Use ONLY when genuinely blocked on a decision or input that cannot be resolved from the request, the workspace, or sensible defaults — e.g. choosing between approaches, collecting a URL, or requesting images in a specific order. Do not use it for questions you can answer yourself, for progress updates, or to confirm routine reversible work. NEVER request passwords, verification codes, payment details, API keys, or any other secret — such requests are refused; ask the user to perform the sensitive step themselves. Optional questions may come back skipped, and the user may decline entirely: proceed gracefully with stated assumptions instead of re-asking.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short heading shown above the questions." },
+          reason: { type: "string", description: "One sentence on why you need this input; shown to the user." },
+          questions: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_ELICITATION_QUESTIONS,
+            description: `1-${MAX_ELICITATION_QUESTIONS} questions rendered as a single form.`,
+            items: {
+              type: "object",
+              properties: {
+                id: {
+                  type: "string",
+                  description: "Stable alphanumeric id (dashes/underscores allowed); answers echo it back."
+                },
+                type: {
+                  type: "string",
+                  enum: ["select", "multiselect", "text", "url", "number", "images", "files"],
+                  description:
+                    "select: pick one option. multiselect: pick several. text/url/number: typed input (url and number are validated). images/files: the user picks local files in a meaningful order; the answer is their ordered absolute paths."
+                },
+                label: { type: "string", description: "The question itself." },
+                description: { type: "string", description: "Optional clarifying help text." },
+                required: { type: "boolean", description: "Require an answer before the form can be submitted." },
+                options: {
+                  type: "array",
+                  maxItems: MAX_ELICITATION_OPTIONS,
+                  description: "select/multiselect only: the available choices.",
+                  items: {
+                    type: "object",
+                    properties: {
+                      value: { type: "string", description: "Value echoed back when chosen." },
+                      label: { type: "string", description: "Display text; defaults to value." },
+                      description: { type: "string", description: "Optional explanation of the choice." }
+                    },
+                    required: ["value"],
+                    additionalProperties: false
+                  }
+                },
+                allowOther: {
+                  type: "boolean",
+                  description: "select/multiselect only: also offer a free-text Other entry."
+                },
+                placeholder: { type: "string", description: "Input placeholder for text/url/number questions." },
+                min: { type: "number", description: "number only: minimum accepted value." },
+                max: { type: "number", description: "number only: maximum accepted value." },
+                minCount: {
+                  type: "number",
+                  description: `images/files only: minimum file count (0-${MAX_ELICITATION_FILE_COUNT}).`
+                },
+                maxCount: {
+                  type: "number",
+                  description: `images/files only: maximum file count (1-${MAX_ELICITATION_FILE_COUNT}).`
+                }
+              },
+              required: ["id", "type", "label"],
+              additionalProperties: false
+            }
+          }
+        },
+        required: ["questions"],
+        additionalProperties: false
+      }
+    },
+    async execute(args) {
+      const request = elicitationRequestSchema.parse(args);
+      const credentialSurface = findCredentialRequest(request);
+      if (credentialSurface) {
+        return JSON.stringify({
+          status: "refused",
+          note: `ask_user never collects passwords, verification codes, payment details, keys, or other secrets (a question mentioned: ${JSON.stringify(
+            credentialSurface.slice(0, 120)
+          )}). Ask the user to perform the sensitive step themselves, then continue.`
+        });
+      }
+      // No approvals gate: showing the user a form IS the user interaction, and the
+      // credential guard above bounds what it can ask for.
+      if (!context.elicit) {
+        return formatElicitationResponse(request, { status: "unavailable" });
+      }
+      const response = await context.elicit(request);
+      return formatElicitationResponse(request, response);
+    }
+  });
+
   return {
     schemas: Array.from(tools.values()).map((tool) => tool.schema),
     async execute(name: string, args: unknown) {
@@ -1453,11 +1576,49 @@ function browserActionMode(browser: BrowserToolController, requestedMode: Browse
   return requestedMode ?? browser.getState().activeMode ?? browser.getState().defaultMode ?? hiddenAgentBrowserMode();
 }
 
+/**
+ * Some OpenAI-compatible providers occasionally place an intended sibling
+ * `mode` field inside the instruction string while still returning otherwise
+ * valid tool-call JSON, for example: `...submit.", "mode">background`.
+ * Recover only that strict trailing shape so normal prose mentioning a browser
+ * mode is left untouched.
+ */
+export function recoverLeakedBrowserTaskMode(instruction: string, explicitMode?: BrowserMode): { instruction: string; mode?: BrowserMode } {
+  const leakedMode = /\s*["']\s*,\s*["']?mode["']?\s*(?::|=>|>)\s*["']?(visible|background)["']?\s*$/i.exec(instruction);
+  if (!leakedMode || leakedMode.index === undefined) {
+    return { instruction, mode: explicitMode };
+  }
+  return {
+    instruction: instruction.slice(0, leakedMode.index).trim(),
+    mode: explicitMode ?? (leakedMode[1]!.toLowerCase() as BrowserMode)
+  };
+}
+
 function browserTargetUrl(browser: BrowserToolController, mode: BrowserMode, tabId: string | undefined) {
   const state = browser.getState();
   const target = mode === "visible" ? state.visible : state.background;
   const tab = tabId ? target.tabs?.find((entry) => entry.id === tabId) : undefined;
   return nonEmptyString(tab?.url) ?? nonEmptyString(target.url);
+}
+
+function browserTaskInstructionAttemptsDirectUrlNavigation(instruction: string): boolean {
+  const explicitTarget = /(?:https?:\/\/\S+|\b[a-z0-9_./-]+\.do(?:\?[^\s,;)]*)?)/i;
+  if (!explicitTarget.test(instruction)) {
+    return false;
+  }
+  return (
+    /\bnavigate(?:\s+directly)?\b[\s\S]{0,220}(?:https?:\/\/|\b[a-z0-9_./-]+\.do\b)/i.test(instruction) ||
+    /\bgo(?:ing)?\s+(?:directly\s+)?to\b[\s\S]{0,220}(?:https?:\/\/|\b[a-z0-9_./-]+\.do\b)/i.test(instruction) ||
+    /\b(?:open|load|visit)\s+(?:(?:the|this)\s+)?(?:url|page|site)?\s*(?::|at)?\s*(?:https?:\/\/|\b[a-z0-9_./-]+\.do\b)/i.test(instruction)
+  );
+}
+
+function browserTaskInstructionContradictsMrvsChildCreation(instruction: string): boolean {
+  return (
+    /\b(?:add|create)\b[\s\S]{0,120}\b(?:new\s+)?variable\b/i.test(instruction) &&
+    /\btype\s*(?:=|:|\bto\b)\s*["']?multi[\s-]*row\s+variable\s+set\b/i.test(instruction) &&
+    /\bvariable\s+set\s*(?:=|:|\bparent\b|\buse\b)/i.test(instruction)
+  );
 }
 
 function nonEmptyString(value: string | undefined) {

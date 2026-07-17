@@ -69,6 +69,12 @@ export type BrowserTaskModelConfig = {
   contextWindowTokens?: number;
   maxSteps?: number;
   stepDelayMs?: number;
+  /**
+   * Tried in order, each a full candidate in its own right, when this model's circuit opens
+   * with no progress made yet. A fallback's own `.fallbacks` (there shouldn't be any) is
+   * ignored — rotation is a flat list, not a tree.
+   */
+  fallbacks?: BrowserTaskModelConfig[];
 };
 
 export type BrowserToolController = {

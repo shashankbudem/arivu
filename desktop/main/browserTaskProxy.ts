@@ -13,6 +13,7 @@ type ProxyRegistration = {
   realBaseUrl: string;
   realApiKey?: string;
   expiresAt: number;
+  requestTimeoutMs: number;
   requestCount: number;
   diagnostics: BrowserTaskProxyDiagnostic[];
   unsupportedParams: Set<string>;
@@ -46,6 +47,12 @@ const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 500, 502, 503, 504]);
 const UPSTREAM_RETRY_LIMIT = 3;
 const UPSTREAM_RETRY_BASE_DELAY_MS = 1_000;
 const UPSTREAM_RETRY_MAX_DELAY_MS = 30_000;
+// A provider connection that accepts the request but never returns headers otherwise pins one
+// browser-agent step until the entire browser_task wall-clock budget expires. NIM completions
+// observed in production can legitimately take over a minute, so keep this generous while
+// still giving the proxy a finite recovery boundary.
+const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 120_000;
+const UPSTREAM_NETWORK_RETRY_LIMIT = 1;
 // The in-page client patches requests with vendor-specific parameters (e.g. `thinking` to
 // disable reasoning for deepseek/glm/kimi). OpenAI-compatible gateways vary: the vendor's own
 // API accepts them, but e.g. NVIDIA NIM's deepseek endpoint rejects the request outright with
@@ -117,6 +124,8 @@ export async function registerBrowserTaskProxyEntry(options: {
   realBaseUrl: string;
   realApiKey?: string;
   ttlMs: number;
+  /** Test/diagnostic override; production callers use the bounded default above. */
+  requestTimeoutMs?: number;
 }): Promise<{ token: string; proxyBaseUrl: string }> {
   const { port } = await ensureBrowserTaskProxy();
   const token = randomBytes(24).toString("hex");
@@ -124,6 +133,7 @@ export async function registerBrowserTaskProxyEntry(options: {
     realBaseUrl: options.realBaseUrl.replace(/\/+$/, ""),
     realApiKey: options.realApiKey,
     expiresAt: Date.now() + options.ttlMs,
+    requestTimeoutMs: Math.max(1, options.requestTimeoutMs ?? DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS),
     requestCount: 0,
     diagnostics: [],
     unsupportedParams: new Set()
@@ -238,11 +248,57 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
     let paramStripRetries = 0;
     for (let upstreamRetry = 0; ; upstreamRetry++) {
       consumedErrorBody = undefined;
-      upstreamResponse = await fetch(targetUrl, {
-        method: req.method,
-        headers: forwardHeaders,
-        body: requestBody
-      } as NodeFetchInit);
+      const controller = new AbortController();
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, registration.requestTimeoutMs);
+      timeout.unref();
+      const abortForClosedDownstream = () => controller.abort();
+      res.once("close", abortForClosedDownstream);
+      try {
+        upstreamResponse = await fetch(targetUrl, {
+          method: req.method,
+          headers: forwardHeaders,
+          body: requestBody,
+          signal: controller.signal
+        } as NodeFetchInit);
+      } catch (error) {
+        if (res.destroyed || res.writableEnded || res.socket?.destroyed) {
+          return;
+        }
+        const willRetry = upstreamRetry < UPSTREAM_NETWORK_RETRY_LIMIT;
+        const status = timedOut ? 504 : 502;
+        const message = timedOut
+          ? `Upstream request timed out after ${registration.requestTimeoutMs}ms.`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+        recordDiagnostic(registration, {
+          attempt,
+          timestamp: new Date().toISOString(),
+          method: req.method ?? "GET",
+          path: safeRequestPath(req.url),
+          status,
+          latencyMs: Date.now() - startedAt,
+          outcome: "network_error",
+          message: boundDiagnosticMessage(message),
+          willRetry: willRetry || undefined
+        });
+        if (!willRetry) {
+          res.writeHead(status, { "content-type": "application/json", ...corsHeaders(req) }).end(JSON.stringify({ error: message }));
+          return;
+        }
+        await sleep(Math.min(UPSTREAM_RETRY_BASE_DELAY_MS * 2 ** upstreamRetry, UPSTREAM_RETRY_MAX_DELAY_MS));
+        if (res.destroyed || res.writableEnded || res.socket?.destroyed) {
+          return;
+        }
+        continue;
+      } finally {
+        clearTimeout(timeout);
+        res.off("close", abortForClosedDownstream);
+      }
 
       // Self-healing for gateway parameter validation: strip the named parameters and retry.
       let strippedParams: string[] = [];

@@ -136,4 +136,54 @@ describe("resolveBrowserTaskModel", () => {
       /unknown provider "deleted-provider"/
     );
   });
+
+  it("resolves a fallback naming only a different model onto the primary's already-resolved provider/endpoint", () => {
+    const resolved = resolveBrowserTaskModel(
+      configWith({ browserTaskModel: { providerId: "browser-provider", fallbackModels: [{ model: "fallback-model" }] } }),
+      FALLBACK
+    );
+    expect(resolved).toMatchObject({ baseUrl: "https://browser.example/v1", model: "browser-model", providerId: "browser-provider" });
+    expect(resolved.fallbacks).toEqual([
+      {
+        baseUrl: "https://browser.example/v1",
+        model: "fallback-model",
+        apiKey: "browser-key",
+        providerId: "browser-provider",
+        providerName: "Browser provider"
+      }
+    ]);
+  });
+
+  it("resolves a fallback that references its own provider independently of the primary", () => {
+    const config = configWith({
+      providers: [
+        ...configWith({}).providers,
+        {
+          id: "fallback-provider",
+          name: "Fallback provider",
+          baseUrl: "https://fallback.example/v1",
+          model: "fallback-provider-model",
+          apiKey: "fallback-key",
+          toolCalling: "auto",
+          imageInput: "auto"
+        }
+      ],
+      browserTaskModel: { providerId: "browser-provider", fallbackModels: [{ providerId: "fallback-provider" }] }
+    });
+    const resolved = resolveBrowserTaskModel(config, FALLBACK);
+    expect(resolved.fallbacks).toEqual([
+      {
+        baseUrl: "https://fallback.example/v1",
+        model: "fallback-provider-model",
+        apiKey: "fallback-key",
+        providerId: "fallback-provider",
+        providerName: "Fallback provider"
+      }
+    ]);
+  });
+
+  it("omits fallbacks entirely when none are configured", () => {
+    const resolved = resolveBrowserTaskModel(configWith({ browserTaskModel: { providerId: "browser-provider" } }), FALLBACK);
+    expect(resolved.fallbacks).toBeUndefined();
+  });
 });

@@ -12,6 +12,7 @@ import {
   type RefObject
 } from "react";
 import { createPortal } from "react-dom";
+import { ElicitationDialog } from "./ElicitationDialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -599,6 +600,7 @@ export function App() {
   const [status, setStatus] = useState("Starting");
   const [view, setView] = useState<ViewMode>("chat");
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [elicitation, setElicitation] = useState<ElicitationPrompt | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retryPrompt, setRetryPrompt] = useState<ChatContent | null>(null);
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
@@ -711,6 +713,10 @@ export function App() {
       setApproval(payload);
       setStatus("Approval required");
     });
+    const stopElicitations = window.arivu.onElicitationRequest((payload) => {
+      setElicitation(payload);
+      setStatus("The agent has a question");
+    });
     const stopAgentEvents = window.arivu.onAgentEvent((payload) => {
       applyAgentStreamEvent(payload);
     });
@@ -723,6 +729,7 @@ export function App() {
     return () => {
       stopApiLog();
       stopApprovals();
+      stopElicitations();
       stopAgentEvents();
       stopSessionEvents();
       stopBrowserState();
@@ -2650,6 +2657,15 @@ export function App() {
     setStatus(approved ? "Approved" : "Denied");
   }
 
+  async function respondElicitation(response: ElicitationResponse) {
+    if (!elicitation) {
+      return;
+    }
+    await window.arivu.respondElicitation(elicitation.id, response);
+    setElicitation(null);
+    setStatus(response.status === "answered" ? "Answers sent to the agent" : "Questions dismissed");
+  }
+
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if (event.defaultPrevented || !state) {
@@ -3587,6 +3603,9 @@ export function App() {
       </section>
 
       {approval ? <ApprovalDialog approval={approval} onRespond={(approved) => void respondApproval(approved)} /> : null}
+      {elicitation && !approval ? (
+        <ElicitationDialog prompt={elicitation} onRespond={(response) => void respondElicitation(response)} />
+      ) : null}
       {browserTaskModelPickerOpen && state ? (
         <ModelPickerDialog
           currentModel={browserTaskPickerContext().currentModel}

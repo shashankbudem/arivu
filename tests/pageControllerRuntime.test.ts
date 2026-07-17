@@ -131,6 +131,67 @@ describe("pageControllerRuntime", () => {
     expect(result?.snapshotAfterTruncated).toBeUndefined();
   });
 
+  it("builds snapshotAfter from a shadow-hosted work frame instead of the outer shell", async () => {
+    let injected = false;
+    const mainFrame = {
+      name: "",
+      url: "https://example.test/",
+      parent: null,
+      framesInSubtree: [] as unknown[],
+      detached: false,
+      isDestroyed: () => false
+    };
+    const childFrame = {
+      name: "gsft_main",
+      url: "https://example.test/work-form.do",
+      parent: mainFrame,
+      processId: 4,
+      routingId: 8,
+      detached: false,
+      isDestroyed: () => false,
+      executeJavaScript: async (script: string) => {
+        if (script.includes("visibleInteractiveCount") && script.includes("document.querySelectorAll")) {
+          return {
+            readyState: "complete",
+            visible: true,
+            width: 900,
+            height: 650,
+            formCount: 1,
+            visibleInteractiveCount: 20,
+            textLength: 400
+          };
+        }
+        if (script.includes("!!window.__arivuPageController")) {
+          return injected;
+        }
+        if (script.includes("window.__arivuPageController = new")) {
+          injected = true;
+          return undefined;
+        }
+        if (script.includes("getBrowserState")) {
+          return {
+            content: "[55]<button type=submit value=sysverb_new>New</button>",
+            url: childFrame.url,
+            title: "Work form"
+          };
+        }
+        return undefined;
+      }
+    };
+    mainFrame.framesInSubtree = [mainFrame, childFrame];
+    const contents = {
+      mainFrame,
+      getURL: () => "https://example.test/",
+      executeJavaScript: async () => {
+        throw new Error("outer shell should not be snapshotted");
+      }
+    } as unknown as WebContents;
+
+    await expect(freshPageSnapshot(contents)).resolves.toEqual({
+      snapshotAfter: "[55]<button type=submit value=sysverb_new>New</button>"
+    });
+  });
+
   it("flags the post-action snapshot as truncated when the page state is oversized", async () => {
     const huge = `HEAD-CONTROLS\n${"x".repeat(30_000)}\nTAIL-FORM-CONTROLS`;
     const { contents } = createFakeContents((script) => {

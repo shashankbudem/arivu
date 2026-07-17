@@ -119,17 +119,22 @@ import { detachSessionFromProject, sessionBelongsToProject, sessionProjectRoot }
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
 import type { BrowserMode, BrowserState, BrowserTaskModelConfig } from "../../src/tools/browserControl.js";
+import type { ElicitationRequest, ElicitationResponse } from "../../src/tools/elicitation.js";
 import { detectWorkspace, type WorkspaceInfo } from "../../src/workspace.js";
 import { DesktopBrowserController } from "./browserController.js";
 import { isExternalHttpUrl, isTrustedAppNavigationUrl } from "./navigationSafety.js";
+import { installProcessOutputPipeGuards } from "./outputPipeGuard.js";
+
+installProcessOutputPipeGuards();
 
 const PLAN_MODE_TOOL_NAMES = ["list", "read", "search", "git_status", "current_datetime", "current_location", "list_skills", "read_skill"];
 const MAX_CONTEXT_FILE_ATTACHMENTS = 6;
 const MAX_CONTEXT_FILE_BYTES = 256 * 1024;
 const MAX_CONTEXT_FILE_CHARS = 24_000;
 
-type PublicBrowserTaskModelProfile = Omit<BrowserTaskModelConfigProfile, "apiKey"> & {
+type PublicBrowserTaskModelProfile = Omit<BrowserTaskModelConfigProfile, "apiKey" | "fallbackModels"> & {
   apiKeyPresent: boolean;
+  fallbackModels?: PublicBrowserTaskModelProfile[];
 };
 
 type PublicConfig = {
@@ -387,6 +392,7 @@ const MODEL_LIST_BODY_LIMIT_BYTES = 256 * 1024;
 const WORKSPACE_POLICY_BUNDLE_MAX_BYTES = 64 * 1024;
 let mainWindow: BrowserWindow | undefined;
 const pendingApprovals = new Map<string, (approved: boolean) => void>();
+const pendingElicitations = new Map<string, (response: ElicitationResponse) => void>();
 const browserController = new DesktopBrowserController();
 // Read-only here: the scheduled `arivu models sync` CLI is the only writer, except for
 // recordContextFromRuntime, which latches a window the provider itself just reported.
@@ -1462,6 +1468,9 @@ class DesktopController {
       browserTaskModel,
       modelCatalog
     );
+    for (const fallbackModel of browserTaskModel.fallbacks ?? []) {
+      fallbackModel.contextWindowTokens = resolveBrowserTaskContextWindowTokens(baseConfig, modelSelection, fallbackModel, modelCatalog);
+    }
     const now = new Date().toISOString();
     const session = applyModelSelectionToSession(
       originSession
@@ -1740,6 +1749,7 @@ class DesktopController {
       scopePolicyRules: scopeRules,
       browser: browserController,
       browserTaskModel,
+      elicit: (request) => requestElicitation(request),
       directEditReview: executionCwd === undefined,
       contextWindowTokens: config.contextWindowTokens,
       // Free, always-fresh coverage of the active model: the scheduled sync only sweeps it on
@@ -2687,8 +2697,12 @@ function toPublicProvider(provider: LlmProviderProfile): PublicLlmProviderProfil
 }
 
 function toPublicBrowserTaskModel(profile: BrowserTaskModelConfigProfile): PublicBrowserTaskModelProfile {
-  const { apiKey, ...rest } = profile;
-  return { ...rest, apiKeyPresent: Boolean(apiKey) };
+  const { apiKey, fallbackModels, ...rest } = profile;
+  return {
+    ...rest,
+    apiKeyPresent: Boolean(apiKey),
+    fallbackModels: fallbackModels?.map((fallback) => toPublicBrowserTaskModel(fallback))
+  };
 }
 
 /**
@@ -3102,6 +3116,26 @@ function requestApproval(message: string, request?: ApprovalPromptRequest): Prom
 
   return new Promise((resolve) => {
     pendingApprovals.set(id, resolve);
+  });
+}
+
+function requestElicitation(request: ElicitationRequest): Promise<ElicitationResponse> {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve({ status: "unavailable", note: "The desktop window is not available." });
+  }
+  const id = randomUUID();
+  mainWindow.webContents.send("elicitation:request", { id, request });
+  // Focus etiquette: a pending question signals politely and waits — it never surfaces or
+  // focuses the window itself. The user comes to it.
+  if (process.platform === "darwin" && !BrowserWindow.getFocusedWindow()) {
+    try {
+      app.dock?.bounce("informational");
+    } catch {
+      // Dock signaling is decorative.
+    }
+  }
+  return new Promise((resolve) => {
+    pendingElicitations.set(id, resolve);
   });
 }
 
@@ -3842,6 +3876,52 @@ handleFromMain("approval:respond", (_event, response: { id: string; approved: bo
   }
   pendingApprovals.delete(response.id);
   resolve(response.approved);
+});
+handleFromMain("elicitation:chooseFiles", async (_event, kind: "images" | "files") => {
+  const result = await dialog.showOpenDialog({
+    title: kind === "images" ? "Choose images" : "Choose files",
+    properties: ["openFile", "multiSelections"],
+    ...(kind === "images" ? { filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }] } : {})
+  });
+  if (result.canceled) {
+    return { files: [] };
+  }
+  const files = await Promise.all(
+    result.filePaths.map(async (filePath) => {
+      const base = { path: filePath, name: path.basename(filePath) };
+      if (kind !== "images") {
+        return base;
+      }
+      try {
+        const image = await readImageAttachment(filePath);
+        return { ...base, previewDataUrl: image.dataUrl };
+      } catch {
+        // Preview is decorative; the ordered path is the answer.
+        return base;
+      }
+    })
+  );
+  return { files };
+});
+handleFromMain("elicitation:respond", (_event, payload: { id: string; response: ElicitationResponse }) => {
+  const resolve = pendingElicitations.get(payload.id);
+  if (!resolve) {
+    return;
+  }
+  pendingElicitations.delete(payload.id);
+  // The renderer's payload crosses an IPC boundary; keep only the fields the tool consumes.
+  const response = payload.response;
+  const status = response?.status === "answered" || response?.status === "declined" ? response.status : "declined";
+  resolve({
+    status,
+    answers: Array.isArray(response?.answers)
+      ? response.answers.map((answer) => ({
+          id: String(answer?.id ?? ""),
+          value: answer?.value,
+          skipped: Boolean(answer?.skipped)
+        }))
+      : undefined
+  });
 });
 
 function handleFromMain<T extends unknown[]>(

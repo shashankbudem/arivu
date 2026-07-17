@@ -148,6 +148,10 @@ const MAX_CONSOLE_LOGS = 300;
 // page (e.g. ServiceNow) can push a single tool result past the request auto-compaction
 // threshold, which strips native tool protocol and derails tool calling on the next turn.
 const MAX_VISUAL_ELEMENTS_JSON_CHARS = 48_000;
+// Native BrowserView capture can occasionally remain pending forever after a
+// compositor swap. Screenshotting is diagnostic and must not pin the whole agent
+// run, so each native attempt is bounded before the existing CDP fallback runs.
+const NATIVE_CAPTURE_TIMEOUT_MS = 2_500;
 const DEFAULT_BACKGROUND_BOUNDS = { width: 1280, height: 800 };
 const DEFAULT_VISIBLE_CHROME_HEIGHT = 80;
 const VISIBLE_START_PAGE_TITLE = "Arivu Browser";
@@ -1582,7 +1586,7 @@ export class DesktopBrowserController implements BrowserToolController {
       return this.withTemporaryCaptureSurface(contents, async () => {
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
-            const surfaceImage = await contents.capturePage();
+            const surfaceImage = await capturePageWithTimeout(contents);
             if (!surfaceImage.isEmpty()) {
               return surfaceImage;
             }
@@ -1597,14 +1601,14 @@ export class DesktopBrowserController implements BrowserToolController {
         if (debuggerImage && !debuggerImage.isEmpty()) {
           return debuggerImage;
         }
-        return contents.capturePage();
+        return capturePageWithTimeout(contents);
       });
     }
     const debuggerImage = await capturePageWithDebugger(contents);
     if (debuggerImage && !debuggerImage.isEmpty()) {
       return debuggerImage;
     }
-    return contents.capturePage();
+    return capturePageWithTimeout(contents);
   }
 
   /**
@@ -3806,6 +3810,15 @@ async function capturePageWithDebugger(contents: WebContents, captureBeyondViewp
       debuggerApi.detach();
     }
   }
+}
+
+async function capturePageWithTimeout(contents: WebContents) {
+  return Promise.race([
+    contents.capturePage(),
+    delay(NATIVE_CAPTURE_TIMEOUT_MS).then(() => {
+      throw new Error(`Native screenshot capture timed out after ${NATIVE_CAPTURE_TIMEOUT_MS}ms.`);
+    })
+  ]);
 }
 
 function freshPaintScript() {

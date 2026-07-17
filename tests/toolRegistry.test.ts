@@ -9,7 +9,7 @@ import type { WorkspaceScopePolicyRules } from "../src/permissions/scopePolicy.j
 import type { BrowserToolController } from "../src/tools/browserControl.js";
 import { ChangeCheckpoint } from "../src/tools/changeCheckpoint.js";
 import { DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD } from "../src/tools/directEditReview.js";
-import { createToolRegistry } from "../src/tools/registry.js";
+import { createToolRegistry, recoverLeakedBrowserTaskMode } from "../src/tools/registry.js";
 
 describe("createToolRegistry", () => {
   it("includes current date/time and location tools", () => {
@@ -229,6 +229,28 @@ describe("createToolRegistry", () => {
     expect(optedInResult.allowJavaScript).toBe(true);
   });
 
+  it("recovers a provider-leaked browser mode from the end of an instruction", async () => {
+    expect(recoverLeakedBrowserTaskMode('Fill Text, Value, and Order. Then click Save.",\n  "mode">background')).toEqual({
+      instruction: "Fill Text, Value, and Order. Then click Save.",
+      mode: "background"
+    });
+
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+    const result = JSON.parse(
+      await registry.execute("browser_task", {
+        instruction: 'Fill Text, Value, and Order. Then click Save.",\n  "mode">background'
+      })
+    ) as { mode?: string; data?: string };
+
+    expect(result.mode).toBe("background");
+    expect(result.data).toBe("Completed: Fill Text, Value, and Order. Then click Save.");
+  });
+
   it("surfaces browser_task denial as text instead of throwing", async () => {
     const registry = createToolRegistry({
       workspaceRoot: process.cwd(),
@@ -252,6 +274,38 @@ describe("createToolRegistry", () => {
     );
   });
 
+  it("rejects instructions that ask the in-page agent to navigate an explicit URL", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    await expect(
+      registry.execute("browser_task", {
+        instruction:
+          "Navigate directly to the catalog item by going to: https://example.com/sc_cat_item.do?sys_id=abc. Then click Variables."
+      })
+    ).resolves.toMatch(/browser_task cannot navigate to an explicit URL or control the address bar/);
+    await expect(
+      registry.execute("browser_task", {
+        instruction: "Navigate to https://example.com/guessed_table.do?sys_id=-1"
+      })
+    ).resolves.toMatch(/never guess or construct an endpoint/);
+    await expect(
+      registry.execute("browser_task", {
+        instruction: "Click Back, then navigate to the variable set list using variable_set.do or a similar endpoint and create a variable."
+      })
+    ).resolves.toMatch(/never guess or construct an endpoint/);
+
+    await expect(
+      registry.execute("browser_task", {
+        instruction: "Verify that the current URL is https://example.com/sc_cat_item.do?sys_id=abc and report the visible record name."
+      })
+    ).resolves.toMatch(/"action": "task"/);
+  });
+
   it("rejects incompatible browser_task mode and tab targets before execution", async () => {
     const registry = createToolRegistry({
       workspaceRoot: process.cwd(),
@@ -266,6 +320,22 @@ describe("createToolRegistry", () => {
     await expect(
       registry.execute("browser_task", { instruction: "do something", mode: "background", tabId: "visible-tab-1" })
     ).resolves.toMatch(/cannot target a visible tab id in background mode/);
+  });
+
+  it("rejects a task that confuses an MRVS child with a catalog-level MRVS variable", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    await expect(
+      registry.execute("browser_task", {
+        instruction:
+          "Add a new variable with Question=Access Justification, Type=Multi Row Variable Set, and Variable Set=Application Access Details."
+      })
+    ).resolves.toMatch(/instruction contradicts MRVS child creation/);
   });
 
   it("forwards an aborted run signal into browser_task", async () => {

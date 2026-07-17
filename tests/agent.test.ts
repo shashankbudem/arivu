@@ -61,6 +61,67 @@ describe("agent", () => {
     expect(result.session.messages.some((message) => message.role === "tool")).toBe(true);
   });
 
+  it("rejects a premature no-tool final in a multi-TODO browser run", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "todo_1",
+              name: "browser_task",
+              arguments: { instruction: "Create and verify the catalog item.", mode: "background" }
+            }
+          ]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "TODO 1: complete — item created."
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "todo_2",
+              name: "browser_task",
+              arguments: { instruction: "Add and verify the Approver choice.", mode: "background" }
+            }
+          ]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: ["TODO 1: complete — item verified.", "TODO 2: complete — Approver choice verified."].join("\n")
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted"),
+      cwd: tempDir,
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    const result = await agent.run(
+      ["TODO 1: Create the catalog item and verify it.", "TODO 2: Add the Approver choice and verify it."].join("\n")
+    );
+
+    expect(result.output).toContain("TODO 2: complete");
+    expect(result.session.messages.some((message) => String(message.content) === "TODO 1: complete — item created.")).toBe(false);
+    const retryRequest = client.requests[2]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(retryRequest).toContain("previous no-tool reply was rejected");
+    expect(retryRequest).toContain("TODO 2");
+    expect(retryRequest).toContain("Original checklist excerpts");
+  });
+
   it("advertises global skills and attaches explicitly requested skills to the model", async () => {
     const skillDir = path.join(skillsHome, "review");
     await mkdir(skillDir, { recursive: true });
@@ -713,6 +774,16 @@ describe("agent", () => {
     );
     expect(baseMessages).toHaveLength(1);
     expect(String(baseMessages[0]?.content)).toContain("Arivu system prompt v");
+    expect(String(baseMessages[0]?.content)).toContain('header action labeled "Create favorite for ..."');
+    expect(String(baseMessages[0]?.content)).toContain("complete required field/value checklist");
+    expect(String(baseMessages[0]?.content)).toContain("Do not copy numeric DOM element indices");
+    expect(String(baseMessages[0]?.content)).toContain('pass mode:"visible" plus that visible tabId');
+    expect(String(baseMessages[0]?.content)).toContain("cannot control the address bar");
+    expect(String(baseMessages[0]?.content)).toContain("Catalog items use sc_cat_item.do");
+    expect(String(baseMessages[0]?.content)).toContain("Never feed browser_open a guessed or constructed endpoint");
+    expect(String(baseMessages[0]?.content)).toContain("For ServiceNow Question Choices");
+    expect(String(baseMessages[0]?.content)).toContain('Never ask the browser agent to click the "Question Choices" menu');
+    expect(String(baseMessages[0]?.content)).toContain("For a variable inside an existing ServiceNow Multi-Row Variable Set");
     expect(String(baseMessages[0]?.content)).not.toContain("Old appended sentence");
   });
 
@@ -803,6 +874,34 @@ describe("agent", () => {
       "browser_screenshot"
     ]);
     expect(browser.screenshotCalls).toEqual([{ mode: "visible", tabId: "visible-tab-1" }]);
+  });
+
+  it("does not spend a synthetic screenshot before an explicit browser_task request", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "I will delegate the requested browser task."
+        }
+      }
+    ]);
+    const browser = createFakeBrowser();
+    const events: AgentRunEvent[] = [];
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      browser
+    });
+
+    await agent.run("On the active browser tab, call browser_task exactly once to inspect the form.", {
+      onEvent: (event) => {
+        events.push(event);
+      }
+    });
+
+    expect(events.flatMap((event) => (event.type === "tool_call" ? [event.call.name] : []))).toEqual([]);
+    expect(browser.screenshotCalls).toEqual([]);
   });
 
   it("does not refresh browser evidence for ordinary page-code prompts", async () => {

@@ -3,6 +3,7 @@ import type { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { createToolRegistry } from "../tools/registry.js";
 import type { ChangeCheckpoint } from "../tools/changeCheckpoint.js";
 import type { BrowserTaskModelConfig, BrowserToolController } from "../tools/browserControl.js";
+import type { Elicitor } from "../tools/elicitation.js";
 import { detectWorkspace } from "../workspace.js";
 import { chatContentToText, trimChatContent, type ChatContent } from "./content.js";
 import { stripFencedCodeBlocks } from "./textualToolCalls.js";
@@ -22,7 +23,7 @@ import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatReques
 import type { AppConfig } from "../config.js";
 
 const MAX_STEPS = 500;
-const SYSTEM_PROMPT_VERSION = 3;
+const SYSTEM_PROMPT_VERSION = 12;
 const SYSTEM_PROMPT_SIGNATURE = "You are Arivu";
 const WEB_SEARCH_TOOL = "web_search";
 const PARALLEL_TOOL_LIMIT = 5;
@@ -39,6 +40,7 @@ const PARALLEL_SAFE_TOOLS = new Set([
   "read_skill"
 ]);
 const BROWSER_STATE_TOOL = "browser_state";
+const BROWSER_TASK_TOOL = "browser_task";
 // The low-level browser_snapshot tool is disabled in the registry (agents are steered toward
 // browser_task); the synthetic browser-evidence refresh uses browser_screenshot instead.
 const BROWSER_SCREENSHOT_TOOL = "browser_screenshot";
@@ -57,6 +59,8 @@ const AUTO_SUMMARY_TIMEOUT_MS = 120_000;
 const AUTO_SUMMARY_RETRY_MESSAGE_GROWTH = 8;
 /** Below this many older messages a summary would fold almost nothing; leave it to transient compaction. */
 const MIN_AUTO_SUMMARY_MESSAGE_COUNT = 6;
+/** Bound provider mistakes without letting a multi-TODO browser run silently terminate early. */
+const MAX_BROWSER_CHECKLIST_COMPLETION_RETRIES = 4;
 
 export class Agent {
   private readonly session: AgentSession;
@@ -77,6 +81,8 @@ export class Agent {
       browser?: BrowserToolController;
       browserTaskModel?: BrowserTaskModelConfig;
       directEditReview?: boolean;
+      /** Frontend renderer for the ask_user tool's structured questions; omit for headless runs. */
+      elicit?: Elicitor;
       contextWindowTokens?: number;
       /**
        * Called when a live request overflows the model's context and the provider names its real
@@ -283,6 +289,7 @@ export class Agent {
         void runOptions.onEvent?.({ type: "browser_task_progress", ...progress });
       },
       directEditReview: this.options.directEditReview,
+      elicit: this.options.elicit,
       signal: runOptions.signal,
       checkpoint: this.options.checkpoint
     });
@@ -332,6 +339,10 @@ export class Agent {
     try {
       throwIfAborted(runOptions.signal);
       let webSearchCalls = 0;
+      const browserChecklist = browserChecklistScope(chatContentToText(prompt));
+      let browserTaskUsed = false;
+      let checklistCompletionRetries = 0;
+      let checklistMissingIds: string[] = [];
 
       const allowedToolNames = runOptions.allowedToolNames ? new Set(runOptions.allowedToolNames) : undefined;
       const toolSchemas = allowedToolNames ? tools.schemas.filter((tool) => allowedToolNames.has(tool.name)) : tools.schemas;
@@ -366,6 +377,7 @@ export class Agent {
             messages: messagesForStep(this.session.messages, webSearchCalls, [
               skillInstruction,
               ...attachedSkillMessages,
+              browserChecklistInstruction(browserChecklist, checklistMissingIds, checklistCompletionRetries > 0),
               toolMimicryInstruction(mimicryRetries)
             ]),
             tools: availableTools
@@ -416,6 +428,20 @@ export class Agent {
             this.session.messages.pop();
             continue;
           }
+          const incompleteChecklistIds =
+            browserTaskUsed && browserChecklist ? browserChecklist.ids.filter((id) => !outputMarksTodoComplete(output, id)) : [];
+          if (
+            incompleteChecklistIds.length > 0 &&
+            checklistCompletionRetries < MAX_BROWSER_CHECKLIST_COMPLETION_RETRIES &&
+            !outputReportsExternalBlocker(output)
+          ) {
+            checklistCompletionRetries += 1;
+            checklistMissingIds = incompleteChecklistIds;
+            // A no-tool assistant message ends the run. Drop the premature summary and
+            // re-prompt with the original completion scope instead.
+            this.session.messages.pop();
+            continue;
+          }
           this.touch();
           return {
             output,
@@ -423,6 +449,9 @@ export class Agent {
           };
         }
 
+        if (toolCalls.some((call) => call.name === BROWSER_TASK_TOOL)) {
+          browserTaskUsed = true;
+        }
         webSearchCalls += await this.executeToolCalls(toolCalls, tools, runOptions);
       }
 
@@ -619,12 +648,22 @@ function systemPrompt(workspaceRoot: string) {
     "Use Arivu browser tools as hidden/background tools by default. Use visible browser mode only when the user explicitly asks to see a separate browser window.",
     "For screenshot or visual browser checks, prefer Chrome DevTools MCP through mcp_list_tools and mcp_call_tool when it is configured; fall back to browser_screenshot only when Chrome tooling is unavailable.",
     "To act on a page (click, type, fill, scroll, or select options), delegate to browser_task with a clear natural-language instruction; the low-level manual browser click/type/scroll tools are currently disabled.",
-    "To load an explicit URL, use browser_open. browser_task is scoped inside page content and cannot type into browser chrome or navigate directly to a URL; when browser_open is disallowed, navigate through visible page links or Back controls instead.",
+    "Do not call browser_screenshot merely before or after browser_task. The delegated task observes the page itself and returns snapshotAfter; use screenshots only when actual pixels are part of the request or text evidence is inadequate.",
+    "Do not copy numeric DOM element indices from browser_state or browser_screenshot into a later browser_task instruction. Indices are snapshot-local and may change when Page Agent starts or after navigation; describe exact labels, element types/ids, and values so the browser agent resolves the current index itself.",
+    "To load an explicit URL, use browser_open. browser_task is scoped inside page content and cannot control the address bar: never ask it to clear, type, or paste a URL. When browser_open is disallowed, navigate through visible page links or Back controls instead.",
+    'When continuing a visible browser page, call browser_state first and pass mode:"visible" plus that visible tabId to every browser_open. Omitting mode opens the hidden background browser; do that only when hidden execution is intentional.',
     "For browser requests containing multiple TODOs, artifacts, or acceptance checks, maintain an explicit checklist and use as many sequential browser_task calls as needed within this run. Give each call one independently verifiable artifact or a small homogeneous batch; do not put an entire multi-page workflow into one delegated call.",
+    'For a browser run whose original prompt labels multiple "TODO N" sections, any assistant reply without a native tool call ends the whole run. Do not emit progress summaries between TODOs. The final answer must include one explicit "TODO N: complete — <verification>" line for every original TODO; otherwise keep using tools.',
+    "For every browser_task that creates or updates a record, copy the artifact's complete required field/value checklist into the instruction—including order, flags, reference table, and parent when specified. Never omit a required field because its index is not yet known, and never submit a partial record intending to repair it later.",
     "After every browser_task call, inspect success, data, trace, and snapshotAfter. Continue from recoverable partial progress, but do not repeat a completed create action; inspect exact names or record ids first to avoid duplicates.",
     "If browser_task reports popupOpened or says that a new tab/popup opened, call browser_state and continue on its activeTabId. Do not repeat the action that opened the popup.",
     "When delegating ServiceNow custom-combobox fields, require the browser agent to click the exact suggestion and verify the displayed selection. Do not describe typing filter text as if it commits the value.",
+    'In ServiceNow, the persistent header action labeled "Create favorite for ..." is not an open overlay. Do not ask the browser agent to close a dialog unless current browser evidence includes a visible role=dialog (or an explicit dialog title and controls).',
     "For ServiceNow related lists, delegate the actual New button (value=sysverb_new) for child records and the row's Open record link for edits. Do not substitute Preview, list context menus, filter breadcrumbs, or field labels.",
+    'For ServiceNow Question Choices, if the related list and its New button are already visible, delegate that exact value=sysverb_new button directly. Never ask the browser agent to click the "Question Choices" menu or Show/Hide List first, and never describe the button as "Add New".',
+    "For a variable inside an existing ServiceNow Multi-Row Variable Set, open that Variable Set record and use its Variables related-list New button. Set the child's own requested Type (for example Multi Line Text) and keep the Variable Set as its parent. Never represent an MRVS child by creating a catalog-item variable whose Type is Multi Row Variable Set.",
+    "For ServiceNow record URLs, use exact observed hrefs and sys_ids; never infer an endpoint from a label. Catalog items use sc_cat_item.do, variables use item_option_new.do, and question choices use question_choice.do.",
+    "If browser_task rejects a direct-URL instruction, use browser_open only when that exact URL came from current browser evidence. Never feed browser_open a guessed or constructed endpoint; otherwise call browser_state and navigate through the exact visible tab, link, Back control, or related-list New button.",
     "Do not report a browser workflow complete from clicks or a delegated success flag alone. Verify every requested acceptance item from current browser state, and keep working through unchecked items before answering.",
     "For current browser, latest page, active tab, or user-changed browser questions, call browser_state first, then inspect the active or intended tab with browser_screenshot in the same turn before answering. Do not answer from older browser evidence.",
     "Do not use emojis in assistant replies.",
@@ -736,6 +775,13 @@ function shouldRefreshBrowserEvidence(prompt: ChatContent, mode: "prompt" | "con
 
   const text = chatContentToText(prompt).toLowerCase().replace(/\s+/g, " ").trim();
   if (!text) {
+    return false;
+  }
+  // An explicit browser_task request is already an observe/act loop and returns
+  // snapshotAfter. A synthetic screenshot before it adds latency, can race the
+  // BrowserView compositor, and supplies snapshot-local indices that must not be
+  // copied into the delegated instruction.
+  if (/\bbrowser_task\b/.test(text)) {
     return false;
   }
 
@@ -990,6 +1036,67 @@ function toolMimicryInstruction(mimicryRetries: number): ChatMessage | undefined
       "Invoke the tool now with a real native tool call. Do not describe or narrate the call in text."
     ].join("\n")
   };
+}
+
+type BrowserChecklistScope = {
+  ids: string[];
+  excerpts: string[];
+};
+
+function browserChecklistScope(prompt: string): BrowserChecklistScope | undefined {
+  const matches = Array.from(prompt.matchAll(/\bTODO\s*#?\s*(\d+)\b/gi)).flatMap((match) =>
+    match.index === undefined || !match[1] ? [] : [{ id: match[1], index: match.index }]
+  );
+  const uniqueIds = Array.from(new Set(matches.map((match) => match.id)));
+  if (uniqueIds.length < 2) {
+    return undefined;
+  }
+  const excerpts = matches.map((match, index) =>
+    prompt
+      .slice(match.index, matches[index + 1]?.index ?? prompt.length)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 1_600)
+  );
+  return { ids: uniqueIds, excerpts };
+}
+
+function browserChecklistInstruction(
+  checklist: BrowserChecklistScope | undefined,
+  missingIds: string[],
+  includeExcerpts: boolean
+): ChatMessage | undefined {
+  if (!checklist) {
+    return undefined;
+  }
+  const lines = [
+    `Original browser completion gate: ${checklist.ids.map((id) => `TODO ${id}`).join(", ")}.`,
+    "A reply without a native tool call ends this entire run. Do not send a progress summary between TODOs.",
+    `Keep using tools until every original TODO is verified. The final must contain one line "TODO N: complete — <verification>" for each of: ${checklist.ids.join(", ")}.`
+  ];
+  if (missingIds.length > 0) {
+    lines.push(
+      `Your previous no-tool reply was rejected because these original checklist items were not explicitly complete: ${missingIds
+        .map((id) => `TODO ${id}`)
+        .join(", ")}. Resume from current browser state now.`
+    );
+  }
+  if (includeExcerpts) {
+    lines.push("Original checklist excerpts:", ...checklist.excerpts.map((excerpt) => `- ${excerpt}`));
+  }
+  return { role: "system", content: lines.join("\n") };
+}
+
+function outputMarksTodoComplete(output: string, id: string): boolean {
+  const line = new RegExp(`^\\s*(?:[-*|]\\s*)?TODO\\s*#?\\s*${escapeRegExp(id)}\\b[^\\n]*$`, "im").exec(output)?.[0] ?? "";
+  return (
+    /\b(?:complete|completed|done|verified|passed)\b/i.test(line) &&
+    !/\b(?:blocked|failed|incomplete|pending|unverified|not\s+complete)\b/i.test(line)
+  );
+}
+
+function outputReportsExternalBlocker(output: string): boolean {
+  return /\b(?:captcha|requires?\s+your\s+(?:input|approval)|please\s+(?:unlock|confirm)|blocked\s+on\s+(?:external|user))\b/i.test(output);
 }
 
 function webSearchInstruction(webSearchCalls: number): ChatMessage | undefined {

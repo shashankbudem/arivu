@@ -54,6 +54,13 @@ const desktopApi = {
     ipcRenderer.on("approval:request", listener);
     return () => ipcRenderer.removeListener("approval:request", listener);
   },
+  respondElicitation: (id: string, response: unknown) => ipcRenderer.invoke("elicitation:respond", { id, response }),
+  elicitationChooseFiles: (kind: "images" | "files") => ipcRenderer.invoke("elicitation:chooseFiles", kind),
+  onElicitationRequest: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("elicitation:request", listener);
+    return () => ipcRenderer.removeListener("elicitation:request", listener);
+  },
   onAgentEvent: (callback: (payload: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
     ipcRenderer.on("agent:event", listener);
