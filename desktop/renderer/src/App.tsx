@@ -18,6 +18,8 @@ import remarkGfm from "remark-gfm";
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   Bell,
   Check,
   ChevronDown,
@@ -132,6 +134,11 @@ type SettingsFocus = Extract<SettingsSectionId, "skills"> | null;
 type ProviderFormState = LlmProviderPatch & {
   apiKeyPresent?: boolean;
 };
+type BrowserFallbackFormState = {
+  id: string;
+  providerId: string;
+  model: string;
+};
 
 type PullRequestWatch = {
   sessionId: string;
@@ -164,6 +171,7 @@ const SUPPORTED_IMAGE_EXTENSIONS: Record<string, string> = {
   webp: "image/webp"
 };
 const NEW_PROVIDER_NAME = "New provider";
+const MAX_BROWSER_TASK_FALLBACKS = 5;
 const SIDEBAR_COLLAPSED_WIDTH = 68;
 const SIDEBAR_DEFAULT_WIDTH = 320;
 const SIDEBAR_MIN_WIDTH = 260;
@@ -739,6 +747,12 @@ export function App() {
   useEffect(() => {
     activeSessionIdRef.current = state?.sessionId;
   }, [state?.sessionId]);
+
+  useEffect(() => {
+    if (view === "settings") {
+      void refresh();
+    }
+  }, [view]);
 
   useEffect(() => {
     const sessionId = state?.sessionId;
@@ -7120,8 +7134,18 @@ function SettingsView({
   const [browserTaskStepDelayMs, setBrowserTaskStepDelayMs] = useState(
     state.config.browserTaskModel?.stepDelayMs !== undefined ? String(state.config.browserTaskModel.stepDelayMs) : ""
   );
+  const [browserTaskFallbacks, setBrowserTaskFallbacks] = useState<BrowserFallbackFormState[]>(() =>
+    (state.config.browserTaskModel?.fallbackModels ?? []).map((fallback) => ({
+      id: randomId(),
+      providerId: fallback.providerId ?? "",
+      model: fallback.model ?? ""
+    }))
+  );
+  const [browserFallbackModelDialogId, setBrowserFallbackModelDialogId] = useState<string | null>(null);
   const [trustMode, setTrustMode] = useState<TrustMode>(state.config.trustMode);
   const [mcpServersText, setMcpServersText] = useState(() => JSON.stringify(state.config.mcpServers ?? {}, null, 2));
+  const [toolProposals, setToolProposals] = useState<McpToolProposal[]>(state.config.toolProposals ?? []);
+  const [integrationStatus, setIntegrationStatus] = useState<string | null>(null);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [browserTaskModelDialogOpen, setBrowserTaskModelDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -7170,6 +7194,9 @@ function SettingsView({
   const browserTaskProviderModel = browserTaskProvider?.model ?? model;
   const browserTaskEffectiveModel = browserTaskModelId.trim() || browserTaskProviderModel;
   const browserTaskApiKey = browserTaskProvider?.apiKey ?? "";
+  const browserFallbackModelPicker = browserTaskFallbacks.find((fallback) => fallback.id === browserFallbackModelDialogId);
+  const browserFallbackProvider =
+    providers.find((provider) => provider.id === browserFallbackModelPicker?.providerId) ?? browserTaskProvider;
 
   useEffect(() => {
     if (!focusSection) {
@@ -7178,6 +7205,10 @@ function SettingsView({
     setActiveSettingsSection(focusSection);
     onFocusSettled();
   }, [focusSection, onFocusSettled]);
+
+  useEffect(() => {
+    setToolProposals(state.config.toolProposals ?? []);
+  }, [state.config.toolProposals]);
 
   useEffect(() => {
     void refreshTaskWorktrees();
@@ -7215,6 +7246,71 @@ function SettingsView({
       setBrowserTaskProviderId("");
       setBrowserTaskModelId("");
     }
+    setBrowserTaskFallbacks((current) =>
+      current.map((fallback) => (fallback.providerId === selectedProvider.id ? { ...fallback, providerId: "" } : fallback))
+    );
+  }
+
+  function addBrowserTaskFallback() {
+    if (browserTaskFallbacks.length >= MAX_BROWSER_TASK_FALLBACKS) {
+      return;
+    }
+    const fallbackProvider =
+      providers.find((provider) => provider.id !== browserTaskProviderId) ??
+      providers.find((provider) => provider.id === browserTaskProviderId);
+    setBrowserTaskFallbacks((current) => [
+      ...current,
+      {
+        id: randomId(),
+        providerId: fallbackProvider?.id ?? "",
+        model: ""
+      }
+    ]);
+  }
+
+  function updateBrowserTaskFallback(id: string, patch: Partial<Omit<BrowserFallbackFormState, "id">>) {
+    setBrowserTaskFallbacks((current) => current.map((fallback) => (fallback.id === id ? { ...fallback, ...patch } : fallback)));
+  }
+
+  function moveBrowserTaskFallback(id: string, direction: -1 | 1) {
+    setBrowserTaskFallbacks((current) => {
+      const index = current.findIndex((fallback) => fallback.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.length) {
+        return current;
+      }
+      const next = [...current];
+      [next[index], next[nextIndex]] = [next[nextIndex]!, next[index]!];
+      return next;
+    });
+  }
+
+  function addReviewedToolProposal(proposal: McpToolProposal) {
+    setError(null);
+    try {
+      const servers = parseMcpServersText(mcpServersText);
+      const serverName = uniqueMcpServerName(proposal.name, servers);
+      const env = Object.fromEntries(proposal.envKeys.map((key) => [key, ""]));
+      const nextServers = {
+        ...servers,
+        [serverName]: {
+          command: proposal.command,
+          args: proposal.args,
+          env,
+          disabled: true
+        }
+      };
+      setMcpServersText(JSON.stringify(nextServers, null, 2));
+      setToolProposals((current) => current.filter((item) => item.id !== proposal.id));
+      setIntegrationStatus(`${serverName} added as disabled. Review credentials and enable it in the MCP JSON before saving.`);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  function dismissToolProposal(id: string) {
+    setToolProposals((current) => current.filter((proposal) => proposal.id !== id));
+    setIntegrationStatus("Tool proposal dismissed. Save settings to confirm.");
   }
 
   async function save() {
@@ -7223,6 +7319,12 @@ function SettingsView({
     try {
       const mcpServers = parseMcpServersText(mcpServersText);
       const providerPatch = validateProviderForms(providers, activeProviderId);
+      const fallbackModels = browserTaskFallbacks
+        .map((fallback) => ({
+          providerId: fallback.providerId.trim() || undefined,
+          model: fallback.model.trim() || undefined
+        }))
+        .filter((fallback) => fallback.providerId || fallback.model);
       const patch: ConfigPatch = {
         activeProviderId: providerPatch.activeProviderId,
         providers: providerPatch.providers,
@@ -7239,16 +7341,19 @@ function SettingsView({
           workspaceScopeRules
         ),
         workspacePolicyProfiles,
+        toolProposals,
         browserTaskModel:
           browserTaskProviderId.trim() ||
           browserTaskModelId.trim() ||
+          fallbackModels.length > 0 ||
           parseOptionalInt(browserTaskMaxSteps) !== undefined ||
           parseOptionalInt(browserTaskStepDelayMs) !== undefined
             ? {
                 providerId: browserTaskProviderId.trim() || undefined,
                 model: browserTaskModelId.trim() || undefined,
                 maxSteps: parseOptionalInt(browserTaskMaxSteps),
-                stepDelayMs: parseOptionalInt(browserTaskStepDelayMs)
+                stepDelayMs: parseOptionalInt(browserTaskStepDelayMs),
+                fallbackModels
               }
             : null
       };
@@ -7692,6 +7797,120 @@ function SettingsView({
             </label>
           </div>
 
+          <section className="browser-fallback-section" hidden={activeSettingsSection !== "browser"} aria-label="Browser model fallbacks">
+            <div className="settings-section-heading">
+              <div>
+                <strong>Fallback order</strong>
+                <span>Arivu rotates only when the current model fails before making browser progress.</span>
+              </div>
+              <button
+                className="secondary-command"
+                type="button"
+                onClick={addBrowserTaskFallback}
+                disabled={browserTaskFallbacks.length >= MAX_BROWSER_TASK_FALLBACKS}
+              >
+                <Plus size={15} />
+                Add fallback
+              </button>
+            </div>
+
+            {browserTaskFallbacks.length === 0 ? (
+              <div className="browser-fallback-empty">
+                No fallback configured. Infrastructure failures pause the browser task until this model recovers or you select another one.
+              </div>
+            ) : (
+              <div className="browser-fallback-list">
+                {browserTaskFallbacks.map((fallback, index) => {
+                  const fallbackProvider = providers.find((provider) => provider.id === fallback.providerId);
+                  const fallbackModel = fallback.model.trim() || fallbackProvider?.model || "Choose model";
+                  return (
+                    <article key={fallback.id} className="browser-fallback-row">
+                      <span className="browser-fallback-order" aria-label={`Fallback ${index + 1}`}>
+                        {index + 1}
+                      </span>
+                      <div className="browser-fallback-fields">
+                        <label>
+                          <span>Provider</span>
+                          <select
+                            value={fallback.providerId}
+                            onChange={(event) =>
+                              updateBrowserTaskFallback(fallback.id, {
+                                providerId: event.target.value,
+                                model: ""
+                              })
+                            }
+                          >
+                            <option value="">Same as primary</option>
+                            {providers.map((provider) => (
+                              <option key={provider.id} value={provider.id}>
+                                {provider.name.trim() || "Unnamed provider"}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span>Model</span>
+                          <div className="browser-task-model-picker">
+                            <button
+                              className="model-dialog-trigger settings-model-trigger"
+                              type="button"
+                              onClick={() => setBrowserFallbackModelDialogId(fallback.id)}
+                              aria-label={`Choose fallback ${index + 1} model. Current model: ${modelDisplayName(fallbackModel)}`}
+                            >
+                              <Cpu size={15} />
+                              <span>{modelDisplayName(fallbackModel)}</span>
+                              <Search size={13} />
+                            </button>
+                          </div>
+                          <input
+                            value={fallback.model}
+                            onChange={(event) => updateBrowserTaskFallback(fallback.id, { model: event.target.value })}
+                            placeholder={fallbackProvider?.model ? `Provider default: ${fallbackProvider.model}` : "Enter model ID"}
+                          />
+                        </label>
+                      </div>
+                      <div className="browser-fallback-actions">
+                        <button
+                          className="icon-button compact-icon-button"
+                          type="button"
+                          onClick={() => moveBrowserTaskFallback(fallback.id, -1)}
+                          disabled={index === 0}
+                          title="Move fallback up"
+                          aria-label={`Move fallback ${index + 1} up`}
+                        >
+                          <ArrowUp size={14} />
+                        </button>
+                        <button
+                          className="icon-button compact-icon-button"
+                          type="button"
+                          onClick={() => moveBrowserTaskFallback(fallback.id, 1)}
+                          disabled={index === browserTaskFallbacks.length - 1}
+                          title="Move fallback down"
+                          aria-label={`Move fallback ${index + 1} down`}
+                        >
+                          <ArrowDown size={14} />
+                        </button>
+                        <button
+                          className="icon-button compact-icon-button"
+                          type="button"
+                          onClick={() => setBrowserTaskFallbacks((current) => current.filter((item) => item.id !== fallback.id))}
+                          title="Remove fallback"
+                          aria-label={`Remove fallback ${index + 1}`}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+            <small className="field-note">
+              Configuration, network, rate-limit, and provider failures open a temporary circuit. After partial page progress, Arivu
+              preserves the checkpoint and uses the next model on the following browser task instead of replaying actions blindly.
+            </small>
+          </section>
+
           <div hidden={activeSettingsSection !== "permissions"} data-settings-panel="permissions">
             <CapabilityPolicyPanel
               activeTrustMode={trustMode}
@@ -7724,6 +7943,57 @@ function SettingsView({
               onRefresh={() => void refreshCapabilityPolicies()}
             />
           </div>
+
+          <section
+            className="tool-proposals-section"
+            hidden={activeSettingsSection !== "integrations"}
+            data-settings-panel="integrations"
+            aria-label="Proposed tools"
+          >
+            <div className="settings-section-heading">
+              <div>
+                <strong>Proposed tools</strong>
+                <span>
+                  {toolProposals.length === 0
+                    ? "Arivu can propose MCP capabilities, but cannot activate them."
+                    : `${toolProposals.length} waiting for review`}
+                </span>
+              </div>
+              <Shield size={16} aria-hidden="true" />
+            </div>
+            {toolProposals.length === 0 ? (
+              <div className="tool-proposal-empty">No tool proposals awaiting review.</div>
+            ) : (
+              <div className="tool-proposal-list">
+                {toolProposals.map((proposal) => (
+                  <article key={proposal.id} className="tool-proposal-row">
+                    <div className="tool-proposal-copy">
+                      <div>
+                        <Server size={16} />
+                        <strong>{proposal.name}</strong>
+                        <span>MCP server</span>
+                      </div>
+                      {proposal.description ? <p>{proposal.description}</p> : null}
+                      <code>{[proposal.command, ...proposal.args].join(" ")}</code>
+                      {proposal.envKeys.length > 0 ? <small>Credentials requested: {proposal.envKeys.join(", ")}</small> : null}
+                      <small>Reason: {proposal.reason}</small>
+                    </div>
+                    <div className="tool-proposal-actions">
+                      <button className="secondary-command" type="button" onClick={() => dismissToolProposal(proposal.id)}>
+                        <X size={15} />
+                        Dismiss
+                      </button>
+                      <button className="secondary-command" type="button" onClick={() => addReviewedToolProposal(proposal)}>
+                        <Plus size={15} />
+                        Add disabled
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+            {integrationStatus ? <div className="success-strip">{integrationStatus}</div> : null}
+          </section>
 
           <label className="mcp-config-field" hidden={activeSettingsSection !== "integrations"} data-settings-panel="integrations">
             <span>MCP servers</span>
@@ -7977,6 +8247,21 @@ function SettingsView({
             setBrowserTaskModelDialogOpen(false);
           }}
           onClose={() => setBrowserTaskModelDialogOpen(false)}
+        />
+      ) : null}
+      {browserFallbackModelPicker && browserFallbackProvider ? (
+        <ModelPickerDialog
+          currentModel={browserFallbackModelPicker.model.trim() || browserFallbackProvider.model}
+          baseUrl={browserFallbackProvider.baseUrl}
+          apiKey={browserFallbackProvider.apiKey ?? ""}
+          providerId={browserFallbackProvider.id}
+          includeAuto={false}
+          title="Select fallback model"
+          onSelect={(nextModel) => {
+            updateBrowserTaskFallback(browserFallbackModelPicker.id, { model: nextModel });
+            setBrowserFallbackModelDialogId(null);
+          }}
+          onClose={() => setBrowserFallbackModelDialogId(null)}
         />
       ) : null}
     </section>
@@ -11493,6 +11778,19 @@ function parseMcpServersText(value: string): McpServersConfig {
     };
   }
   return servers;
+}
+
+function uniqueMcpServerName(preferredName: string, servers: McpServersConfig) {
+  const baseName = preferredName.trim().replace(/\s+/g, "-") || "proposed-tool";
+  if (!(baseName in servers)) {
+    return baseName;
+  }
+  for (let index = 2; ; index += 1) {
+    const candidate = `${baseName}-${index}`;
+    if (!(candidate in servers)) {
+      return candidate;
+    }
+  }
 }
 
 /** Parses a numeric settings field: undefined for blank/invalid/negative input. */

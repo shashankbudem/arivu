@@ -25,5 +25,8 @@ export function capabilityForToolName(name: string): AgentTaskRunCapability {
   if (name.startsWith("current_")) {
     return "local_context";
   }
+  if (name.startsWith("arivu_")) {
+    return "local_context";
+  }
   return "unknown";
 }

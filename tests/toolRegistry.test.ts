@@ -10,6 +10,7 @@ import type { BrowserToolController } from "../src/tools/browserControl.js";
 import { ChangeCheckpoint } from "../src/tools/changeCheckpoint.js";
 import { DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD } from "../src/tools/directEditReview.js";
 import { createToolRegistry, recoverLeakedBrowserTaskMode } from "../src/tools/registry.js";
+import type { RuntimeControl } from "../src/tools/runtimeControl.js";
 
 describe("createToolRegistry", () => {
   it("includes current date/time and location tools", () => {
@@ -128,6 +129,96 @@ describe("createToolRegistry", () => {
     expect(withBrowser.schemas.map((schema) => schema.name)).toContain("browser_task");
   });
 
+  it("registers guarded runtime controls and reads the current browser model for each task", async () => {
+    let currentModel = { baseUrl: "https://primary.example/v1", model: "primary-model" };
+    const runtimeControl: RuntimeControl = {
+      async status() {
+        return {
+          browserModel: {
+            id: "active",
+            model: currentModel.model,
+            endpoint: currentModel.baseUrl,
+            active: true
+          },
+          browserModelCandidates: [],
+          disabledTools: [],
+          runDisabledTools: [],
+          sessionDisabledTools: [],
+          protectedTools: ["arivu_runtime_status"],
+          toolProposalMode: "review_required"
+        };
+      },
+      setAvailableToolNames() {},
+      async setToolState(input) {
+        return {
+          name: input.name,
+          requestedState: input.enabled ? "enabled" : "disabled",
+          effectiveState: input.enabled ? "enabled" : "disabled",
+          scope: input.scope,
+          reason: input.reason
+        };
+      },
+      async selectBrowserModel(input) {
+        currentModel = { baseUrl: "https://fallback.example/v1", model: "fallback-model" };
+        return {
+          candidateId: input.candidateId,
+          scope: input.scope,
+          reason: input.reason,
+          model: {
+            id: input.candidateId,
+            model: currentModel.model,
+            endpoint: currentModel.baseUrl,
+            active: true
+          }
+        };
+      },
+      async proposeMcpServer(input) {
+        return {
+          id: "proposal-1",
+          name: input.name,
+          status: "pending_review",
+          reviewLocation: "Settings > Integrations"
+        };
+      },
+      currentBrowserTaskModel() {
+        return currentModel;
+      },
+      async disabledToolNames() {
+        return [];
+      }
+    };
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      runtimeControl
+    });
+    expect(registry.schemas.map((schema) => schema.name)).toEqual(
+      expect.arrayContaining(["arivu_runtime_status", "arivu_set_tool_state", "arivu_select_browser_model", "arivu_propose_mcp_server"])
+    );
+
+    await expect(registry.execute("arivu_runtime_status", {})).resolves.toContain('"toolProposalMode": "review_required"');
+    await registry.execute("arivu_select_browser_model", {
+      candidateId: "fallback-1",
+      scope: "run",
+      reason: "Primary model returned HTTP 503."
+    });
+    const taskResult = JSON.parse(await registry.execute("browser_task", { instruction: "inspect the page" })) as {
+      modelConfig?: { model?: string };
+    };
+    expect(taskResult.modelConfig?.model).toBe("fallback-model");
+    await expect(
+      registry.execute("arivu_propose_mcp_server", {
+        name: "servicenow",
+        description: "ServiceNow tools",
+        command: "npx",
+        args: ["-y", "@example/servicenow-mcp"],
+        envKeys: ["SERVICENOW_TOKEN"],
+        reason: "Structured ServiceNow operations are needed."
+      })
+    ).resolves.toContain('"status": "pending_review"');
+  });
+
   it("gates browser_task behind approval as a destructive action and forwards instruction/budgets", async () => {
     const browser = createFakeBrowser();
     let prompted = false;
@@ -148,7 +239,7 @@ describe("createToolRegistry", () => {
     });
 
     const result = JSON.parse(
-      await registry.execute("browser_task", { instruction: "fill out the form", maxSteps: 12, timeoutMs: 45_000 })
+      await registry.execute("browser_task", { instruction: "fill out the form", maxSteps: 25, timeoutMs: 45_000 })
     ) as Record<string, unknown>;
 
     expect(prompted).toBe(true);
@@ -156,7 +247,7 @@ describe("createToolRegistry", () => {
     expect(result.action).toBe("task");
     expect(result.success).toBe(true);
     expect(result.data).toBe("Completed: fill out the form");
-    expect(result.maxSteps).toBe(12);
+    expect(result.maxSteps).toBe(25);
     expect(result.timeoutMs).toBe(600_000);
     expect(result.modelConfig).toMatchObject({ baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" });
   });
@@ -170,10 +261,11 @@ describe("createToolRegistry", () => {
     });
 
     const result = JSON.parse(
-      await registry.execute("browser_task", { instruction: "complete a multi-step form", timeoutMs: 120_000 })
+      await registry.execute("browser_task", { instruction: "complete a multi-step form", maxSteps: 5, timeoutMs: 120_000 })
     ) as Record<string, unknown>;
 
     expect(result.timeoutMs).toBe(600_000);
+    expect(result.maxSteps).toBe(20);
   });
 
   it("accepts integer budget strings emitted by OpenAI-compatible providers", async () => {

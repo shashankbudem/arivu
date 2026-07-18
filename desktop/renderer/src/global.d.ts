@@ -599,6 +599,7 @@ type DesktopState = {
     workspacePolicies: WorkspaceCapabilityPolicies;
     workspacePolicyProfiles: WorkspacePolicyProfiles;
     disabledTools: string[];
+    toolProposals: McpToolProposal[];
   };
   sessionId?: string;
   messages: ChatMessage[];
@@ -797,6 +798,19 @@ type BrowserTaskModelSettings = {
   maxSteps?: number;
   stepDelayMs?: number;
   apiKeyPresent: boolean;
+  fallbackModels?: BrowserTaskModelSettings[];
+};
+
+type McpToolProposal = {
+  id: string;
+  kind: "mcp_server";
+  name: string;
+  description: string;
+  command: string;
+  args: string[];
+  envKeys: string[];
+  reason: string;
+  createdAt: string;
 };
 
 type ConfigPatch = {
@@ -812,8 +826,15 @@ type ConfigPatch = {
   mcpServers?: McpServersConfig;
   workspacePolicies?: WorkspaceCapabilityPolicies;
   workspacePolicyProfiles?: WorkspacePolicyProfiles;
-  browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
+  browserTaskModel?: {
+    providerId?: string;
+    model?: string;
+    maxSteps?: number;
+    stepDelayMs?: number;
+    fallbackModels?: Array<{ providerId?: string; model?: string }>;
+  } | null;
   disabledTools?: string[];
+  toolProposals?: McpToolProposal[];
 };
 
 type WorkspaceScaffoldOptions = {

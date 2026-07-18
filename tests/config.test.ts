@@ -82,6 +82,37 @@ describe("config", () => {
     await expect(loadConfig()).resolves.toMatchObject({ disabledTools: ["run", "write_file"] });
   });
 
+  it("defaults tool proposals to an empty list and persists review-only proposals", async () => {
+    await expect(loadConfig()).resolves.toMatchObject({ toolProposals: [] });
+
+    await saveConfig({
+      toolProposals: [
+        {
+          id: "proposal-1",
+          kind: "mcp_server",
+          name: "servicenow",
+          description: "ServiceNow API tools",
+          command: "npx",
+          args: ["-y", "@example/servicenow-mcp"],
+          envKeys: ["SERVICENOW_TOKEN"],
+          reason: "Structured ServiceNow operations are needed.",
+          createdAt: "2026-07-18T08:00:00.000Z"
+        }
+      ]
+    });
+
+    await expect(loadConfig()).resolves.toMatchObject({
+      toolProposals: [
+        {
+          id: "proposal-1",
+          name: "servicenow",
+          command: "npx",
+          envKeys: ["SERVICENOW_TOKEN"]
+        }
+      ]
+    });
+  });
+
   it("keeps saved config when env vars are unset", async () => {
     await saveConfig({
       apiKey: "saved-key",
@@ -129,7 +160,8 @@ describe("config", () => {
       mcpServers: {},
       workspacePolicies: {},
       workspacePolicyProfiles: {},
-      disabledTools: []
+      disabledTools: [],
+      toolProposals: []
     };
 
     expect(resolveModelListEndpoint(config, { providerId: "browser" })).toEqual({

@@ -129,6 +129,7 @@ function config(patch: Partial<AppConfig> = {}): AppConfig {
     mcpServers: {},
     workspacePolicies: {},
     disabledTools: [],
+    toolProposals: [],
     ...patch,
     workspacePolicyProfiles: patch.workspacePolicyProfiles ?? {}
   };

@@ -4,6 +4,7 @@ import { createToolRegistry } from "../tools/registry.js";
 import type { ChangeCheckpoint } from "../tools/changeCheckpoint.js";
 import type { BrowserTaskModelConfig, BrowserToolController } from "../tools/browserControl.js";
 import type { Elicitor } from "../tools/elicitation.js";
+import type { RuntimeControl } from "../tools/runtimeControl.js";
 import { detectWorkspace } from "../workspace.js";
 import { chatContentToText, trimChatContent, type ChatContent } from "./content.js";
 import { stripFencedCodeBlocks } from "./textualToolCalls.js";
@@ -23,7 +24,7 @@ import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatReques
 import type { AppConfig } from "../config.js";
 
 const MAX_STEPS = 500;
-const SYSTEM_PROMPT_VERSION = 12;
+const SYSTEM_PROMPT_VERSION = 13;
 const SYSTEM_PROMPT_SIGNATURE = "You are Arivu";
 const WEB_SEARCH_TOOL = "web_search";
 const PARALLEL_TOOL_LIMIT = 5;
@@ -37,7 +38,8 @@ const PARALLEL_SAFE_TOOLS = new Set([
   "current_datetime",
   "current_location",
   "list_skills",
-  "read_skill"
+  "read_skill",
+  "arivu_runtime_status"
 ]);
 const BROWSER_STATE_TOOL = "browser_state";
 const BROWSER_TASK_TOOL = "browser_task";
@@ -80,6 +82,7 @@ export class Agent {
       scopePolicyRules?: AppConfig["workspacePolicies"][string]["scopeRules"];
       browser?: BrowserToolController;
       browserTaskModel?: BrowserTaskModelConfig;
+      runtimeControl?: RuntimeControl;
       directEditReview?: boolean;
       /** Frontend renderer for the ask_user tool's structured questions; omit for headless runs. */
       elicit?: Elicitor;
@@ -285,6 +288,7 @@ export class Agent {
       scopePolicyRules: this.options.scopePolicyRules,
       browser: this.options.browser,
       browserTaskModel: this.options.browserTaskModel,
+      runtimeControl: this.options.runtimeControl,
       onBrowserTaskProgress: (progress) => {
         void runOptions.onEvent?.({ type: "browser_task_progress", ...progress });
       },
@@ -293,6 +297,7 @@ export class Agent {
       signal: runOptions.signal,
       checkpoint: this.options.checkpoint
     });
+    this.options.runtimeControl?.setAvailableToolNames(tools.schemas.map((tool) => tool.name));
 
     const existingSystem = this.session.messages.find(
       (message) => message.role === "system" && chatContentToText(message.content).includes(SYSTEM_PROMPT_SIGNATURE)
@@ -656,6 +661,9 @@ function systemPrompt(workspaceRoot: string) {
     'For a browser run whose original prompt labels multiple "TODO N" sections, any assistant reply without a native tool call ends the whole run. Do not emit progress summaries between TODOs. The final answer must include one explicit "TODO N: complete — <verification>" line for every original TODO; otherwise keep using tools.',
     "For every browser_task that creates or updates a record, copy the artifact's complete required field/value checklist into the instruction—including order, flags, reference table, and parent when specified. Never omit a required field because its index is not yet known, and never submit a partial record intending to repair it later.",
     "After every browser_task call, inspect success, data, trace, and snapshotAfter. Continue from recoverable partial progress, but do not repeat a completed create action; inspect exact names or record ids first to avoid duplicates.",
+    "When browser_task reports an infrastructure failure, call arivu_runtime_status before considering a model change. Use arivu_select_browser_model only with a configured candidate and only when the user requested the change or the failure is clearly endpoint, credential, rate-limit, or network infrastructure—not when the page task itself was misunderstood.",
+    "Use arivu_set_tool_state only for an explicit user request or to contain a tool that is clearly malfunctioning. Prefer run scope; use session scope only when the condition should survive later prompts in this chat.",
+    "A new executable tool cannot be installed silently. Use arivu_propose_mcp_server to create a disabled review item in Settings > Integrations; never include secret values in its command, arguments, or environment keys.",
     "If browser_task reports popupOpened or says that a new tab/popup opened, call browser_state and continue on its activeTabId. Do not repeat the action that opened the popup.",
     "When delegating ServiceNow custom-combobox fields, require the browser agent to click the exact suggestion and verify the displayed selection. Do not describe typing filter text as if it commits the value.",
     'In ServiceNow, the persistent header action labeled "Create favorite for ..." is not an open overlay. Do not ask the browser agent to close a dialog unless current browser evidence includes a visible role=dialog (or an explicit dialog title and controls).',

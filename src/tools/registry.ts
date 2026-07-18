@@ -63,6 +63,7 @@ import {
   type BrowserToolController,
   type BrowserToolResult
 } from "./browserControl.js";
+import type { RuntimeControl } from "./runtimeControl.js";
 
 type ToolContext = {
   workspaceRoot: string;
@@ -72,6 +73,7 @@ type ToolContext = {
   scopePolicyRules?: WorkspaceScopePolicyRules;
   browser?: BrowserToolController;
   browserTaskModel?: BrowserTaskModelConfig;
+  runtimeControl?: RuntimeControl;
   onBrowserTaskProgress?: (progress: { stepIndex: number; summary: string }) => void;
   directEditReview?: boolean;
   /**
@@ -106,6 +108,13 @@ const MAX_SEARCH_CONTEXT_LINES = 10;
 const MAX_JS_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_JS_SEARCH_FILES = 5_000;
 const MIN_DELEGATED_BROWSER_TASK_TIMEOUT_MS = 600_000;
+// Observed live: an orchestrator following "make bounded browser_task calls" guidance passed a
+// small maxSteps that left the in-page agent with a handful of steps remaining before it had
+// even acted once. Under that pressure it rushed — typing a stray character instead of pressing
+// Enter — then self-reported success anyway. A single reference-field interaction on a
+// re-rendering form (click label, re-observe after the index shifts, click again, type, submit)
+// routinely takes more than a "handful" of steps, so floor the budget well above that.
+const MIN_DELEGATED_BROWSER_TASK_MAX_STEPS = 20;
 
 // Low-level manual browser tools are temporarily disabled so the agent is steered toward the
 // higher-level browser_task tool instead of driving snapshot/click/type rounds itself. Flip this
@@ -128,6 +137,120 @@ export function createToolRegistry(context: ToolContext) {
   const directEditReview = context.directEditReview ?? true;
 
   const register = (tool: ToolDefinition) => tools.set(tool.schema.name, tool);
+
+  if (context.runtimeControl) {
+    register({
+      schema: {
+        name: "arivu_runtime_status",
+        description:
+          "Inspect Arivu's current browser-task model candidates and runtime-disabled tools. Use before changing Arivu's runtime.",
+        parameters: objectSchema({})
+      },
+      async execute() {
+        return JSON.stringify(await context.runtimeControl!.status(), null, 2);
+      }
+    });
+
+    register({
+      schema: {
+        name: "arivu_set_tool_state",
+        description:
+          "Temporarily disable a tool for this run or chat session, or undo a previous runtime disable. This cannot override saved Settings or workspace policy and cannot disable Arivu control tools.",
+        parameters: objectSchema({
+          name: { type: "string", description: "Exact registered tool name." },
+          enabled: { type: "boolean", description: "False disables the tool. True removes a runtime disable." },
+          scope: {
+            type: "string",
+            enum: ["run", "session"],
+            description: "run affects only the current agent run; session also affects later prompts in this chat."
+          },
+          reason: { type: "string", description: "Concise reason for the change, grounded in the user's request or observed failure." }
+        })
+      },
+      async execute(args) {
+        const parsed = z
+          .object({
+            name: z.string().trim().min(1),
+            enabled: z.boolean(),
+            scope: z.enum(["run", "session"]).default("run"),
+            reason: z.string().trim().min(1).max(500)
+          })
+          .parse(args);
+        return JSON.stringify(await context.runtimeControl!.setToolState(parsed), null, 2);
+      }
+    });
+
+    register({
+      schema: {
+        name: "arivu_select_browser_model",
+        description:
+          "Switch the browser-task agent to a configured model candidate for this run or chat session. Use only after arivu_runtime_status and only for an explicit user request or a browser_task infrastructure failure.",
+        parameters: objectSchema({
+          candidateId: {
+            type: "string",
+            description: 'Candidate id returned by arivu_runtime_status, such as "primary" or "fallback-1".'
+          },
+          scope: {
+            type: "string",
+            enum: ["run", "session"],
+            description: "run affects the current agent run; session also affects later prompts in this chat."
+          },
+          reason: { type: "string", description: "Observed infrastructure failure or explicit user reason for switching." }
+        })
+      },
+      async execute(args) {
+        const parsed = z
+          .object({
+            candidateId: z.string().trim().min(1),
+            scope: z.enum(["run", "session"]).default("run"),
+            reason: z.string().trim().min(1).max(500)
+          })
+          .parse(args);
+        return JSON.stringify(await context.runtimeControl!.selectBrowserModel(parsed), null, 2);
+      }
+    });
+
+    register({
+      schema: {
+        name: "arivu_propose_mcp_server",
+        description:
+          "Propose a new MCP server integration for review in Settings > Integrations. This never starts the command or enables the server; the user must review and add it.",
+        parameters: objectSchema({
+          name: { type: "string", description: "Short unique server name." },
+          description: { type: "string", description: "What tools or capability this MCP server would provide." },
+          command: { type: "string", description: "Executable command the user will review." },
+          args: { type: "array", items: { type: "string" }, description: "Command arguments, excluding secrets." },
+          envKeys: {
+            type: "array",
+            items: { type: "string" },
+            description: "Environment variable names needed for credentials. Never include secret values."
+          },
+          reason: { type: "string", description: "Why the current task needs this capability." }
+        })
+      },
+      async execute(args) {
+        const parsed = z
+          .object({
+            name: z.string().trim().min(1).max(80),
+            description: z.string().trim().max(500).default(""),
+            command: z.string().trim().min(1).max(500),
+            args: z.array(z.string().max(500)).max(40).default([]),
+            envKeys: z
+              .array(
+                z
+                  .string()
+                  .trim()
+                  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
+              )
+              .max(40)
+              .default([]),
+            reason: z.string().trim().min(1).max(1_000)
+          })
+          .parse(args);
+        return JSON.stringify(await context.runtimeControl!.proposeMcpServer(parsed), null, 2);
+      }
+    });
+  }
 
   register({
     schema: {
@@ -742,7 +865,11 @@ export function createToolRegistry(context: ToolContext) {
             description: "Optional browser mode. Defaults to the active browser mode."
           },
           tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
-          maxSteps: { type: "number", description: "Maximum number of agent loops, from 1 to 200. Defaults to 100." },
+          maxSteps: {
+            type: "number",
+            description:
+              "Maximum number of agent loops, from 1 to 200. Defaults to 100. Values below 20 are raised to 20 — a single form-field interaction routinely takes several loops (observe, act, re-observe after the page re-renders), and a tight budget makes the in-page agent rush and misreport success rather than actually finishing sooner."
+          },
           timeoutMs: {
             type: "number",
             description:
@@ -784,7 +911,8 @@ export function createToolRegistry(context: ToolContext) {
           instruction: repaired.instruction,
           mode: repaired.mode
         };
-        if (!context.browserTaskModel) {
+        const browserTaskModel = context.runtimeControl?.currentBrowserTaskModel() ?? context.browserTaskModel;
+        if (!browserTaskModel) {
           throw new Error("browser_task has no model configured for this run.");
         }
         if (browserTaskInstructionAttemptsDirectUrlNavigation(parsed.instruction)) {
@@ -805,6 +933,7 @@ export function createToolRegistry(context: ToolContext) {
           throw new Error("browser_task cannot target a visible tab id in background mode. Omit tabId or switch to visible mode.");
         }
         const timeoutMs = parsed.timeoutMs === undefined ? undefined : Math.max(parsed.timeoutMs, MIN_DELEGATED_BROWSER_TASK_TIMEOUT_MS);
+        const maxSteps = parsed.maxSteps === undefined ? undefined : Math.max(parsed.maxSteps, MIN_DELEGATED_BROWSER_TASK_MAX_STEPS);
         await context.approvals.require({
           type: "browser",
           action: "task",
@@ -818,8 +947,9 @@ export function createToolRegistry(context: ToolContext) {
           await browser.task({
             ...parsed,
             timeoutMs,
+            maxSteps,
             mode,
-            modelConfig: context.browserTaskModel,
+            modelConfig: browserTaskModel,
             signal: context.signal,
             onProgress: context.onBrowserTaskProgress
           })
