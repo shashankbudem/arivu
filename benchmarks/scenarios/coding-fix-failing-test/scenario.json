@@ -1,0 +1,18 @@
+{
+  "id": "coding-fix-failing-test",
+  "title": "Fix an off-by-one bug so the plain-node test suite passes",
+  "kind": "coding",
+  "task": "Run `node test.js` to see the failing tests, then fix the bug in sum.js so that all tests pass. Do not modify test.js.",
+  "notes": "Seed scenario proving the headless CLI benchmark path (2026-07-18). Zero-dependency fixture so runs need no npm install.",
+  "bounds": { "timeoutMs": 300000 },
+  "workspace": { "fixture": "fixture-repo" },
+  "verify": [
+    {
+      "type": "workspace",
+      "checks": [
+        { "check": "command", "command": "node test.js", "expectExitCode": 0, "label": "node test.js passes" },
+        { "check": "fileEquals", "path": "test.js", "file": "fixture-repo/test.js", "label": "test.js untouched" }
+      ]
+    }
+  ]
+}

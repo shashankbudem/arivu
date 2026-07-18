@@ -1,0 +1,18 @@
+{
+  "id": "__ID__",
+  "title": "One line: what the app must accomplish",
+  "kind": "coding",
+  "task": "PASTE THE EXACT PROMPT you handed the app during the dev session.",
+  "notes": "Captured from <which dev/test session> on __DATE__.",
+  "bounds": { "timeoutMs": 300000 },
+  "workspace": { "fixture": "fixture-repo" },
+  "verify": [
+    {
+      "type": "workspace",
+      "checks": [
+        { "check": "command", "command": "node test.js", "expectExitCode": 0, "label": "tests pass" },
+        { "check": "fileEquals", "path": "test.js", "file": "fixture-repo/test.js", "label": "tests untouched" }
+      ]
+    }
+  ]
+}

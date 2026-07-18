@@ -17,3 +17,5 @@ output/playwright/
 __pycache__/
 *.py[cod]
 .venv-browser-bench/
+benchmarks/results/
+output/servicenow-benchmark/
