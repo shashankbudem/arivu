@@ -26,6 +26,25 @@ after the provider redeployed its backends. The window is a property of the *dep
 model card. Never infer one from a name; store what the provider reports, and let `context_changed`
 events track the drift.
 
+### Published NVIDIA fallbacks
+
+For a small set of current NVIDIA NIM models, Arivu also carries the input-context size published on
+NVIDIA's [LLM API reference](https://docs.api.nvidia.com/nim/reference/llm-apis). These values are
+used only before the catalog has observed the selected endpoint:
+
+| Model | Published input context |
+|---|---:|
+| `deepseek-ai/deepseek-v4-flash` | 1,000,000 |
+| `deepseek-ai/deepseek-v4-pro` | 1,000,000 |
+| `minimaxai/minimax-m2.7` | 204,800 |
+| `nvidia/nemotron-3-nano-30b-a3b` | 1,000,000 |
+| `nvidia/nemotron-3-ultra-550b-a55b` | 1,000,000 |
+| `z-ai/glm-5.2` | 1,000,000 |
+
+The live provider-reported value always acts as a lower ceiling. For example, a deployment can
+advertise a one-million-token model but currently enforce a 262,144-token window. This avoids both
+premature compaction and requests the active NVIDIA endpoint will reject.
+
 ## Storage
 
 Two files under the app data dir (`~/Library/Application Support/arivu/`):
