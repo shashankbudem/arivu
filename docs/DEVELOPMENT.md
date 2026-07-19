@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 20.17.0 or newer.
 - npm.
 - `rg` installed for the search tool.
 - `git` installed for workspace detection and status.

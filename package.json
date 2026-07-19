@@ -30,7 +30,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.17.0"
   },
   "scripts": {
     "dev": "tsx src/cli.ts",
@@ -55,7 +55,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@inquirer/prompts": "^5.5.0",
+    "@inquirer/prompts": "^8.5.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@page-agent/core": "1.11.0",
     "@page-agent/page-controller": "1.11.0",
