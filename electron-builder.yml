@@ -4,10 +4,21 @@ copyright: Copyright © Arivu contributors
 directories:
   output: release
   buildResources: build
-# The renderer and main bundles produced by `npm run desktop:build`.
+# The renderer and main bundles produced by `npm run desktop:build`. The main bundle inlines
+# every runtime dependency (see desktop.tsup.config.ts noExternal), so node_modules is excluded
+# outright; the e2e harness and sourcemaps are dev-only and stay out of the package.
 files:
   - dist-desktop/**/*
+  - "!dist-desktop/e2e/**"
+  - "!dist-desktop/**/*.map"
+  - "!node_modules/**"
   - package.json
+# The app UI is English-only; drop the ~50 unused Electron/Chromium locale packs (~49 MB
+# unpacked on macOS). Re-add locales here if the UI ever localizes.
+electronLanguages:
+  - en
+  - en_GB
+  - en-US
 # Point the packaged app at the Electron main entry without changing the source package.json main
 # (which stays library/CLI-oriented).
 extraMetadata:

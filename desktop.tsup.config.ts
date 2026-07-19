@@ -18,6 +18,10 @@ export default defineConfig([
     format: ["esm"],
     platform: "node",
     external: ["electron"],
+    // Bundle the runtime dependencies (tsup externalizes package.json dependencies by default)
+    // so the packaged app runs from dist-desktop alone and electron-builder can drop
+    // node_modules from the asar entirely. All five are pure JS with no native modules.
+    noExternal: [/^execa(\/|$)/, /^zod(\/|$)/, /^chalk(\/|$)/, /^@inquirer\/prompts(\/|$)/, /^@modelcontextprotocol\/sdk(\/|$)/],
     outDir: "dist-desktop/main",
     sourcemap: true,
     clean: true
