@@ -174,13 +174,17 @@ describe("resolveContextWindowTokens", () => {
     expect(resolveContextWindowTokens(configWith(), selection, catalog)).toBe(524_288);
   });
 
-  it("uses published native windows for MiniMax M2.7 and Nemotron 3 Nano", () => {
+  it("uses published native windows for current NVIDIA NIM models", () => {
     const empty = catalogWith({});
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "deepseek-ai/deepseek-v4-flash" }, empty)).toBe(1_000_000);
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "deepseek-ai/deepseek-v4-pro" }, empty)).toBe(1_000_000);
     expect(resolveContextWindowTokens(configWith(), { ...selection, model: "minimaxai/minimax-m2.7" }, empty)).toBe(204_800);
     expect(resolveContextWindowTokens(configWith(), { ...selection, model: "nvidia/nemotron-3-nano-30b-a3b" }, empty)).toBe(1_000_000);
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "nvidia/nemotron-3-ultra-550b-a55b" }, empty)).toBe(1_000_000);
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "z-ai/glm-5.2" }, empty)).toBe(1_000_000);
   });
 
-  it("does not let an inconclusive probe replace a published native window", () => {
+  it("honors a smaller endpoint limit reported by a probe", () => {
     const probed = catalogWith({
       "minimaxai/minimax-m2.7": {
         id: "minimaxai/minimax-m2.7",
@@ -191,7 +195,31 @@ describe("resolveContextWindowTokens", () => {
         lastSeenAt: "2026-07-16T00:00:00.000Z"
       }
     });
-    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "minimaxai/minimax-m2.7" }, probed)).toBe(204_800);
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "minimaxai/minimax-m2.7" }, probed)).toBe(196_608);
+  });
+
+  it("caps published one-million-token models at the deployed NIM limit", () => {
+    const observed = catalogWith({
+      "deepseek-ai/deepseek-v4-pro": {
+        id: "deepseek-ai/deepseek-v4-pro",
+        status: "available",
+        statusCheckedAt: "2026-07-19T00:00:00.000Z",
+        context: { tokens: 262_144, source: "probe_oversized", observedAt: "2026-07-19T00:00:00.000Z" },
+        firstSeenAt: "2026-07-19T00:00:00.000Z",
+        lastSeenAt: "2026-07-19T00:00:00.000Z"
+      },
+      "z-ai/glm-5.2": {
+        id: "z-ai/glm-5.2",
+        status: "available",
+        statusCheckedAt: "2026-07-19T00:00:00.000Z",
+        context: { tokens: 202_752, source: "probe_oversized", observedAt: "2026-07-19T00:00:00.000Z" },
+        firstSeenAt: "2026-07-19T00:00:00.000Z",
+        lastSeenAt: "2026-07-19T00:00:00.000Z"
+      }
+    });
+
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "deepseek-ai/deepseek-v4-pro" }, observed)).toBe(262_144);
+    expect(resolveContextWindowTokens(configWith(), { ...selection, model: "z-ai/glm-5.2" }, observed)).toBe(202_752);
   });
 
   it("honors a smaller endpoint limit learned from a real request rejection", () => {
