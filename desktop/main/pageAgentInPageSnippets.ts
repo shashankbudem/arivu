@@ -39,7 +39,9 @@ export const ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS = [
   '- ServiceNow Question Choices: when the related list and its button value=sysverb_new are already present, click that New button directly. "Question Choices" menus and Show/Hide List only configure or collapse the list; they do not open a choice editor. Never scroll for Add New when the indexed sysverb_new button is present.',
   "- ServiceNow MRVS children: create them from the existing Variable Set record's Variables related-list New button. Their Type is the requested child type (for example Multi Line Text), not Multi Row Variable Set; the existing Variable Set is the parent.",
   '- Lines like "(N more plain text lines omitted)" mean long non-interactive text was shortened to save space. All interactive [index] elements are still listed.',
-  "- ServiceNow forms: use the labeled fields in the deepest visible form rather than similarly named navigation items in the outer shell. After Submit/Update, wait for navigation and verify the saved record or related list before calling done."
+  "- ServiceNow forms: use the labeled fields in the deepest visible form rather than similarly named navigation items in the outer shell. After Submit/Update, wait for navigation and verify the saved record or related list before calling done.",
+  "- If execute_javascript is among your available actions and you are stuck — the same click/input_text/select attempt has now failed twice in a row, or the goal has no obvious click/type/select equivalent (reading a value the DOM doesn't expose, a hidden control, a custom widget) — use it to read the exact state you need or drive the interaction directly, then verify the result in the next browser state before continuing. Do not reach for it before trying the direct action at least twice.",
+  "- If you do not know what a specific field, control, or workflow on this site expects — not a DOM mechanics problem execute_javascript can solve, but not knowing the right answer at all — use search_web with a concise, specific query before guessing further. Read the result, then act on what you learned; do not search repeatedly for the same question."
 ].join("\n");
 
 /**
@@ -592,10 +594,12 @@ export const INSTALL_SERVICE_NOW_VARIABLE_TYPE_GUARD_SNIPPET = String.raw`(funct
 })`;
 
 /**
- * Restyles page-agent's visible automation mask and activity panel. The upstream
- * mask ships with a cyan/purple WebGL border and a large arrow asset. Arivu uses
- * a ServiceNow-inspired evergreen/teal gradient, a compact reference-matched blue
- * pointer, and a dark branded activity surface for live status and step history.
+ * Restyles page-agent's visible automation mask. The upstream mask ships with a
+ * cyan/purple WebGL border and a large arrow asset; Arivu uses a ServiceNow-inspired
+ * evergreen/teal gradient and a compact reference-matched blue pointer instead. Also keeps
+ * the real cursor visible (upstream hides it) and locks the mask to always swallow real
+ * mouse/keyboard input instead of upstream's default of only doing so intermittently, mid-
+ * action -- see the inline comment below for why this needs to win over upstream's own toggling.
  */
 export const INSTALL_AGENT_VISUAL_THEME_SNIPPET = String.raw`(function() {
   var STYLE_ID = "arivu-agent-visual-theme";
@@ -606,8 +610,18 @@ export const INSTALL_AGENT_VISUAL_THEME_SNIPPET = String.raw`(function() {
   styleElement.id = STYLE_ID;
   styleElement.setAttribute("data-page-agent-ignore", "true");
   styleElement.textContent =
+    // Upstream toggles the mask's own pointerEvents between "none" (real clicks pass through
+    // to the page) and "auto" (captured and swallowed -- see its click/mousedown/wheel/keydown
+    // listeners, which just stopPropagation+preventDefault) via plain inline style writes keyed
+    // to whether the agent is mid-action. Both are non-!important, so this !important rule wins
+    // over either one and keeps the mask permanently in the capturing state: the user's real
+    // mouse/keyboard can never reach the page while the agent has it, not just during the brief
+    // windows upstream would otherwise allow. The agent's own actions are unaffected -- those
+    // are synthesized directly against the target element, not routed through this cascade.
+    // cursor:not-allowed (not "none") keeps the real pointer visible and visually explains why
+    // clicking does nothing, rather than hiding it behind the mask's own simulated cursor icon.
     "#" + MASK_ID + "{" +
-      "cursor:none!important;isolation:isolate}" +
+      "cursor:not-allowed!important;pointer-events:auto!important;isolation:isolate}" +
     "#" + MASK_ID + ">canvas{opacity:0!important}" +
     "#" + MASK_ID + "::before{content:'';position:absolute;inset:0;pointer-events:none;padding:3px;" +
       "background:linear-gradient(115deg,#032d42,#075985,#00c49a,#62d84e,#81b5a1,#032d42);" +
@@ -620,18 +634,108 @@ export const INSTALL_AGENT_VISUAL_THEME_SNIPPET = String.raw`(function() {
     "#" + MASK_ID + " [class*='cursorFilling'],#" + MASK_ID + " [class*='cursorBorder']{display:none!important}" +
     "#" + MASK_ID + " [class*='cursorRipple']{width:30px!important;height:30px!important;margin-left:-15px!important;margin-top:-15px!important}" +
     "#" + MASK_ID + " [class*='cursorRipple']::after{border-color:#286fbe!important;border-width:3px!important}" +
-    "#page-agent-runtime_agent-panel{--width:min(460px,calc(100vw - 32px));bottom:28px!important;filter:drop-shadow(0 18px 44px rgba(3,45,66,.34))}" +
-    "#page-agent-runtime_agent-panel>div[class*='_background_']{display:none!important}" +
-    "#page-agent-runtime_agent-panel div[class*='_header_']{background:rgba(3,45,66,.94)!important;border:1px solid rgba(129,181,161,.72)!important;box-shadow:0 0 0 1px rgba(0,196,154,.18),0 8px 28px rgba(3,45,66,.3)!important}" +
-    "#page-agent-runtime_agent-panel div[class*='historySectionWrapper']{background:rgba(3,45,66,.96)!important;border-color:rgba(129,181,161,.72)!important;box-shadow:0 16px 38px rgba(3,45,66,.38)!important}" +
-    "#page-agent-runtime_agent-panel div[class*='historyItem']{border-left-color:#00c49a!important;background:linear-gradient(135deg,rgba(0,196,154,.15),rgba(129,181,161,.06))!important}" +
-    "#page-agent-runtime_agent-panel div[class*='_indicator_']{background:#62d84e!important}" +
-    "#page-agent-runtime_agent-panel div[class*='inputSectionWrapper']{display:none!important}" +
     "@keyframes arivu-agent-border{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}" +
     "@media(prefers-reduced-motion:reduce){#" + MASK_ID + "::before{animation:none}}";
   (document.head || document.documentElement).appendChild(styleElement);
   document.documentElement.setAttribute("data-arivu-agent-theme", "servicenow");
   return true;
+})`;
+
+/**
+ * A minimal, ephemeral "Arivu is working here" indicator, upserted directly into a
+ * tab's top frame by the main-process supervisor (never injected as part of the
+ * per-frame agent script). Unlike the old page-agent Panel -- which lived in
+ * whichever frame the agent happened to run in and could leave a second, stale
+ * instance behind when a later browser_task call targeted a different frame (see
+ * selectBrowserTaskExecutionTarget) -- this chip has exactly one possible home per
+ * tab, so there is nothing left for a later call to duplicate. Built with
+ * createElement/textContent only, never innerHTML -- pages enforcing Trusted Types
+ * (e.g. ServiceNow's polaris shell) reject raw innerHTML outright.
+ *
+ * Shows the ordered list of browser_task calls made so far on this tab (tracked
+ * per-WebContents in browserTaskSupervisor.ts, capped to the most recent few):
+ * finished ones collapse to a checkmark/cross + their instruction, the in-progress
+ * one expands underneath with its live step detail. This is deliberately a rolling
+ * window, not the full history -- Arivu's own chrome-side Activity sidebar is the
+ * authoritative, unbounded record; this chip stays glanceable on the page itself.
+ */
+export const PRESENCE_CHIP_ID = "arivu-agent-presence-chip";
+
+export const UPDATE_PRESENCE_CHIP_SNIPPET = String.raw`(function(tasks) {
+  var CHIP_ID = ${JSON.stringify(PRESENCE_CHIP_ID)};
+  var STYLE_ID = CHIP_ID + "-theme";
+  var chip = document.getElementById(CHIP_ID);
+  if (!chip) {
+    if (!document.getElementById(STYLE_ID)) {
+      var style = document.createElement("style");
+      style.id = STYLE_ID;
+      style.setAttribute("data-page-agent-ignore", "true");
+      style.textContent =
+        "#" + CHIP_ID + "{position:fixed;right:16px;bottom:16px;z-index:2147483000;" +
+          "width:min(320px,calc(100vw - 32px));padding:8px 12px;border-radius:9px;" +
+          "background:rgba(3,45,66,.94);border:1px solid rgba(129,181,161,.72);" +
+          "box-shadow:0 0 0 1px rgba(0,196,154,.18),0 10px 28px rgba(3,45,66,.34);" +
+          "font:12px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
+          "color:#e7f3ef;pointer-events:none;isolation:isolate}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-head{display:flex;align-items:center;gap:6px;" +
+          "font-weight:600;letter-spacing:.01em;color:#8fe3cd;margin-bottom:4px}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-dot{width:6px;height:6px;border-radius:50%;flex:none;" +
+          "background:#62d84e;box-shadow:0 0 0 rgba(98,216,78,.6);animation:" + CHIP_ID + "-pulse 1.8s ease-out infinite}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-task{display:flex;align-items:flex-start;gap:6px;padding:2px 0}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-task-icon{flex:none;width:13px;text-align:center;color:#6fae98}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-task.failed ." + CHIP_ID + "-task-icon{color:#e08a6f}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-task.current ." + CHIP_ID + "-task-icon{color:#62d84e}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-task-label{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#a9b8b2}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-task.current ." + CHIP_ID + "-task-label{color:#e7f3ef;font-weight:600}" +
+        "#" + CHIP_ID + " ." + CHIP_ID + "-detail{padding:2px 0 2px 19px;color:#8b9994;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
+        "@keyframes " + CHIP_ID + "-pulse{0%{box-shadow:0 0 0 0 rgba(98,216,78,.55)}70%{box-shadow:0 0 0 6px rgba(98,216,78,0)}100%{box-shadow:0 0 0 0 rgba(98,216,78,0)}}" +
+        "@media(prefers-reduced-motion:reduce){#" + CHIP_ID + " ." + CHIP_ID + "-dot{animation:none}}";
+      (document.head || document.documentElement).appendChild(style);
+    }
+    chip = document.createElement("div");
+    chip.id = CHIP_ID;
+    chip.setAttribute("data-page-agent-ignore", "true");
+    chip.setAttribute("role", "status");
+    chip.setAttribute("aria-live", "polite");
+    var head = document.createElement("div");
+    head.className = CHIP_ID + "-head";
+    var dot = document.createElement("span");
+    dot.className = CHIP_ID + "-dot";
+    var label = document.createElement("span");
+    label.textContent = "Arivu";
+    head.appendChild(dot);
+    head.appendChild(label);
+    chip.appendChild(head);
+    (document.body || document.documentElement).appendChild(chip);
+  }
+  var existingRows = chip.querySelectorAll("." + CHIP_ID + "-task, ." + CHIP_ID + "-detail");
+  for (var i = 0; i < existingRows.length; i++) {
+    existingRows[i].remove();
+  }
+  var list = Array.isArray(tasks) ? tasks : [];
+  for (var j = 0; j < list.length; j++) {
+    var task = list[j] || {};
+    var status = task.status === "done" || task.status === "failed" ? task.status : "current";
+    var row = document.createElement("div");
+    row.className = CHIP_ID + "-task " + status;
+    var icon = document.createElement("span");
+    icon.className = CHIP_ID + "-task-icon";
+    icon.textContent = status === "done" ? "✓" : status === "failed" ? "✕" : "▶";
+    var text = document.createElement("span");
+    text.className = CHIP_ID + "-task-label";
+    text.textContent = String(task.instruction || "");
+    row.appendChild(icon);
+    row.appendChild(text);
+    chip.appendChild(row);
+    if (status === "current" && Array.isArray(task.detail)) {
+      for (var k = 0; k < task.detail.length; k++) {
+        var detailEl = document.createElement("div");
+        detailEl.className = CHIP_ID + "-detail";
+        detailEl.textContent = String(task.detail[k]);
+        chip.appendChild(detailEl);
+      }
+    }
+  }
 })`;
 
 /**
@@ -662,12 +766,20 @@ export const BUILD_TRACE_SNIPPET = String.raw`(function(history, stepOffset) {
         input = "";
       }
       var output = String((event.action && event.action.output) || "").replace(/\s+/g, " ");
-      var goal =
-        event.reflection && event.reflection.next_goal && event.reflection.next_goal !== "(not recorded)"
-          ? " | goal: " + String(event.reflection.next_goal).replace(/\s+/g, " ")
-          : "";
+      var reflectionField = function(key, label) {
+        var value = event.reflection && event.reflection[key];
+        return value && value !== "(not recorded)" ? " | " + label + ": " + String(value).replace(/\s+/g, " ") : "";
+      };
+      var evaluation = reflectionField("evaluation_previous_goal", "eval");
+      var memory = reflectionField("memory", "memory");
+      var goal = reflectionField("next_goal", "goal");
       var inputPart = input && input !== "undefined" ? " " + input : "";
-      entries.push(("step " + (event.stepIndex + 1 + offset) + ": " + name + inputPart + " -> " + output + goal).slice(0, MAX_ENTRY_CHARS));
+      entries.push(
+        ("step " + (event.stepIndex + 1 + offset) + ": " + name + inputPart + " -> " + output + evaluation + memory + goal).slice(
+          0,
+          MAX_ENTRY_CHARS
+        )
+      );
     } else if (event.type === "observation") {
       entries.push(("observation: " + String(event.content || "").replace(/\s+/g, " ")).slice(0, MAX_ENTRY_CHARS));
     } else if (event.type === "error") {

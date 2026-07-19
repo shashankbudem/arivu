@@ -92,6 +92,14 @@ export type AgentRunEvent =
       type: "browser_task_progress";
       stepIndex: number;
       summary: string;
+      evaluation?: string;
+      memory?: string;
+    }
+  | {
+      type: "empty_response_retry";
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
     };
 
 export type AgentRunOptions = {

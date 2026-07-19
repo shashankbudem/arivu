@@ -17,7 +17,8 @@ import {
   CAP_PAGE_CONTENT_SNIPPET,
   INSTALL_AGENT_VISUAL_THEME_SNIPPET,
   INSTALL_SERVICE_NOW_VARIABLE_TYPE_GUARD_SNIPPET,
-  INSTALL_UNRELATED_CHECKBOX_LABEL_GUARD_SNIPPET
+  INSTALL_UNRELATED_CHECKBOX_LABEL_GUARD_SNIPPET,
+  UPDATE_PRESENCE_CHIP_SNIPPET
 } from "./pageAgentInPageSnippets.js";
 
 /**
@@ -44,6 +45,8 @@ export type BrowserTaskArgs = {
   allowedDomains?: string[];
   allowJavaScript?: boolean;
   allowSensitiveActions?: boolean;
+  /** Forwarded to the in-page search_web tool's Tavily fallback; undefined uses Bing. */
+  tavilyApiKey?: string;
   visible?: boolean;
 };
 
@@ -78,6 +81,15 @@ const STEP_DELAY_SECONDS = 35;
 // both. Extra attempts are cheap relative to failing the whole multi-step task.
 const LLM_MAX_RETRIES = 4;
 const PROGRESS_POLL_INTERVAL_MS = 1_000;
+// The presence chip is a fixed-width, non-scrolling glance -- keep each line short rather than
+// relying on the chip's own CSS ellipsis to do all the work.
+const PRESENCE_CHIP_LINE_CHARS = 90;
+const PRESENCE_CHIP_INSTRUCTION_CHARS = 70;
+// A rolling window, not the full history: unbounded growth over a long session would turn a
+// glanceable on-page chip into its own scrolling list. Arivu's chrome-side Activity sidebar is
+// the authoritative, unbounded record of every browser_task call; this chip only needs enough
+// recent context to answer "what has Arivu been doing on this tab lately."
+const MAX_PRESENCE_CHIP_TASKS = 5;
 const NAVIGATION_SETTLE_TIMEOUT_MS = 10_000;
 const NAVIGATION_STABLE_MS = 300;
 const POST_SUBMIT_NAVIGATION_SETTLE_TIMEOUT_MS = 30_000;
@@ -138,11 +150,33 @@ type PolledProgress = {
   stepCount: number;
   lastAction?: string;
   lastGoal?: string;
+  lastEvaluation?: string;
+  lastMemory?: string;
 };
 
 export type JavaScriptExecutionTarget = {
   executeJavaScript(code: string, userGesture?: boolean): Promise<unknown>;
 };
+
+type PresenceChipTask = {
+  instruction: string;
+  status: "current" | "done" | "failed";
+  detail?: string[];
+};
+
+// Per-tab rolling history for the presence chip -- one entry per browser_task call, in call
+// order. Keyed by WebContents (not a manually-tracked tab id) so it naturally scopes itself to
+// a tab's lifetime and needs no explicit cleanup when the tab closes.
+const presenceChipTasksByTab = new WeakMap<WebContents, PresenceChipTask[]>();
+
+function presenceChipTasksFor(contents: WebContents): PresenceChipTask[] {
+  let tasks = presenceChipTasksByTab.get(contents);
+  if (!tasks) {
+    tasks = [];
+    presenceChipTasksByTab.set(contents, tasks);
+  }
+  return tasks;
+}
 
 export type BrowserTaskExecutionTarget = {
   target: JavaScriptExecutionTarget;
@@ -344,7 +378,12 @@ export async function runBrowserTask(
   args: BrowserTaskArgs,
   modelConfig: BrowserTaskModelConfig,
   signal?: AbortSignal,
-  onProgress?: (progress: { stepIndex: number; summary: string }) => void
+  onProgress?: (progress: {
+    stepIndex: number;
+    summary: string;
+    evaluation?: string;
+    memory?: string;
+  }) => void
 ): Promise<BrowserToolResult> {
   const instruction = stripStaleBrowserTaskIndices(args.instruction);
   const timeoutMs = clamp(Math.trunc(args.timeoutMs ?? DEFAULT_TIMEOUT_MS), MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
@@ -414,6 +453,19 @@ export async function runBrowserTask(
   // ("Example.COM", ".example.com") cannot make the in-page host check reject every page.
   const allowedDomains = normalizeAllowedDomains(args.allowedDomains?.length ? args.allowedDomains : defaultAllowedDomains(contents));
   const bundleText = await loadPageAgentBundle();
+
+  // Record this call in the tab's rolling task list and show it immediately (before the first
+  // step lands) so the chip reflects a new task starting without waiting on the first poll tick.
+  let presenceChipTask: PresenceChipTask | undefined;
+  if (args.visible) {
+    const tasks = presenceChipTasksFor(contents);
+    presenceChipTask = { instruction: boundText(instruction, PRESENCE_CHIP_INSTRUCTION_CHARS), status: "current" };
+    tasks.push(presenceChipTask);
+    while (tasks.length > MAX_PRESENCE_CHIP_TASKS) {
+      tasks.shift();
+    }
+    void updatePresenceChip(contents.mainFrame, tasks);
+  }
 
   const startedAt = Date.now();
   let deadlineTimer: NodeJS.Timeout | undefined;
@@ -506,6 +558,7 @@ export async function runBrowserTask(
       const registered = await registerBrowserTaskProxyEntry({
         realBaseUrl: candidate.baseUrl,
         realApiKey: candidate.apiKey,
+        tavilyApiKey: args.tavilyApiKey,
         ttlMs: timeoutMs + PROXY_TOKEN_TTL_SLOP_MS
       });
       token = registered.token;
@@ -625,10 +678,16 @@ export async function runBrowserTask(
               const isNewStep = progress.stepCount !== lastProgress?.stepCount;
               lastProgress = progress;
               if (isNewStep && progress.stepCount > 0) {
-                onProgress?.({
-                  stepIndex: stepsUsedSoFar + progress.stepCount,
-                  summary: progress.lastGoal ?? progress.lastAction ?? `step ${progress.stepCount}`
-                });
+                const stepIndex = stepsUsedSoFar + progress.stepCount;
+                const summary = progress.lastGoal ?? progress.lastAction ?? `step ${progress.stepCount}`;
+                onProgress?.({ stepIndex, summary, evaluation: progress.lastEvaluation, memory: progress.lastMemory });
+                if (presenceChipTask) {
+                  presenceChipTask.detail = [`Step ${stepIndex}: ${boundText(summary, PRESENCE_CHIP_LINE_CHARS)}`];
+                  if (progress.lastEvaluation) {
+                    presenceChipTask.detail.push(boundText(progress.lastEvaluation, PRESENCE_CHIP_LINE_CHARS));
+                  }
+                  void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
+                }
               }
             })
             .catch(() => {
@@ -663,6 +722,9 @@ export async function runBrowserTask(
         if (!executionTarget.isMainFrame) {
           contents.off("did-frame-navigate", onFrameNavigate);
           contents.off("did-navigate-in-page", onNavigateInPage);
+        }
+        if (args.visible) {
+          void disposeAgentMask(executionTarget.target);
         }
       }
       lastKnownProgress = lastProgress;
@@ -815,6 +877,16 @@ export async function runBrowserTask(
     if (rotatedFrom.length > 0) {
       result.rotatedModels = rotatedFrom;
     }
+    // Collapse this task's chip entry to its final state -- done/failed, detail cleared -- so it
+    // reads as a finished line in the list rather than lingering on its last live step. The chip
+    // itself is never removed here: it's the tab's rolling task history now, not scoped to a
+    // single call, and naturally goes away when the page navigates (fresh JS context, nothing to
+    // carry the WeakMap entry into) rather than needing an explicit teardown on every call.
+    if (presenceChipTask) {
+      presenceChipTask.status = success ? "done" : "failed";
+      presenceChipTask.detail = undefined;
+      void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
+    }
     return result;
   } finally {
     if (deadlineTimer) {
@@ -828,6 +900,14 @@ export async function runBrowserTask(
     }
     for (const registeredToken of registeredTokens) {
       unregisterBrowserTaskProxyEntry(registeredToken);
+    }
+    // Safety net for a thrown error skipping the normal finalize-and-return above: still marked
+    // "current" here means that never ran, so this call ended some other way. Covers every exit
+    // path without needing try-scoped variables like `success`, which finally can't see.
+    if (presenceChipTask?.status === "current") {
+      presenceChipTask.status = "failed";
+      presenceChipTask.detail = undefined;
+      void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
     }
   }
 }
@@ -1102,6 +1182,40 @@ try {
   console.warn("[Arivu] Browser agent mask unavailable on this page:", maskError);
   pageController = new lib.PageController({ enableMask: false });
 }
+// Referenced by name (not closed over) so a later, independent executeJavaScript call in this
+// same frame -- the per-attempt mask teardown the supervisor issues from its finally block --
+// can dispose it without needing a live reference into this closure.
+window.__arivuPageAgentController = pageController;
+// Routed through the same loopback proxy as the LLM calls above (this in-page context has no
+// direct network access of its own -- Chromium's Private Network Access rules and CORS would
+// otherwise block a public page from reaching a local search backend). The proxy's /__arivu_search
+// route is authenticated with this task's own bearer token and scoped to its lifetime.
+var arivuSearchWebTool = lib.tool({
+  description: "Search the public web for information you need to complete the task -- for example, how a specific field, control, or workflow on this site is meant to work. Returns a short list of titles, URLs, and snippets; it does not browse the result pages for you. Use a concise, specific query.",
+  inputSchema: lib.z.object({ query: lib.z.string() }),
+  execute: async function(input, ctx) {
+    var searchUrl = ${JSON.stringify(options.proxyBaseUrl)} + "/__arivu_search?q=" + encodeURIComponent(input.query) + "&n=5";
+    var response;
+    try {
+      response = await fetch(searchUrl, {
+        headers: { authorization: "Bearer " + ${JSON.stringify(options.token)} },
+        signal: ctx && ctx.signal
+      });
+    } catch (err) {
+      return "Search request failed: " + String(err && err.message ? err.message : err) + ". Continue without it or try again.";
+    }
+    if (!response.ok) {
+      return "Search failed (HTTP " + response.status + "). Continue without it or try a different query.";
+    }
+    var data = await response.json();
+    if (!data.results || !data.results.length) {
+      return "No results for \\"" + input.query + "\\".";
+    }
+    return data.results.map(function(result, index) {
+      return (index + 1) + ". " + result.title + "\\n   " + result.url + "\\n   " + result.snippet;
+    }).join("\\n\\n");
+  }
+});
 var core = new lib.PageAgentCore({
   pageController: pageController,
   baseURL: ${JSON.stringify(options.proxyBaseUrl)},
@@ -1111,27 +1225,18 @@ var core = new lib.PageAgentCore({
   stepDelay: ${JSON.stringify(options.stepDelaySeconds)},
   maxRetries: ${JSON.stringify(LLM_MAX_RETRIES)},
   experimentalScriptExecutionTool: ${JSON.stringify(options.allowJavaScript)},
+  customTools: { search_web: arivuSearchWebTool },
   instructions: { system: ${JSON.stringify(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS)} },
   transformPageContent: arivuCapPageContent,
   onBeforeStep: arivuOnBeforeStep,
   onAfterStep: arivuBackfillReflection
 });
-if (${JSON.stringify(options.visible)}) {
-  try {
-    if (window.__arivuPageAgentPanel && typeof window.__arivuPageAgentPanel.dispose === "function") {
-      window.__arivuPageAgentPanel.dispose();
-    }
-    var activityPanel = new lib.Panel(core, { promptForNextTask: false });
-    core.onAskUser = undefined;
-    activityPanel.wrapper.setAttribute("aria-label", "Browser agent activity");
-    activityPanel.wrapper.setAttribute("data-arivu-agent-activity", "true");
-    activityPanel.show();
-    activityPanel.expand();
-    window.__arivuPageAgentPanel = activityPanel;
-  } catch (err) {
-    console.warn("[Arivu] Browser activity panel unavailable:", err);
-  }
-}
+// The in-page agent's own ask_user UI stays disabled regardless of visibility -- Arivu always
+// routes user-facing questions through its own ask_user tool/dialog instead (see
+// ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS). Live on-page status is now the supervisor-driven
+// presence chip in the tab's top frame (updatePresenceChip below), not a per-frame Panel
+// instance.
+core.onAskUser = undefined;
 window.__arivuPageAgentTask = core;
 var arivuCleanupServiceNowVariableTypeGuard = function() {};
 var arivuCleanupUnrelatedCheckboxLabelGuard = function() {};
@@ -1385,15 +1490,61 @@ async function pollProgress(target: JavaScriptExecutionTarget): Promise<PolledPr
       var history = window.__arivuPageAgentTask.history || [];
       var steps = history.filter(function(event) { return event && event.type === "step"; });
       var last = steps[steps.length - 1];
+      var reflection = last && last.reflection;
       return {
         stepCount: steps.length,
         lastAction: last && last.action && last.action.name || undefined,
-        lastGoal: last && last.reflection && last.reflection.next_goal || undefined
+        lastGoal: reflection && reflection.next_goal || undefined,
+        lastEvaluation: reflection && reflection.evaluation_previous_goal || undefined,
+        lastMemory: reflection && reflection.memory || undefined
       };
     })()`,
     true
   )) as PolledProgress | null;
   return result ?? undefined;
+}
+
+/**
+ * Tears down the ghost-cursor mask left in whichever frame this attempt ran the agent in.
+ * Runs once per candidate attempt (including on rotation), independent of the presence chip
+ * below -- the mask is agent-frame-scoped and cannot be made single-instance by construction,
+ * so it is made leak-free by disposing it at every attempt boundary instead. A best-effort,
+ * fire-and-forget call: the frame may already be gone (navigated away, detached, destroyed),
+ * which is not an error worth surfacing here.
+ */
+// All three helpers below swallow every failure internally (a missing/undefined target, a
+// destroyed frame, a rejected executeJavaScript call) so callers can fire-and-forget them with
+// a plain `void helper(...)` and never need their own try/catch or .catch() -- getting that
+// wrong at a call site (a synchronous try/catch around a `void asyncFn()` call does NOT catch
+// that async function's later rejection) is exactly the class of mistake this is meant to rule
+// out by construction.
+async function disposeAgentMask(target: JavaScriptExecutionTarget | undefined): Promise<void> {
+  try {
+    await target?.executeJavaScript(
+      `(function() {
+        if (window.__arivuPageAgentController && typeof window.__arivuPageAgentController.dispose === "function") {
+          try { window.__arivuPageAgentController.dispose(); } catch (err) {}
+        }
+      })()`,
+      true
+    );
+  } catch {
+    // Best-effort: the frame may already be gone (navigated away, detached, destroyed).
+  }
+}
+
+/**
+ * Upserts the live "Arivu is working here" chip into a tab's own top frame -- always the top
+ * frame, regardless of which frame selectBrowserTaskExecutionTarget picked for the agent
+ * itself, since a tab has exactly one of those. See PRESENCE_CHIP_ID's doc comment for why
+ * this makes cross-frame duplication structurally impossible rather than merely patched.
+ */
+async function updatePresenceChip(mainFrame: JavaScriptExecutionTarget | undefined, tasks: PresenceChipTask[]): Promise<void> {
+  try {
+    await mainFrame?.executeJavaScript(`(${UPDATE_PRESENCE_CHIP_SNIPPET})(${JSON.stringify(tasks)})`, true);
+  } catch {
+    // Best-effort: a live status chip is never worth failing or slowing the task over.
+  }
 }
 
 function delay(ms: number): Promise<void> {

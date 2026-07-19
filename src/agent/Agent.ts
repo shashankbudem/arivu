@@ -55,6 +55,12 @@ const LOADED_SKILL_PREFIX = "Skill loaded into chat:";
 // instruction instead of accepting it as a final answer.
 const TOOL_MIMICRY_PATTERN = /^\s*Local tool requests?:|<tool_call>|<function=|<minimax:tool_call>|<invoke\s+name=/m;
 const MAX_TOOL_MIMICRY_RETRIES = 2;
+// A genuinely empty response (no content, no tool calls, nothing filtered out) is usually a
+// transient provider-side hiccup rather than a real model/logic problem -- unlike tool mimicry
+// above, retrying immediately would likely just hit the same hiccup again, so this waits out a
+// plausible recovery window between attempts instead.
+const MAX_EMPTY_RESPONSE_RETRIES = 3;
+const EMPTY_RESPONSE_RETRY_DELAY_MS = 150_000;
 /** A stuck summary call must not stall the run; past this the step proceeds on transient compaction. */
 const AUTO_SUMMARY_TIMEOUT_MS = 120_000;
 /** After an auto-summary attempt, wait for this much message growth before trying again. */
@@ -95,6 +101,8 @@ export class Agent {
       onContextWindowObserved?: (tokens: number) => void | Promise<void>;
       /** Test seam for the in-run auto-summary timeout; production uses the default. */
       autoSummaryTimeoutMs?: number;
+      /** Test seam for the empty-assistant-response retry delay; production uses the default. */
+      emptyResponseRetryDelayMs?: number;
       checkpoint?: ChangeCheckpoint;
       session?: AgentSession;
     }
@@ -363,6 +371,8 @@ export class Agent {
       }
 
       let mimicryRetries = 0;
+      let emptyResponseRetries = 0;
+      const emptyResponseRetryDelayMs = this.options.emptyResponseRetryDelayMs ?? EMPTY_RESPONSE_RETRY_DELAY_MS;
       for (let step = 0; step < MAX_STEPS; step += 1) {
         throwIfAborted(runOptions.signal);
         // When the transcript has outgrown the request budget, fold the older conversation into a
@@ -414,8 +424,28 @@ export class Agent {
                 )}), so nothing ran. Those tools are disabled or were withheld for this step — ask the model to use an available tool or answer directly.`
               );
             }
+            if (emptyResponseRetries < MAX_EMPTY_RESPONSE_RETRIES) {
+              emptyResponseRetries += 1;
+              // Drop the empty turn so neither the saved session nor the retried request carries
+              // it forward -- the next attempt should look identical to this one, not "answer
+              // the same prompt again, but there's now an empty assistant turn in the history."
+              this.session.messages.pop();
+              // The wait below can run for minutes with no other activity -- tell the UI why,
+              // so it doesn't read as a hang worth cancelling.
+              await runOptions.onEvent?.({
+                type: "empty_response_retry",
+                // Counts total attempts (matching the "N times in a row" wording in the final
+                // error below), not retries -- so "2 of 4" here and "4 times in a row" later
+                // describe the same run instead of reading like two different budgets.
+                attempt: emptyResponseRetries + 1,
+                maxAttempts: MAX_EMPTY_RESPONSE_RETRIES + 1,
+                delayMs: emptyResponseRetryDelayMs
+              });
+              await delay(emptyResponseRetryDelayMs, runOptions.signal);
+              continue;
+            }
             throw new Error(
-              "Model returned an empty assistant response: the provider returned no content and no tool calls. This is usually a provider-side hiccup or a model that stopped early — retry, and check the API request log to see the raw response."
+              `Model returned an empty assistant response ${MAX_EMPTY_RESPONSE_RETRIES + 1} times in a row, ${emptyResponseRetryDelayMs / 60_000} minutes apart: the provider returned no content and no tool calls every time. This is usually a provider-side hiccup or a model that stopped early — check the API request log to see the raw response, or select another model/provider.`
             );
           }
           // Only treat the pattern as mimicry when the model truly emitted no native tool
@@ -447,6 +477,7 @@ export class Agent {
             this.session.messages.pop();
             continue;
           }
+          emptyResponseRetries = 0;
           this.touch();
           return {
             output,
@@ -454,6 +485,9 @@ export class Agent {
           };
         }
 
+        // A step with real tool calls means this incident is over -- an unrelated empty
+        // response later in the run deserves its own fresh retry budget, not a shared one.
+        emptyResponseRetries = 0;
         if (toolCalls.some((call) => call.name === BROWSER_TASK_TOOL)) {
           browserTaskUsed = true;
         }
@@ -957,6 +991,22 @@ function throwIfAborted(signal: AbortSignal | undefined) {
   if (signal?.aborted) {
     throw new AgentRunAbortedError();
   }
+}
+
+/** Waits out ms, rejecting immediately (instead of after the full delay) if the run is cancelled. */
+function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new AgentRunAbortedError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function isParallelSafeTool(name: string) {

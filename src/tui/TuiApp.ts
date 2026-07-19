@@ -593,6 +593,20 @@ export class TuiApp {
       return;
     }
 
+    if (event.type === "empty_response_retry") {
+      this.liveActivity = true;
+      const minutes = Math.round(event.delayMs / 60_000);
+      const row = this.ensureStreamingToolRow("empty_response_retry", "model");
+      this.activityLog[row] = {
+        ...this.activityLog[row],
+        title: "Empty response from model",
+        detail: `Retrying in ${minutes} min (attempt ${event.attempt} of ${event.maxAttempts})…`
+      };
+      this.setStatus(`Empty response — retrying in ${minutes} min (${event.attempt}/${event.maxAttempts})`);
+      this.render();
+      return;
+    }
+
     this.liveActivity = true;
     this.streamingAssistantIndex = undefined;
     this.activityLog.push({

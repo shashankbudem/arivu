@@ -633,6 +633,16 @@ export function App() {
   const [watchedPullRequests, setWatchedPullRequests] = useState<Record<string, PullRequestWatch>>({});
   const [pullRequestWatchBusy, setPullRequestWatchBusy] = useState<Record<string, boolean>>({});
   const [focusedActivityRunId, setFocusedActivityRunId] = useState<string | null>(null);
+  // Live, ephemeral browser_task step data -- never persisted into `messages` (that reducer
+  // treats browser_task_progress as a no-op on purpose, same as the streaming deltas), just the
+  // chrome-side half of the same live view the in-page presence chip shows on the page itself.
+  // Cleared once the in-flight browser_task's own tool_result lands.
+  const [liveBrowserTaskStep, setLiveBrowserTaskStep] = useState<{
+    stepIndex: number;
+    summary: string;
+    evaluation?: string;
+    memory?: string;
+  } | null>(null);
   const [browserState, setBrowserState] = useState<BrowserState | null>(null);
   const [toolsPopoverOpen, setToolsPopoverOpen] = useState(false);
   const [skillsPopoverOpen, setSkillsPopoverOpen] = useState(false);
@@ -746,6 +756,10 @@ export function App() {
 
   useEffect(() => {
     activeSessionIdRef.current = state?.sessionId;
+    // A stale step from whatever session was active before must not linger under the newly
+    // selected one; a fresh browser_task_progress event (if this session has one running) will
+    // repopulate it immediately.
+    setLiveBrowserTaskStep(null);
   }, [state?.sessionId]);
 
   useEffect(() => {
@@ -1089,6 +1103,14 @@ export function App() {
   useEffect(() => {
     setSelectedSlashCommandIndex(firstEnabledSlashCommandIndex(filteredSlashCommands));
   }, [filteredSlashCommands, slashQuery]);
+
+  useEffect(() => {
+    const command = filteredSlashCommands[selectedSlashCommandIndex];
+    if (!command) {
+      return;
+    }
+    document.getElementById(`slash-command-${command.id}`)?.scrollIntoView({ block: "nearest" });
+  }, [filteredSlashCommands, selectedSlashCommandIndex]);
 
   useEffect(() => {
     setChatSearchIndex((current) => {
@@ -2091,6 +2113,22 @@ export function App() {
     if (event.sessionId && event.sessionId !== activeSessionIdRef.current) {
       return;
     }
+    if (event.type === "browser_task_progress") {
+      setLiveBrowserTaskStep({
+        stepIndex: event.stepIndex,
+        summary: event.summary,
+        evaluation: event.evaluation,
+        memory: event.memory
+      });
+      return;
+    }
+    if (event.type === "tool_result" && event.name === "browser_task") {
+      setLiveBrowserTaskStep(null);
+    }
+    if (event.type === "empty_response_retry") {
+      const minutes = Math.round(event.delayMs / 60_000);
+      setStatus(`Empty response — retrying in ${minutes} min (${event.attempt}/${event.maxAttempts})`);
+    }
     setMessages((current) => applyStreamEventToMessages(current, event));
   }
 
@@ -2113,6 +2151,9 @@ export function App() {
 
     if (activeSessionId === event.sessionId) {
       setMessages(event.messages);
+      // The run settled (success, failure, or otherwise) -- covers exit paths with no matching
+      // browser_task tool_result to clear it, e.g. the model erroring out mid-task.
+      setLiveBrowserTaskStep(null);
       if (event.type === "completed") {
         setError(null);
         setRetryPrompt(null);
@@ -3536,6 +3577,16 @@ export function App() {
               {!activityCollapsed ? (
                 <div className="activity-content">
                   {latestScreenshotActivity?.imagePreview ? <LatestActivityScreenshot item={latestScreenshotActivity} /> : null}
+                  {liveBrowserTaskStep ? (
+                    <div className="live-browser-step" role="status" aria-live="polite">
+                      <span className="live-browser-step-dot" aria-hidden="true" />
+                      <div className="live-browser-step-copy">
+                        <strong>Browser task · step {liveBrowserTaskStep.stepIndex}</strong>
+                        <span>{liveBrowserTaskStep.summary}</span>
+                        {liveBrowserTaskStep.evaluation ? <small>{liveBrowserTaskStep.evaluation}</small> : null}
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="activity-list" ref={activityListRef}>
                     {activity.length === 0 ? (
                       <div className="empty-activity">Tool calls and approvals will appear here.</div>
@@ -11681,7 +11732,7 @@ function applyStreamEventToMessages(messages: ChatMessage[], event: AgentStreamE
     return next;
   }
 
-  if (event.type === "browser_task_progress") {
+  if (event.type === "browser_task_progress" || event.type === "empty_response_retry") {
     return messages;
   }
 

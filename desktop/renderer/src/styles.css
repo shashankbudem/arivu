@@ -3875,6 +3875,12 @@ body.is-resizing .panel-resize-handle::after {
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.025);
 }
 
+.slash-command-menu {
+  max-height: min(300px, 36vh);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
 .slash-command-heading,
 .command-output-heading {
   display: flex;
@@ -3900,6 +3906,8 @@ body.is-resizing .panel-resize-handle::after {
   display: grid;
   gap: 4px;
   padding: 6px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .slash-command-row {
@@ -4402,6 +4410,91 @@ body.is-resizing .panel-resize-handle::after {
 .empty-activity {
   color: #9c968d;
   line-height: 1.45;
+}
+
+.live-browser-step {
+  /* A grid item of .activity-content's implicit single column, same as .activity-list right
+     below it -- without this it defaults to min-width:auto (sized to its unwrapped content, per
+     the flex/grid item minimum-size rule) and pushes past the panel's actual width instead of
+     wrapping within it. */
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border: 1px solid rgb(43 191 159 / 0.32);
+  border-radius: 8px;
+  background: rgb(43 191 159 / 0.07);
+}
+
+.live-browser-step-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #2bbf9f;
+  animation: live-browser-step-pulse 1.8s ease-out infinite;
+}
+
+@keyframes live-browser-step-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgb(43 191 159 / 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgb(43 191 159 / 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgb(43 191 159 / 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-browser-step-dot {
+    animation: none;
+  }
+}
+
+.live-browser-step-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/*
+ * These three are flex items of .live-browser-step-copy's own column layout, not just children
+ * of it -- min-width:0 on the container only protects the container itself from being widened by
+ * *its* parent's row flex; each item here defaults to min-width:auto same as any flex item, which
+ * refuses to shrink below its text's content width and silently overflows the panel (agent-
+ * generated summaries/evaluations are unbounded length, unlike the fixed "step N" label).
+ * overflow-wrap covers the rare unbroken token (a raw URL, a long identifier) that has nowhere to
+ * break even once wrapping is otherwise allowed.
+ */
+.live-browser-step-copy strong,
+.live-browser-step-copy span,
+.live-browser-step-copy small {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.live-browser-step-copy strong {
+  color: #efede8;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.live-browser-step-copy span {
+  color: #d7d0c5;
+}
+
+.live-browser-step-copy small {
+  color: #9c968d;
 }
 
 .activity-group {
@@ -8583,6 +8676,27 @@ html[data-theme="light"] .activity-group.failed.focus-active {
 html[data-theme="light"] .activity-group-header,
 html[data-theme="light"] .activity-group-title strong {
   color: #211b14;
+}
+
+html[data-theme="light"] .live-browser-step {
+  border-color: rgb(28 168 137 / 0.34);
+  background: rgb(28 168 137 / 0.08);
+}
+
+html[data-theme="light"] .live-browser-step-dot {
+  background: #1ca889;
+}
+
+html[data-theme="light"] .live-browser-step-copy strong {
+  color: #211b14;
+}
+
+html[data-theme="light"] .live-browser-step-copy span {
+  color: #4a4238;
+}
+
+html[data-theme="light"] .live-browser-step-copy small {
+  color: #857c6e;
 }
 
 html[data-theme="light"] .activity-group-audit-button {

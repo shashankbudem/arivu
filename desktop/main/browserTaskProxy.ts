@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import http from "node:http";
 import { Readable } from "node:stream";
+import { searchWeb } from "../../src/tools/webSearch.js";
 
 /**
  * Loopback-only reverse proxy that lets an injected page-agent instance call the real LLM
@@ -12,6 +13,8 @@ import { Readable } from "node:stream";
 type ProxyRegistration = {
   realBaseUrl: string;
   realApiKey?: string;
+  /** Forwarded to searchWeb() for the in-page search_web tool; undefined falls back to Bing. */
+  tavilyApiKey?: string;
   expiresAt: number;
   requestTimeoutMs: number;
   requestCount: number;
@@ -63,6 +66,12 @@ const MAX_PARAM_STRIP_RETRIES = 2;
 // Buffering the request body is what makes retries possible (a consumed stream cannot be
 // replayed); chat-completion payloads are far below this cap.
 const MAX_BUFFERED_BODY_BYTES = 20 * 1024 * 1024;
+
+// Reserved path for the in-page search_web tool (browserTaskSupervisor.ts's injectedTaskScript).
+// Handled entirely separately from the LLM-forwarding path below, before any upstream request is
+// built, so it can never interact with that path's retry/backoff/param-stripping state.
+const SEARCH_PATH = "/__arivu_search";
+const MAX_SEARCH_QUERY_LENGTH = 300;
 
 const TOKEN_SWEEP_INTERVAL_MS = 30_000;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -123,6 +132,7 @@ export async function ensureBrowserTaskProxy(): Promise<{ port: number }> {
 export async function registerBrowserTaskProxyEntry(options: {
   realBaseUrl: string;
   realApiKey?: string;
+  tavilyApiKey?: string;
   ttlMs: number;
   /** Test/diagnostic override; production callers use the bounded default above. */
   requestTimeoutMs?: number;
@@ -132,6 +142,7 @@ export async function registerBrowserTaskProxyEntry(options: {
   registrations.set(token, {
     realBaseUrl: options.realBaseUrl.replace(/\/+$/, ""),
     realApiKey: options.realApiKey,
+    tavilyApiKey: options.tavilyApiKey,
     expiresAt: Date.now() + options.ttlMs,
     requestTimeoutMs: Math.max(1, options.requestTimeoutMs ?? DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS),
     requestCount: 0,
@@ -174,6 +185,31 @@ function corsHeaders(req: http.IncomingMessage): Record<string, string> {
   };
 }
 
+async function handleSearchRequest(req: http.IncomingMessage, res: http.ServerResponse, registration: ProxyRegistration) {
+  try {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const query = (url.searchParams.get("q") ?? "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
+    if (!query) {
+      res
+        .writeHead(400, { "content-type": "application/json", ...corsHeaders(req) })
+        .end(JSON.stringify({ error: "Missing search query." }));
+      return;
+    }
+    const requestedResults = Number(url.searchParams.get("n"));
+    const maxResults = Number.isFinite(requestedResults) ? Math.min(10, Math.max(1, Math.round(requestedResults))) : 5;
+    const results = await searchWeb(query, maxResults, { tavilyApiKey: registration.tavilyApiKey });
+    const body = JSON.stringify({
+      query,
+      results: results.map((result) => ({ title: result.title, url: result.url, snippet: result.snippet }))
+    });
+    res.writeHead(200, { "content-type": "application/json", ...corsHeaders(req) }).end(body);
+  } catch (error) {
+    res
+      .writeHead(502, { "content-type": "application/json", ...corsHeaders(req) })
+      .end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
 function handlePreflight(req: http.IncomingMessage, res: http.ServerResponse) {
   const requestedHeaders = req.headers["access-control-request-headers"];
   const headers: Record<string, string> = {
@@ -210,6 +246,12 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
         .end(JSON.stringify({ error: "Invalid or expired browser task session." }));
       return;
     }
+
+    if (req.method === "GET" && safeRequestPath(req.url) === SEARCH_PATH) {
+      await handleSearchRequest(req, res, registration);
+      return;
+    }
+
     startedAt = Date.now();
     attempt = ++registration.requestCount;
 

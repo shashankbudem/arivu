@@ -1012,14 +1012,20 @@ describe("ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS", () => {
 });
 
 describe("INSTALL_AGENT_VISUAL_THEME_SNIPPET", () => {
-  it("targets the page-agent mask with ServiceNow colors, the reference cursor, and activity panel styling", () => {
+  it("targets the page-agent mask with ServiceNow colors and the reference cursor", () => {
     expect(evalSnippet<() => unknown>(INSTALL_AGENT_VISUAL_THEME_SNIPPET)).toBeTypeOf("function");
     expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("#032d42");
     expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("#00c49a");
     expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("#62d84e");
     expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("%23286fbe");
-    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("page-agent-runtime_agent-panel");
     expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("data-arivu-agent-theme");
     expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).toContain("prefers-reduced-motion:reduce");
+  });
+
+  // The old page-agent Panel is gone -- replaced by the supervisor-driven presence chip
+  // (updatePresenceChip/removePresenceChip in browserTaskSupervisor.ts), which is never part of
+  // this per-frame mask theme. Guard against it silently coming back here.
+  it("no longer styles the removed page-agent Panel", () => {
+    expect(INSTALL_AGENT_VISUAL_THEME_SNIPPET).not.toContain("page-agent-runtime_agent-panel");
   });
 });

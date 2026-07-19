@@ -119,6 +119,7 @@ export type BrowserToolController = {
     tabId?: string;
   }): Promise<BrowserToolResult>;
   selectOption(args: { index: number; optionText: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
+  executeJavaScript(args: { script: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
   task(args: {
     instruction: string;
     mode?: BrowserMode;
@@ -128,9 +129,11 @@ export type BrowserToolController = {
     allowedDomains?: string[];
     allowJavaScript?: boolean;
     allowSensitiveActions?: boolean;
+    /** Forwarded to the in-page search_web tool's fallback provider; undefined uses Bing. */
+    tavilyApiKey?: string;
     modelConfig: BrowserTaskModelConfig;
     signal?: AbortSignal;
-    onProgress?: (progress: { stepIndex: number; summary: string }) => void;
+    onProgress?: (progress: { stepIndex: number; summary: string; evaluation?: string; memory?: string }) => void;
   }): Promise<BrowserToolResult>;
 };
 

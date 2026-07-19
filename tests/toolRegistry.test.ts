@@ -97,6 +97,46 @@ describe("createToolRegistry", () => {
       expect(names).not.toContain(disabled);
       await expect(registry.execute(disabled, {})).rejects.toThrow(/Unknown tool/);
     }
+    // Unlike the manual DOM tools above, browser_execute_javascript has no browser_task
+    // equivalent for the orchestrator itself, so it stays available even while they are steered
+    // away from.
+    expect(names).toContain("browser_execute_javascript");
+  });
+
+  it("runs browser_execute_javascript and returns the wrapped result", async () => {
+    const browser = createFakeBrowser();
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser
+    });
+
+    const result = JSON.parse(await registry.execute("browser_execute_javascript", { script: "return 1 + 1;" })) as Record<
+      string,
+      unknown
+    >;
+    expect(result.action).toBe("execute_javascript");
+    expect(result.ok).toBe(true);
+    expect(result.result).toBe("ran: return 1 + 1;");
+  });
+
+  it("allows browser_execute_javascript in readonly mode without prompting, like other browser actions", async () => {
+    // browser_control has no risky-escalation rule in the capability policy table (unlike
+    // run_command/network_fetch), so destructive:true here does not force a prompt under the
+    // default policy — it only participates if a workspace policy override later escalates
+    // browser actions. This matches every other browser_* tool's approval posture today.
+    let prompted = false;
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("readonly", async () => {
+        prompted = true;
+        return false;
+      }),
+      browser: createFakeBrowser()
+    });
+
+    await expect(registry.execute("browser_execute_javascript", { script: "return 1;" })).resolves.toMatch(/"ok": true/);
+    expect(prompted).toBe(false);
   });
 
   it("allows browser actions in readonly mode without prompting", async () => {
@@ -1225,6 +1265,14 @@ function createFakeBrowser(): BrowserToolController {
         ok: true,
         index: args.index,
         optionText: args.optionText
+      };
+    },
+    async executeJavaScript(args) {
+      activeMode = args.mode ?? activeMode;
+      return {
+        mode: activeMode,
+        ok: true,
+        result: `ran: ${args.script}`
       };
     }
   };

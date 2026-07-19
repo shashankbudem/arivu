@@ -74,7 +74,7 @@ type ToolContext = {
   browser?: BrowserToolController;
   browserTaskModel?: BrowserTaskModelConfig;
   runtimeControl?: RuntimeControl;
-  onBrowserTaskProgress?: (progress: { stepIndex: number; summary: string }) => void;
+  onBrowserTaskProgress?: (progress: { stepIndex: number; summary: string; evaluation?: string; memory?: string }) => void;
   directEditReview?: boolean;
   /**
    * Frontend-provided renderer for structured user questions (ask_user tool). Absent in
@@ -93,6 +93,7 @@ type ToolDefinition = {
 };
 
 const MAX_TOOL_SEARCH_OUTPUT = 60_000;
+const MAX_BROWSER_SCRIPT_LENGTH = 20_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MIN_COMMAND_TIMEOUT_MS = 1_000;
 const MAX_COMMAND_TIMEOUT_MS = 600_000;
@@ -854,9 +855,48 @@ export function createToolRegistry(context: ToolContext) {
 
     register({
       schema: {
+        name: "browser_execute_javascript",
+        description:
+          "Run a short JavaScript snippet in the current page's own JS context in Arivu's isolated browser — the same sandbox the page itself runs in, with no Node, filesystem, or OS access. Use return (await is supported) to produce a result; a script that never returns yields no result. Bounded to a 15-second execution timeout and a 20,000-character script; large results are truncated. Prefer browser_click, browser_type, browser_scroll, or browser_select_option when they already cover what you need — reach for this to read or compute a value, or make a small DOM change those actions can't express, not as a general substitute for them. A script with a blocking loop can hang the page; the tool still returns after the timeout, but the tab itself may need a manual reload if it stays unresponsive afterward. Runs without approval by default like other browser actions; a workspace policy that requires approval for browser control also gates this tool.",
+        parameters: objectSchema({
+          script: {
+            type: "string",
+            description: "JavaScript to run, wrapped in an async function body. Use return (and await) to produce a result."
+          },
+          mode: {
+            type: "string",
+            enum: ["visible", "background"],
+            description: "Optional browser mode. Defaults to the active browser mode."
+          },
+          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." }
+        })
+      },
+      async execute(args) {
+        const parsed = z
+          .object({
+            script: z.string().trim().min(1).max(MAX_BROWSER_SCRIPT_LENGTH),
+            mode: z.enum(["visible", "background"]).optional(),
+            tabId: z.string().trim().min(1).optional()
+          })
+          .parse(args);
+        const mode = browserActionMode(browser, parsed.mode);
+        await context.approvals.require({
+          type: "browser",
+          action: "execute_javascript",
+          target: "current browser page",
+          url: browserTargetUrl(browser, mode, parsed.tabId),
+          mode,
+          destructive: true
+        });
+        return formatBrowserToolResult("execute_javascript", await browser.executeJavaScript({ ...parsed, mode }));
+      }
+    });
+
+    register({
+      schema: {
         name: "browser_task",
         description:
-          "Use it when you need to click, scroll, type, select, or focus elements on the page (including inside same-origin iframes), or execute JavaScript (opt-in via allowJavaScript). Delegates to an autonomous in-page agent that observes and acts on Arivu's isolated browser until done, instead of you driving snapshot/click/type rounds yourself. Best for single-page or short navigation tasks; it cannot open OS file dialogs, follow links that open a new tab, or answer follow-up questions mid-task. The result carries the task's success flag, its data answer, a step-by-step trace of what the in-page agent did, the final url/title, and a snapshotAfter indexed page snapshot — read trace and snapshotAfter to confirm the outcome instead of firing a separate browser_screenshot, which you only need when you require the actual pixels. On failure, read the trace (and proxyDiagnostics) to see where it went wrong before re-running with a clearer instruction. Provider rate limits and rejected request parameters are already retried automatically inside the tool — never re-run to work around them — and stopReason \"infrastructure\" means the model endpoint itself is failing and retries are paused: report it to the user or switch the browser-task model instead of re-running.",
+          "Use it when you need to click, scroll, type, select, or focus elements on the page (including inside same-origin iframes), or execute JavaScript (opt-in via allowJavaScript). Delegates to an autonomous in-page agent that observes and acts on Arivu's isolated browser until done, instead of you driving snapshot/click/type rounds yourself. It also has its own web search tool it can reach for unprompted when it is stuck on an unfamiliar interaction. Best for single-page or short navigation tasks; it cannot open OS file dialogs, follow links that open a new tab, or answer follow-up questions mid-task. The result carries the task's success flag, its data answer, a step-by-step trace of what the in-page agent did, the final url/title, and a snapshotAfter indexed page snapshot — read trace and snapshotAfter to confirm the outcome instead of firing a separate browser_screenshot, which you only need when you require the actual pixels. On failure, read the trace (and proxyDiagnostics) to see where it went wrong before re-running with a clearer instruction. If the trace shows the same interaction failing repeatedly against an unfamiliar site/control, consider a web_search yourself for how it actually works before re-running, instead of repeating the same instruction. Provider rate limits and rejected request parameters are already retried automatically inside the tool — never re-run to work around them — and stopReason \"infrastructure\" means the model endpoint itself is failing and retries are paused: report it to the user or switch the browser-task model instead of re-running.",
         parameters: objectSchema({
           instruction: { type: "string", description: "Natural-language description of the task to complete on the current page." },
           mode: {
@@ -883,7 +923,7 @@ export function createToolRegistry(context: ToolContext) {
           allowJavaScript: {
             type: "boolean",
             description:
-              "Allow the in-page agent to execute arbitrary JavaScript on the page. Off by default; only enable when click/scroll/type/select cannot accomplish the task."
+              "Allow the in-page agent to execute arbitrary JavaScript on the page via its own execute_javascript action. Off by default; enable it when click/scroll/type/select cannot express what the task needs (reading a value the DOM doesn't expose, a hidden control, a custom widget), or when a re-run of the same instruction stalled or repeated the same failed interaction. May bypass this page's usual guardrails, so only turn it on for that run, not by default."
           },
           allowSensitiveActions: {
             type: "boolean",
@@ -950,6 +990,7 @@ export function createToolRegistry(context: ToolContext) {
             maxSteps,
             mode,
             modelConfig: browserTaskModel,
+            tavilyApiKey: context.tavilyApiKey,
             signal: context.signal,
             onProgress: context.onBrowserTaskProgress
           })

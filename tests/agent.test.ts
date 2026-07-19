@@ -560,19 +560,19 @@ describe("agent", () => {
       createdAt: now,
       updatedAt: now
     };
-    const client = new ScriptedClient([
-      {
-        message: {
-          role: "assistant",
-          content: "   "
-        }
+    const emptyResponse = {
+      message: {
+        role: "assistant" as const,
+        content: "   "
       }
-    ]);
+    };
+    const client = new ScriptedClient([emptyResponse, emptyResponse, emptyResponse, emptyResponse]);
     const agent = new Agent({
       client,
       approvals: new ApprovalManager("readonly", async () => false),
       cwd: tempDir,
-      session
+      session,
+      emptyResponseRetryDelayMs: 0
     });
 
     await expect(agent.run("summarize", { promptAlreadyInSession: true })).rejects.toThrow("empty assistant response");
@@ -1067,27 +1067,111 @@ describe("agent", () => {
     expect(result.session.messages.filter((message) => message.role === "assistant").length).toBe(1);
   });
 
-  it("does not accept empty assistant responses without tool calls as completed runs", async () => {
-    const session = createTestSession();
+  it("retries a genuinely empty assistant response up to 3 times, 2.5 minutes apart, before giving up", async () => {
+    const now = new Date().toISOString();
+    const session: AgentSession = {
+      id: "test-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages: [],
+      createdAt: now,
+      updatedAt: now
+    };
     const originalMessages = structuredClone(session.messages);
+    const emptyResponse = { message: { role: "assistant" as const, content: "   " } };
+    const client = new ScriptedClient([emptyResponse, emptyResponse, emptyResponse, emptyResponse]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session,
+      // Real 2.5-minute spacing is a production concern, not something this test needs to
+      // observe -- only that a retry happens. Collapsing the delay to 0 lets the run proceed
+      // on real timers instead of coordinating with fake ones.
+      emptyResponseRetryDelayMs: 0
+    });
+
+    await expect(agent.run("summarize")).rejects.toThrow("empty assistant response 4 times in a row");
+
+    expect(client.requests.length).toBe(4);
+    // Every empty turn was popped on retry; nothing about the failed attempts remains.
+    expect(session.messages).toEqual(originalMessages);
+  });
+
+  it("recovers if a later attempt returns a real response after an empty one", async () => {
+    const emptyResponse = { message: { role: "assistant" as const, content: "" } };
+    const answer = { message: { role: "assistant" as const, content: "Here you go." } };
+    const client = new ScriptedClient([emptyResponse, answer]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      emptyResponseRetryDelayMs: 0
+    });
+
+    const result = await agent.run("summarize");
+
+    expect(result.output).toBe("Here you go.");
+    expect(client.requests.length).toBe(2);
+  });
+
+  it("gives a later empty-response incident its own fresh retry budget after real progress", async () => {
+    const empty = { message: { role: "assistant" as const, content: "" } };
     const client = new ScriptedClient([
+      empty,
       {
         message: {
-          role: "assistant",
-          content: "   "
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read", arguments: { path: "README.md" } }]
         }
-      }
+      },
+      // A second incident of 3 empty responses only fits within the retry budget if the tool
+      // call above reset the counter -- a shared, never-reset budget would throw on this trio
+      // since only 2 retries would remain from the first incident.
+      empty,
+      empty,
+      empty,
+      { message: { role: "assistant" as const, content: "Recovered." } }
     ]);
     const agent = new Agent({
       client,
       approvals: new ApprovalManager("readonly", async () => false),
       cwd: tempDir,
-      session
+      emptyResponseRetryDelayMs: 0
     });
 
-    await expect(agent.run("summarize")).rejects.toThrow("empty assistant response");
+    const result = await agent.run("summarize");
 
-    expect(session.messages).toEqual(originalMessages);
+    expect(result.output).toBe("Recovered.");
+    expect(client.requests.length).toBe(6);
+  });
+
+  it("aborts promptly instead of waiting out the empty-response retry delay", async () => {
+    const controller = new AbortController();
+    const emptyResponse = { message: { role: "assistant" as const, content: "" } };
+    const client = new ScriptedClient([emptyResponse, emptyResponse, emptyResponse, emptyResponse]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      // Real production delay -- if abort didn't pre-empt the wait, this test would hang until
+      // the suite's own timeout instead of failing fast, so a passing run proves the signal path.
+      emptyResponseRetryDelayMs: 150_000
+    });
+
+    const runPromise = agent.run("summarize", { signal: controller.signal });
+    // Abort only once the first empty response has actually been consumed -- aborting
+    // immediately would just hit the loop's own pre-step check and never touch delay()'s
+    // abort handling, the thing this test exists to cover.
+    for (let i = 0; i < 200 && client.requests.length < 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(client.requests.length).toBeGreaterThanOrEqual(1);
+    controller.abort();
+
+    await expect(runPromise).rejects.toThrow(AgentRunAbortedError);
   });
 
   it("auto-compacts oversized model requests without rewriting saved chat history", async () => {
@@ -1670,6 +1754,14 @@ function createFakeBrowser(
         index: args.index,
         optionText: args.optionText,
         ok: true
+      };
+    },
+    async executeJavaScript(args) {
+      return {
+        mode: args.mode ?? "visible",
+        tabId: args.tabId,
+        ok: true,
+        result: `ran: ${args.script}`
       };
     }
   };

@@ -721,6 +721,15 @@ type AgentStreamEvent =
       sessionId?: string;
       stepIndex: number;
       summary: string;
+      evaluation?: string;
+      memory?: string;
+    }
+  | {
+      type: "empty_response_retry";
+      sessionId?: string;
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
     };
 
 type SessionLifecycleEvent = {
