@@ -659,6 +659,8 @@ export function App() {
   const [rememberedProjectOptions, setRememberedProjectOptions] = useState<Record<string, string>>({});
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const activityListRef = useRef<HTMLDivElement | null>(null);
+  const recentChatListRef = useRef<HTMLDivElement | null>(null);
+  const [visibleChatCount, setVisibleChatCount] = useState(SIDEBAR_STANDALONE_CHAT_LIMIT);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const chatSearchInputRef = useRef<HTMLInputElement | null>(null);
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -667,6 +669,32 @@ export function App() {
   const activeSubmissionTokenRef = useRef<string | null>(null);
   const composerDragDepthRef = useRef(0);
   const browserHandoffIdRef = useRef(0);
+
+  const standaloneSessionCount = sessions.filter((session) => session.projectRoot === null).length;
+  useLayoutEffect(() => {
+    const container = recentChatListRef.current;
+    if (!container || sidebarCollapsed || collapsedSections.chats || standaloneSessionCount === 0) {
+      return;
+    }
+    const recompute = () => {
+      const firstItem = container.querySelector<HTMLElement>(".recent-chat-item");
+      if (!firstItem) {
+        return;
+      }
+      const itemHeight = firstItem.getBoundingClientRect().height;
+      if (itemHeight <= 0) {
+        return;
+      }
+      const gap = parseFloat(getComputedStyle(container).rowGap || "0") || 0;
+      const available = container.clientHeight;
+      const count = Math.max(1, Math.floor((available + gap) / (itemHeight + gap)));
+      setVisibleChatCount((current) => (current === count ? current : count));
+    };
+    const observer = new ResizeObserver(recompute);
+    observer.observe(container);
+    recompute();
+    return () => observer.disconnect();
+  }, [sidebarCollapsed, collapsedSections.chats, standaloneSessionCount]);
   const pullRequestWatchInFlightRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -2714,10 +2742,9 @@ export function App() {
   const workspaceDetail = state.projectRoot === null ? "Standalone chats" : state.workspace.root;
   const gitValue = state.projectRoot === null ? "none" : `${state.workspace.gitBranch ?? "none"}${state.workspace.dirty ? " *" : ""}`;
   const recentProjects = projects.slice(0, 5);
-  const standaloneSessions = sessions
-    .filter((session) => session.projectRoot === null)
-    .sort(compareSessionsForDisplay)
-    .slice(0, SIDEBAR_STANDALONE_CHAT_LIMIT);
+  const standaloneSessionsAll = sessions.filter((session) => session.projectRoot === null).sort(compareSessionsForDisplay);
+  const standaloneSessions = standaloneSessionsAll.slice(0, visibleChatCount);
+  const hasMoreStandaloneSessions = standaloneSessionsAll.length > standaloneSessions.length;
   const chatStarted = Boolean(state.sessionId) || messages.some((message) => message.role !== "system");
   const canSelectChatProject = !chatStarted && !busy;
   const canCompactContext =
@@ -2906,14 +2933,14 @@ export function App() {
                 {collapsedSections.chats ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                 <span className="section-label">Chats</span>
               </button>
-              {!collapsedSections.chats ? (
+              {!collapsedSections.chats && (hasMoreStandaloneSessions || standaloneSessionsAll.length > 0) ? (
                 <button className="text-command" type="button" onClick={() => setView("history")}>
                   View all
                 </button>
               ) : null}
             </div>
             {!collapsedSections.chats ? (
-              <div className="recent-chat-list">
+              <div className="recent-chat-list" ref={recentChatListRef}>
                 {loadingSessions ? <div className="empty-sidebar-list">Loading chats...</div> : null}
                 {!loadingSessions && standaloneSessions.length === 0 ? (
                   <div className="empty-sidebar-list">No standalone chats yet.</div>
