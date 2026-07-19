@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:," />
     <title>Arivu</title>
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem("arivu.uiState.v1");
+          var state = raw ? JSON.parse(raw) : null;
+          var theme = state && (state.theme === "light" || state.theme === "dark") ? state.theme : "dark";
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+          document.documentElement.style.colorScheme = "dark";
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

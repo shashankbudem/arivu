@@ -35,12 +35,10 @@ import {
   Globe,
   Image as ImageIcon,
   Info,
-  LayoutDashboard,
   ListChecks,
   MessageSquare,
-  MoreHorizontal,
   Moon,
-  Palette,
+  MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
@@ -50,7 +48,6 @@ import {
   RotateCcw,
   Rows3,
   Save,
-  ScanLine,
   Search,
   Scissors,
   Server,
@@ -115,11 +112,10 @@ import {
 import arivuLogoUrl from "../../../assets/arivu-logo.svg";
 import { resolveAppKeyboardShortcut } from "./keyboardShortcuts";
 
-type ViewMode = "chat" | "history" | "settings" | "ui";
+type ViewMode = "chat" | "history" | "settings";
+type ThemeMode = "dark" | "light";
 type SidebarSectionId = "projects" | "chats";
 type ResizeTarget = "sidebar" | "activity";
-type ThemeMode = "dark" | "light";
-type UiConceptId = "signal" | "lumen" | "graphite";
 const SETTINGS_SECTIONS = [
   { id: "models", label: "Models", description: "Providers, model defaults, and input capabilities", icon: Cpu },
   { id: "browser", label: "Browser agent", description: "Model and pacing for browser tasks", icon: Globe },
@@ -245,39 +241,6 @@ const DEFAULT_COLLAPSED_SECTIONS: Record<SidebarSectionId, boolean> = {
   projects: false,
   chats: false
 };
-const UI_CONCEPTS: Array<{
-  id: UiConceptId;
-  name: string;
-  subtitle: string;
-  icon: React.ComponentType<{ size?: number }>;
-  swatches: string[];
-  sampleMetrics: string[];
-}> = [
-  {
-    id: "signal",
-    name: "Signal",
-    subtitle: "Dark command desk",
-    icon: ScanLine,
-    swatches: ["#0b0f12", "#19d6b3", "#e8c563", "#dce8ef"],
-    sampleMetrics: ["trust", "diff", "shell"]
-  },
-  {
-    id: "lumen",
-    name: "Lumen",
-    subtitle: "Bright technical lab",
-    icon: LayoutDashboard,
-    swatches: ["#f7f9fb", "#0f1720", "#208cff", "#f0b43c"],
-    sampleMetrics: ["model", "tools", "git"]
-  },
-  {
-    id: "graphite",
-    name: "Graphite",
-    subtitle: "Quiet glass terminal",
-    icon: Rows3,
-    swatches: ["#15191f", "#dfe6ec", "#7aa7ff", "#b7e36a"],
-    sampleMetrics: ["agent", "files", "run"]
-  }
-];
 
 type ActivityItem = {
   id: string;
@@ -412,7 +375,6 @@ type PasteReview = {
 
 type PersistedUiState = {
   theme?: ThemeMode;
-  uiConcept?: UiConceptId;
   sidebarCollapsed?: boolean;
   sidebarWidth?: number;
   activityCollapsed?: boolean;
@@ -597,8 +559,6 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
 
 export function App() {
   const [state, setState] = useState<DesktopState | null>(null);
-  const [theme, setTheme] = useState<ThemeMode>(() => loadPersistedUiState().theme ?? "dark");
-  const [uiConcept, setUiConcept] = useState<UiConceptId>(() => loadPersistedUiState().uiConcept ?? "signal");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState("");
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
@@ -662,6 +622,7 @@ export function App() {
   const [forgettingProjectRoot, setForgettingProjectRoot] = useState<string | null>(null);
   const [openChatMenuId, setOpenChatMenuId] = useState<string | null>(null);
   const [openHistoryMenuId, setOpenHistoryMenuId] = useState<string | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(() => loadPersistedUiState().theme ?? "dark");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadPersistedUiState().sidebarCollapsed ?? false);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     clamp(loadPersistedUiState().sidebarWidth ?? SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
@@ -832,23 +793,19 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
+    document.documentElement.removeAttribute("data-ui-concept");
   }, [theme]);
-
-  useEffect(() => {
-    document.documentElement.dataset.uiConcept = uiConcept;
-  }, [uiConcept]);
 
   useEffect(() => {
     savePersistedUiState({
       theme,
-      uiConcept,
       sidebarCollapsed,
       sidebarWidth,
       activityCollapsed,
       activityWidth,
       collapsedSections
     });
-  }, [theme, uiConcept, sidebarCollapsed, sidebarWidth, activityCollapsed, activityWidth, collapsedSections]);
+  }, [theme, sidebarCollapsed, sidebarWidth, activityCollapsed, activityWidth, collapsedSections]);
 
   useEffect(() => {
     const input = promptInputRef.current;
@@ -3071,17 +3028,6 @@ export function App() {
             <button
               type="button"
               className={
-                view === "ui" ? "ghost-button topbar-icon-action has-tooltip active" : "ghost-button topbar-icon-action has-tooltip"
-              }
-              onClick={() => setView((current) => (current === "ui" ? "chat" : "ui"))}
-              aria-label="UI samples"
-              data-tooltip="UI samples"
-            >
-              <Palette size={14} />
-            </button>
-            <button
-              type="button"
-              className={
                 browserState?.paneOpen
                   ? "ghost-button topbar-icon-action has-tooltip active"
                   : "ghost-button topbar-icon-action has-tooltip"
@@ -3662,9 +3608,7 @@ export function App() {
               void loadSessions();
             }}
           />
-        ) : (
-          <UiLabView activeConcept={uiConcept} onSelect={setUiConcept} />
-        )}
+        ) : null}
       </section>
 
       {approval ? <ApprovalDialog approval={approval} onRespond={(approved) => void respondApproval(approved)} /> : null}
@@ -3718,6 +3662,35 @@ export function App() {
         />
       ) : null}
     </main>
+  );
+}
+
+function ThemeToggle({ theme, onChange }: { theme: ThemeMode; onChange: (theme: ThemeMode) => void }) {
+  return (
+    <div className="theme-toggle" role="group" aria-label="Color theme">
+      <button
+        type="button"
+        className={theme === "light" ? "theme-toggle-button has-tooltip active" : "theme-toggle-button has-tooltip"}
+        onClick={() => onChange("light")}
+        aria-pressed={theme === "light"}
+        aria-label="Light mode"
+        data-tooltip="Light mode"
+      >
+        <Sun size={13} />
+        <span className="sr-only">Light mode</span>
+      </button>
+      <button
+        type="button"
+        className={theme === "dark" ? "theme-toggle-button has-tooltip active" : "theme-toggle-button has-tooltip"}
+        onClick={() => onChange("dark")}
+        aria-pressed={theme === "dark"}
+        aria-label="Dark mode"
+        data-tooltip="Dark mode"
+      >
+        <Moon size={13} />
+        <span className="sr-only">Dark mode</span>
+      </button>
+    </div>
   );
 }
 
@@ -3799,35 +3772,6 @@ function ChatSearchBar({
       </button>
       <button className="icon-button compact-icon-button" type="button" onClick={onClose} title="Close search" aria-label="Close search">
         <X size={14} />
-      </button>
-    </div>
-  );
-}
-
-function ThemeToggle({ theme, onChange }: { theme: ThemeMode; onChange: (theme: ThemeMode) => void }) {
-  return (
-    <div className="theme-toggle" role="group" aria-label="Color theme">
-      <button
-        type="button"
-        className={theme === "light" ? "theme-toggle-button has-tooltip active" : "theme-toggle-button has-tooltip"}
-        onClick={() => onChange("light")}
-        aria-pressed={theme === "light"}
-        aria-label="Light mode"
-        data-tooltip="Light mode"
-      >
-        <Sun size={13} />
-        <span className="sr-only">Light mode</span>
-      </button>
-      <button
-        type="button"
-        className={theme === "dark" ? "theme-toggle-button has-tooltip active" : "theme-toggle-button has-tooltip"}
-        onClick={() => onChange("dark")}
-        aria-pressed={theme === "dark"}
-        aria-label="Dark mode"
-        data-tooltip="Dark mode"
-      >
-        <Moon size={13} />
-        <span className="sr-only">Dark mode</span>
       </button>
     </div>
   );
@@ -4300,76 +4244,6 @@ function ToolPanel({ tools, onToggleTool }: { tools: ToolSummary[]; onToggleTool
       </div>
       <div className="tool-popover-footnote">Switches save instantly and apply from the agent's next step, even mid-run.</div>
     </div>
-  );
-}
-
-function UiLabView({ activeConcept, onSelect }: { activeConcept: UiConceptId; onSelect: (concept: UiConceptId) => void }) {
-  return (
-    <section className="ui-lab-panel">
-      <div className="ui-lab-grid">
-        {UI_CONCEPTS.map((concept) => {
-          const Icon = concept.icon;
-          const selected = concept.id === activeConcept;
-          return (
-            <article key={concept.id} className={selected ? "ui-sample-card selected" : "ui-sample-card"}>
-              <div className={`ui-sample-preview ${concept.id}`} aria-hidden="true">
-                <div className="sample-sidebar">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-                <div className="sample-main">
-                  <div className="sample-topline">
-                    <span />
-                    <span />
-                  </div>
-                  <div className="sample-chat-lines">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                  <div className="sample-composer" />
-                </div>
-                <div className="sample-rail">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-              </div>
-              <div className="ui-sample-body">
-                <div className="ui-sample-heading">
-                  <div className="ui-sample-icon">
-                    <Icon size={18} />
-                  </div>
-                  <div>
-                    <h2>{concept.name}</h2>
-                    <p>{concept.subtitle}</p>
-                  </div>
-                </div>
-                <div className="ui-swatch-row" aria-label={`${concept.name} palette`}>
-                  {concept.swatches.map((swatch) => (
-                    <span key={swatch} style={{ background: swatch }} />
-                  ))}
-                </div>
-                <div className="ui-sample-metrics">
-                  {concept.sampleMetrics.map((metric) => (
-                    <span key={metric}>{metric}</span>
-                  ))}
-                </div>
-                <button
-                  className={selected ? "ui-sample-action selected" : "ui-sample-action"}
-                  type="button"
-                  onClick={() => onSelect(concept.id)}
-                >
-                  {selected ? <Check size={16} /> : <Palette size={16} />}
-                  {selected ? "Selected" : "Apply"}
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
-    </section>
   );
 }
 
@@ -5240,7 +5114,6 @@ function CodeBlock({ code, language, theme }: { code: string; language: string; 
 
 async function highlightCode(code: string, language: string, theme: ThemeMode) {
   const { codeToHtml } = await import("shiki");
-  // vitesse-black: pure black canvas; min-light for light mode. CSS forces brand chrome.
   const shikiTheme = theme === "light" ? "min-light" : "vitesse-black";
   try {
     return await codeToHtml(code, { lang: language || "text", theme: shikiTheme });
@@ -11883,7 +11756,6 @@ function loadPersistedUiState(): PersistedUiState {
     const parsed = JSON.parse(raw) as PersistedUiState;
     return {
       theme: parsed.theme === "light" || parsed.theme === "dark" ? parsed.theme : undefined,
-      uiConcept: isUiConceptId(parsed.uiConcept) ? parsed.uiConcept : undefined,
       sidebarCollapsed: typeof parsed.sidebarCollapsed === "boolean" ? parsed.sidebarCollapsed : undefined,
       sidebarWidth: typeof parsed.sidebarWidth === "number" ? parsed.sidebarWidth : undefined,
       activityCollapsed: typeof parsed.activityCollapsed === "boolean" ? parsed.activityCollapsed : undefined,
@@ -11898,10 +11770,6 @@ function loadPersistedUiState(): PersistedUiState {
   } catch {
     return {};
   }
-}
-
-function isUiConceptId(value: unknown): value is UiConceptId {
-  return value === "signal" || value === "lumen" || value === "graphite";
 }
 
 function savePersistedUiState(state: PersistedUiState) {
