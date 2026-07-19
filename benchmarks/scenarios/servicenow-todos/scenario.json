@@ -1,0 +1,56 @@
+{
+  "id": "servicenow-todos",
+  "title": "Work through a set of BENCH- TODO tasks in a live ServiceNow instance",
+  "kind": "browser",
+  "task": "Open {{instance_url}} in the browser (you are already signed in) and work through these TODO tasks in the Task list. Only touch tasks whose short description starts with \"BENCH-\":\n1. Mark the task \"BENCH-Renew-license\" as Closed Complete.\n2. Change the priority of the task \"BENCH-Update-runbook\" to 2 - High.\n3. Create a new task with short description \"BENCH-Standup-notes\" and priority 4 - Low.\nWhen all three are done, reply with a one-line summary of what you changed.",
+  "notes": "Captured from the ServiceNow TODO test sessions (July 2026). Ground truth and reset go through the REST Table API; the agent under test drives the UI.",
+  "bounds": { "timeoutMs": 1200000 },
+  "browser": {
+    "target": "live",
+    "execution": "auto",
+    "live": {
+      "requiresLocalFile": "servicenow_todos.scenario.local.json",
+      "setup": {
+        "command": "python3",
+        "args": [
+          "benchmarks/browser/servicenow_todos_benchmark.py",
+          "capture-baseline",
+          "--config",
+          "benchmarks/scenarios/servicenow-todos/servicenow_todos.scenario.local.json",
+          "--expected",
+          "benchmarks/scenarios/servicenow-todos/expected.json"
+        ]
+      },
+      "reset": {
+        "command": "python3",
+        "args": [
+          "benchmarks/browser/servicenow_todos_benchmark.py",
+          "reset",
+          "--config",
+          "benchmarks/scenarios/servicenow-todos/servicenow_todos.scenario.local.json",
+          "--expected",
+          "benchmarks/scenarios/servicenow-todos/expected.json",
+          "--yes"
+        ]
+      },
+      "confirmReset": false
+    },
+    "taskOptions": { "maxSteps": 60 }
+  },
+  "verify": [
+    {
+      "type": "command",
+      "command": "python3",
+      "args": [
+        "benchmarks/browser/servicenow_todos_benchmark.py",
+        "verify",
+        "--config",
+        "benchmarks/scenarios/servicenow-todos/servicenow_todos.scenario.local.json",
+        "--expected",
+        "benchmarks/scenarios/servicenow-todos/expected.json"
+      ],
+      "reportPath": "output/servicenow-benchmark/result.json",
+      "label": "ServiceNow records match expected end-state"
+    }
+  ]
+}

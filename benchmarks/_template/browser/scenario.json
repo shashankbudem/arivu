@@ -1,0 +1,31 @@
+{
+  "id": "__ID__",
+  "title": "One line: what the app must accomplish",
+  "kind": "browser",
+  "task": "PASTE THE EXACT PROMPT you handed the app. Reference instance-specific values as {{key}} tokens resolved from the local file.",
+  "notes": "Captured from <which dev/test session> on __DATE__.",
+  "bounds": { "timeoutMs": 1200000 },
+  "browser": {
+    "target": "live",
+    "execution": "auto",
+    "live": {
+      "requiresLocalFile": "__ID__.scenario.local.json",
+      "setup": {
+        "command": "python3",
+        "args": ["benchmarks/browser/REPLACE_ME.py", "capture-baseline", "--config", "…", "--expected", "…"]
+      },
+      "reset": { "command": "python3", "args": ["benchmarks/browser/REPLACE_ME.py", "reset", "--config", "…", "--expected", "…", "--yes"] },
+      "confirmReset": false
+    },
+    "taskOptions": { "maxSteps": 60 }
+  },
+  "verify": [
+    {
+      "type": "command",
+      "command": "python3",
+      "args": ["benchmarks/browser/REPLACE_ME.py", "verify", "--config", "…", "--expected", "…"],
+      "reportPath": "output/REPLACE_ME/result.json",
+      "label": "live state matches expected"
+    }
+  ]
+}

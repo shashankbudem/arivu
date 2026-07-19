@@ -69,6 +69,12 @@ export type BrowserTaskModelConfig = {
   contextWindowTokens?: number;
   maxSteps?: number;
   stepDelayMs?: number;
+  /**
+   * Tried in order, each a full candidate in its own right, when this model's circuit opens
+   * with no progress made yet. A fallback's own `.fallbacks` (there shouldn't be any) is
+   * ignored — rotation is a flat list, not a tree.
+   */
+  fallbacks?: BrowserTaskModelConfig[];
 };
 
 export type BrowserToolController = {
@@ -113,6 +119,7 @@ export type BrowserToolController = {
     tabId?: string;
   }): Promise<BrowserToolResult>;
   selectOption(args: { index: number; optionText: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
+  executeJavaScript(args: { script: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult>;
   task(args: {
     instruction: string;
     mode?: BrowserMode;
@@ -122,9 +129,11 @@ export type BrowserToolController = {
     allowedDomains?: string[];
     allowJavaScript?: boolean;
     allowSensitiveActions?: boolean;
+    /** Forwarded to the in-page search_web tool's fallback provider; undefined uses Bing. */
+    tavilyApiKey?: string;
     modelConfig: BrowserTaskModelConfig;
     signal?: AbortSignal;
-    onProgress?: (progress: { stepIndex: number; summary: string }) => void;
+    onProgress?: (progress: { stepIndex: number; summary: string; evaluation?: string; memory?: string }) => void;
   }): Promise<BrowserToolResult>;
 };
 

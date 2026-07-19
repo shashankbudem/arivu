@@ -36,6 +36,21 @@ const McpServerSchema = z.object({
   disabled: z.boolean().default(false)
 });
 
+const McpToolProposalSchema = z.object({
+  id: z.string().min(1).max(120),
+  kind: z.literal("mcp_server"),
+  name: z.string().min(1).max(80),
+  description: z.string().max(500),
+  command: z.string().min(1).max(500),
+  args: z.array(z.string().max(500)).max(40).default([]),
+  envKeys: z
+    .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/))
+    .max(40)
+    .default([]),
+  reason: z.string().min(1).max(1_000),
+  createdAt: z.string().datetime()
+});
+
 const ProviderToolCallingSchema = z.enum(["auto", "enabled", "disabled"]);
 const ProviderImageInputSchema = z.enum(["auto", "enabled", "disabled"]);
 
@@ -52,13 +67,21 @@ const LlmProviderSchema = z.object({
   apiKey: z.string().optional()
 });
 
-const BrowserTaskModelSchema = z.object({
+const BrowserTaskModelCandidateSchema = z.object({
   providerId: z.string().min(1).optional(),
   baseUrl: z.string().url().optional(),
   model: z.string().min(1).optional(),
   apiKey: z.string().optional(),
   maxSteps: z.number().int().min(1).max(200).optional(),
   stepDelayMs: z.number().int().min(0).max(120_000).optional()
+});
+
+// Fallback candidates are one level deep only (a fallback cannot itself carry further
+// fallbacks): browserTaskSupervisor rotates through a flat list, so nesting would either be
+// ignored or need its own recursive-rotation semantics nobody asked for.
+const BrowserTaskModelSchema = BrowserTaskModelCandidateSchema.extend({
+  /** Tried in order after the primary when its circuit opens; unset fields inherit the primary's. */
+  fallbackModels: z.array(BrowserTaskModelCandidateSchema).max(5).optional()
 });
 
 const WorkspaceCapabilityPolicySchema = z.object({
@@ -81,6 +104,7 @@ const ConfigSchema = z.object({
   disabledTools: z.array(z.string()).default([]),
   trustMode: TrustModeSchema.default("ask"),
   mcpServers: z.record(McpServerSchema).default({}),
+  toolProposals: z.array(McpToolProposalSchema).max(20).default([]),
   workspacePolicies: z.record(WorkspaceCapabilityPolicySchema).default({}),
   workspacePolicyProfiles: z.record(WorkspaceCapabilityPolicySchema).default({})
 });
@@ -88,6 +112,7 @@ const ConfigSchema = z.object({
 export type AppConfig = z.infer<typeof ConfigSchema>;
 export type LlmProviderProfile = z.infer<typeof LlmProviderSchema>;
 export type BrowserTaskModelConfigProfile = z.infer<typeof BrowserTaskModelSchema>;
+export type McpToolProposal = z.infer<typeof McpToolProposalSchema>;
 
 export function resolveModelListEndpoint(
   config: AppConfig,
@@ -207,7 +232,14 @@ export function redactConfigForDisplay(config: Partial<AppConfig>): Partial<AppC
       apiKey: redactSecret(provider.apiKey)
     })),
     browserTaskModel: config.browserTaskModel
-      ? { ...config.browserTaskModel, apiKey: redactSecret(config.browserTaskModel.apiKey) }
+      ? {
+          ...config.browserTaskModel,
+          apiKey: redactSecret(config.browserTaskModel.apiKey),
+          fallbackModels: config.browserTaskModel.fallbackModels?.map((fallback) => ({
+            ...fallback,
+            apiKey: redactSecret(fallback.apiKey)
+          }))
+        }
       : config.browserTaskModel,
     mcpServers: config.mcpServers ? redactMcpServers(config.mcpServers) : config.mcpServers
   };

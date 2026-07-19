@@ -148,6 +148,17 @@ const MAX_CONSOLE_LOGS = 300;
 // page (e.g. ServiceNow) can push a single tool result past the request auto-compaction
 // threshold, which strips native tool protocol and derails tool calling on the next turn.
 const MAX_VISUAL_ELEMENTS_JSON_CHARS = 48_000;
+// Native BrowserView capture can occasionally remain pending forever after a
+// compositor swap. Screenshotting is diagnostic and must not pin the whole agent
+// run, so each native attempt is bounded before the existing CDP fallback runs.
+const NATIVE_CAPTURE_TIMEOUT_MS = 2_500;
+// A script with a blocking synchronous loop can wedge the renderer's JS thread forever;
+// executeJavaScript would then never resolve. This bounds the tool call itself so it always
+// returns to the model — the renderer may still be busy in the background afterward.
+const SCRIPT_EXECUTION_TIMEOUT_MS = 15_000;
+// Keeps a large returned value from pushing a single tool result past the request
+// auto-compaction threshold (same concern as MAX_VISUAL_ELEMENTS_JSON_CHARS above).
+const MAX_SCRIPT_RESULT_CHARS = 8_000;
 const DEFAULT_BACKGROUND_BOUNDS = { width: 1280, height: 800 };
 const DEFAULT_VISIBLE_CHROME_HEIGHT = 80;
 const VISIBLE_START_PAGE_TITLE = "Arivu Browser";
@@ -629,6 +640,37 @@ export class DesktopBrowserController implements BrowserToolController {
     return fields ? { ...result, ...fields } : result;
   }
 
+  async executeJavaScript(args: { script: string; mode?: BrowserMode; tabId?: string }): Promise<BrowserToolResult> {
+    const mode = this.targetForMode(args.mode);
+    this.rememberMode(mode);
+    const { contents, target } = this.browserContextForMode(mode, args.tabId);
+    assertPageLoaded(contents, mode);
+    let result: BrowserToolResult;
+    try {
+      // userGesture: false is deliberate here (unlike clickAt's describePointScript, which needs
+      // it) — a script that could unlock gesture-gated APIs (clipboard, popups) should not get
+      // that from this tool alone.
+      const outcome = (await Promise.race([
+        contents.executeJavaScript(executeJavaScriptScript(args.script), false),
+        delay(SCRIPT_EXECUTION_TIMEOUT_MS).then(() => {
+          throw new Error(
+            `Script execution timed out after ${SCRIPT_EXECUTION_TIMEOUT_MS}ms. The page may still be running it in the background; reload the tab if it stays unresponsive.`
+          );
+        })
+      ])) as { ok: boolean; result?: unknown; error?: string };
+      result = outcome.ok ? { ok: true, result: boundScriptResult(outcome.result) } : { ok: false, error: outcome.error };
+    } catch (error) {
+      // Catches both the timeout above and a script that fails to parse at all (a syntax error
+      // in args.script breaks the whole wrapped function, so executeJavaScript itself rejects
+      // before the in-page try/catch in executeJavaScriptScript ever runs).
+      result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    result = await this.withFreshSnapshot(contents, result);
+    this.updateTargetFromContents(mode, contents, target);
+    this.emitState();
+    return this.resultForMode(mode, result, target);
+  }
+
   async task(args: {
     instruction: string;
     mode?: BrowserMode;
@@ -638,6 +680,7 @@ export class DesktopBrowserController implements BrowserToolController {
     allowedDomains?: string[];
     allowJavaScript?: boolean;
     allowSensitiveActions?: boolean;
+    tavilyApiKey?: string;
     modelConfig: BrowserTaskModelConfig;
     signal?: AbortSignal;
     onProgress?: (progress: { stepIndex: number; summary: string }) => void;
@@ -658,6 +701,7 @@ export class DesktopBrowserController implements BrowserToolController {
           allowedDomains: args.allowedDomains,
           allowJavaScript: args.allowJavaScript,
           allowSensitiveActions: args.allowSensitiveActions,
+          tavilyApiKey: args.tavilyApiKey,
           visible: mode === "visible"
         },
         args.modelConfig,
@@ -1582,7 +1626,7 @@ export class DesktopBrowserController implements BrowserToolController {
       return this.withTemporaryCaptureSurface(contents, async () => {
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
-            const surfaceImage = await contents.capturePage();
+            const surfaceImage = await capturePageWithTimeout(contents);
             if (!surfaceImage.isEmpty()) {
               return surfaceImage;
             }
@@ -1597,14 +1641,14 @@ export class DesktopBrowserController implements BrowserToolController {
         if (debuggerImage && !debuggerImage.isEmpty()) {
           return debuggerImage;
         }
-        return contents.capturePage();
+        return capturePageWithTimeout(contents);
       });
     }
     const debuggerImage = await capturePageWithDebugger(contents);
     if (debuggerImage && !debuggerImage.isEmpty()) {
       return debuggerImage;
     }
-    return contents.capturePage();
+    return capturePageWithTimeout(contents);
   }
 
   /**
@@ -3808,6 +3852,15 @@ async function capturePageWithDebugger(contents: WebContents, captureBeyondViewp
   }
 }
 
+async function capturePageWithTimeout(contents: WebContents) {
+  return Promise.race([
+    contents.capturePage(),
+    delay(NATIVE_CAPTURE_TIMEOUT_MS).then(() => {
+      throw new Error(`Native screenshot capture timed out after ${NATIVE_CAPTURE_TIMEOUT_MS}ms.`);
+    })
+  ]);
+}
+
 function freshPaintScript() {
   return `(() => new Promise((resolve) => {
     const startedAt = performance.now();
@@ -4043,6 +4096,73 @@ function snapshotScript(maxLength: number) {
       elements
     };
   })()`;
+}
+
+/**
+ * Wraps a model-authored script so it runs with the same result shape regardless of what the
+ * script itself does: `{ ok: true, result }` on success, `{ ok: false, error }` if it throws.
+ * The user's code is captured in its own inner async IIFE so `return`/`await` work exactly as
+ * they would in a normal async function body, without letting an early `return` skip this
+ * wrapper's own error handling.
+ *
+ * Serialization happens here, inside the page, because a value crossing back through
+ * executeJavaScript is structurally cloned: DOM nodes, functions, and circular references
+ * would otherwise silently vanish or throw instead of producing a readable result.
+ */
+function executeJavaScriptScript(script: string) {
+  return `(async () => {
+    function arivuSafeSerialize(value, seen) {
+      if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+        if (typeof value === "function") {
+          return "[Function" + (value.name ? ": " + value.name : "") + "]";
+        }
+        if (typeof value === "bigint") {
+          return value.toString() + "n";
+        }
+        return value;
+      }
+      if (typeof value === "function") {
+        return "[Function" + (value.name ? ": " + value.name : "") + "]";
+      }
+      if (typeof Node !== "undefined" && value instanceof Node) {
+        var tag = value.nodeType === 1 ? "<" + value.tagName.toLowerCase() + ">" : String(value.nodeName || "node");
+        return "[DOM " + tag + "]";
+      }
+      if (seen.has(value)) {
+        return "[Circular]";
+      }
+      seen.add(value);
+      if (Array.isArray(value)) {
+        return value.slice(0, 500).map(function(item) { return arivuSafeSerialize(item, seen); });
+      }
+      var out = {};
+      var keys = Object.keys(value).slice(0, 200);
+      for (var i = 0; i < keys.length; i++) {
+        try {
+          out[keys[i]] = arivuSafeSerialize(value[keys[i]], seen);
+        } catch (err) {
+          out[keys[i]] = "[Unserializable]";
+        }
+      }
+      return out;
+    }
+    try {
+      var arivuScriptResult = await (async () => {
+        ${script}
+      })();
+      return { ok: true, result: arivuSafeSerialize(arivuScriptResult, new WeakSet()) };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message ? err.message : err) };
+    }
+  })()`;
+}
+
+function boundScriptResult(value: unknown): unknown {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined || serialized.length <= MAX_SCRIPT_RESULT_CHARS) {
+    return value;
+  }
+  return `${serialized.slice(0, MAX_SCRIPT_RESULT_CHARS)}\n[truncated ${serialized.length - MAX_SCRIPT_RESULT_CHARS} more characters]`;
 }
 
 function clickScript(target: string) {

@@ -61,6 +61,67 @@ describe("agent", () => {
     expect(result.session.messages.some((message) => message.role === "tool")).toBe(true);
   });
 
+  it("rejects a premature no-tool final in a multi-TODO browser run", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "todo_1",
+              name: "browser_task",
+              arguments: { instruction: "Create and verify the catalog item.", mode: "background" }
+            }
+          ]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "TODO 1: complete — item created."
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "todo_2",
+              name: "browser_task",
+              arguments: { instruction: "Add and verify the Approver choice.", mode: "background" }
+            }
+          ]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: ["TODO 1: complete — item verified.", "TODO 2: complete — Approver choice verified."].join("\n")
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted"),
+      cwd: tempDir,
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    const result = await agent.run(
+      ["TODO 1: Create the catalog item and verify it.", "TODO 2: Add the Approver choice and verify it."].join("\n")
+    );
+
+    expect(result.output).toContain("TODO 2: complete");
+    expect(result.session.messages.some((message) => String(message.content) === "TODO 1: complete — item created.")).toBe(false);
+    const retryRequest = client.requests[2]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(retryRequest).toContain("previous no-tool reply was rejected");
+    expect(retryRequest).toContain("TODO 2");
+    expect(retryRequest).toContain("Original checklist excerpts");
+  });
+
   it("advertises global skills and attaches explicitly requested skills to the model", async () => {
     const skillDir = path.join(skillsHome, "review");
     await mkdir(skillDir, { recursive: true });
@@ -499,19 +560,19 @@ describe("agent", () => {
       createdAt: now,
       updatedAt: now
     };
-    const client = new ScriptedClient([
-      {
-        message: {
-          role: "assistant",
-          content: "   "
-        }
+    const emptyResponse = {
+      message: {
+        role: "assistant" as const,
+        content: "   "
       }
-    ]);
+    };
+    const client = new ScriptedClient([emptyResponse, emptyResponse, emptyResponse, emptyResponse]);
     const agent = new Agent({
       client,
       approvals: new ApprovalManager("readonly", async () => false),
       cwd: tempDir,
-      session
+      session,
+      emptyResponseRetryDelayMs: 0
     });
 
     await expect(agent.run("summarize", { promptAlreadyInSession: true })).rejects.toThrow("empty assistant response");
@@ -713,6 +774,16 @@ describe("agent", () => {
     );
     expect(baseMessages).toHaveLength(1);
     expect(String(baseMessages[0]?.content)).toContain("Arivu system prompt v");
+    expect(String(baseMessages[0]?.content)).toContain('header action labeled "Create favorite for ..."');
+    expect(String(baseMessages[0]?.content)).toContain("complete required field/value checklist");
+    expect(String(baseMessages[0]?.content)).toContain("Do not copy numeric DOM element indices");
+    expect(String(baseMessages[0]?.content)).toContain('pass mode:"visible" plus that visible tabId');
+    expect(String(baseMessages[0]?.content)).toContain("cannot control the address bar");
+    expect(String(baseMessages[0]?.content)).toContain("Catalog items use sc_cat_item.do");
+    expect(String(baseMessages[0]?.content)).toContain("Never feed browser_open a guessed or constructed endpoint");
+    expect(String(baseMessages[0]?.content)).toContain("For ServiceNow Question Choices");
+    expect(String(baseMessages[0]?.content)).toContain('Never ask the browser agent to click the "Question Choices" menu');
+    expect(String(baseMessages[0]?.content)).toContain("For a variable inside an existing ServiceNow Multi-Row Variable Set");
     expect(String(baseMessages[0]?.content)).not.toContain("Old appended sentence");
   });
 
@@ -803,6 +874,34 @@ describe("agent", () => {
       "browser_screenshot"
     ]);
     expect(browser.screenshotCalls).toEqual([{ mode: "visible", tabId: "visible-tab-1" }]);
+  });
+
+  it("does not spend a synthetic screenshot before an explicit browser_task request", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "I will delegate the requested browser task."
+        }
+      }
+    ]);
+    const browser = createFakeBrowser();
+    const events: AgentRunEvent[] = [];
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      browser
+    });
+
+    await agent.run("On the active browser tab, call browser_task exactly once to inspect the form.", {
+      onEvent: (event) => {
+        events.push(event);
+      }
+    });
+
+    expect(events.flatMap((event) => (event.type === "tool_call" ? [event.call.name] : []))).toEqual([]);
+    expect(browser.screenshotCalls).toEqual([]);
   });
 
   it("does not refresh browser evidence for ordinary page-code prompts", async () => {
@@ -968,27 +1067,111 @@ describe("agent", () => {
     expect(result.session.messages.filter((message) => message.role === "assistant").length).toBe(1);
   });
 
-  it("does not accept empty assistant responses without tool calls as completed runs", async () => {
-    const session = createTestSession();
+  it("retries a genuinely empty assistant response up to 3 times, 2.5 minutes apart, before giving up", async () => {
+    const now = new Date().toISOString();
+    const session: AgentSession = {
+      id: "test-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages: [],
+      createdAt: now,
+      updatedAt: now
+    };
     const originalMessages = structuredClone(session.messages);
+    const emptyResponse = { message: { role: "assistant" as const, content: "   " } };
+    const client = new ScriptedClient([emptyResponse, emptyResponse, emptyResponse, emptyResponse]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session,
+      // Real 2.5-minute spacing is a production concern, not something this test needs to
+      // observe -- only that a retry happens. Collapsing the delay to 0 lets the run proceed
+      // on real timers instead of coordinating with fake ones.
+      emptyResponseRetryDelayMs: 0
+    });
+
+    await expect(agent.run("summarize")).rejects.toThrow("empty assistant response 4 times in a row");
+
+    expect(client.requests.length).toBe(4);
+    // Every empty turn was popped on retry; nothing about the failed attempts remains.
+    expect(session.messages).toEqual(originalMessages);
+  });
+
+  it("recovers if a later attempt returns a real response after an empty one", async () => {
+    const emptyResponse = { message: { role: "assistant" as const, content: "" } };
+    const answer = { message: { role: "assistant" as const, content: "Here you go." } };
+    const client = new ScriptedClient([emptyResponse, answer]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      emptyResponseRetryDelayMs: 0
+    });
+
+    const result = await agent.run("summarize");
+
+    expect(result.output).toBe("Here you go.");
+    expect(client.requests.length).toBe(2);
+  });
+
+  it("gives a later empty-response incident its own fresh retry budget after real progress", async () => {
+    const empty = { message: { role: "assistant" as const, content: "" } };
     const client = new ScriptedClient([
+      empty,
       {
         message: {
-          role: "assistant",
-          content: "   "
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read", arguments: { path: "README.md" } }]
         }
-      }
+      },
+      // A second incident of 3 empty responses only fits within the retry budget if the tool
+      // call above reset the counter -- a shared, never-reset budget would throw on this trio
+      // since only 2 retries would remain from the first incident.
+      empty,
+      empty,
+      empty,
+      { message: { role: "assistant" as const, content: "Recovered." } }
     ]);
     const agent = new Agent({
       client,
       approvals: new ApprovalManager("readonly", async () => false),
       cwd: tempDir,
-      session
+      emptyResponseRetryDelayMs: 0
     });
 
-    await expect(agent.run("summarize")).rejects.toThrow("empty assistant response");
+    const result = await agent.run("summarize");
 
-    expect(session.messages).toEqual(originalMessages);
+    expect(result.output).toBe("Recovered.");
+    expect(client.requests.length).toBe(6);
+  });
+
+  it("aborts promptly instead of waiting out the empty-response retry delay", async () => {
+    const controller = new AbortController();
+    const emptyResponse = { message: { role: "assistant" as const, content: "" } };
+    const client = new ScriptedClient([emptyResponse, emptyResponse, emptyResponse, emptyResponse]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      // Real production delay -- if abort didn't pre-empt the wait, this test would hang until
+      // the suite's own timeout instead of failing fast, so a passing run proves the signal path.
+      emptyResponseRetryDelayMs: 150_000
+    });
+
+    const runPromise = agent.run("summarize", { signal: controller.signal });
+    // Abort only once the first empty response has actually been consumed -- aborting
+    // immediately would just hit the loop's own pre-step check and never touch delay()'s
+    // abort handling, the thing this test exists to cover.
+    for (let i = 0; i < 200 && client.requests.length < 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(client.requests.length).toBeGreaterThanOrEqual(1);
+    controller.abort();
+
+    await expect(runPromise).rejects.toThrow(AgentRunAbortedError);
   });
 
   it("auto-compacts oversized model requests without rewriting saved chat history", async () => {
@@ -1571,6 +1754,14 @@ function createFakeBrowser(
         index: args.index,
         optionText: args.optionText,
         ok: true
+      };
+    },
+    async executeJavaScript(args) {
+      return {
+        mode: args.mode ?? "visible",
+        tabId: args.tabId,
+        ok: true,
+        result: `ran: ${args.script}`
       };
     }
   };

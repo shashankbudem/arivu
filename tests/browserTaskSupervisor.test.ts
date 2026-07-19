@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import type { WebContents } from "electron";
 import {
   ensureBrowserTaskProxy,
@@ -8,7 +8,15 @@ import {
   registerBrowserTaskProxyEntry,
   unregisterBrowserTaskProxyEntry
 } from "../desktop/main/browserTaskProxy.js";
-import { __setPageAgentBundleTextForTests, circuitFailureFromDiagnostics, runBrowserTask } from "../desktop/main/browserTaskSupervisor.js";
+import {
+  __setPageAgentBundleTextForTests,
+  browserTaskTargetsNavigationShell,
+  circuitFailureFromDiagnostics,
+  newRecordNavigationMismatch,
+  runBrowserTask,
+  serviceNowNavigationSurfaceMismatch,
+  stripStaleBrowserTaskIndices
+} from "../desktop/main/browserTaskSupervisor.js";
 
 const REAL_API_KEY = "sk-super-secret-real-key";
 
@@ -107,6 +115,65 @@ describe("browserTaskProxy", () => {
     expect(response.headers.get("access-control-max-age")).toBeTruthy();
   });
 
+  it("serves the in-page search_web route without touching the LLM-forwarding path", async () => {
+    await ensureUpstream();
+    const RSS_FIXTURE = `<?xml version="1.0" encoding="utf-8" ?>
+      <rss version="2.0"><channel><item>
+        <title>Example Result</title>
+        <link>https://example.com/</link>
+        <description>A short snippet.</description>
+      </item></channel></rss>`;
+    // vi.spyOn(globalThis, "fetch") replaces fetch process-wide, which would also swallow this
+    // test's own outer call to the local proxy server below -- only fake the Bing RSS call
+    // searchWeb makes internally and let every other URL (including the proxy itself) through.
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("bing.com")) {
+        return new Response(RSS_FIXTURE, { status: 200 });
+      }
+      return realFetch(input, init);
+    });
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: upstreamUrl,
+        realApiKey: REAL_API_KEY,
+        ttlMs: 30_000
+      });
+
+      const response = await fetch(`${proxyBaseUrl}/__arivu_search?q=service+now+category+field&n=3`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { query: string; results: Array<{ title: string; url: string; snippet: string }> };
+      expect(body.query).toBe("service now category field");
+      expect(body.results).toEqual([{ title: "Example Result", url: "https://example.com/", snippet: "A short snippet." }]);
+      // Confirms the search route never touches requestCount/diagnostics used by the LLM-call
+      // circuit breaker elsewhere -- searches must never look like failed model calls to it.
+      expect(getBrowserTaskProxyDiagnostics(token)).toEqual([]);
+
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("rejects a search request with a missing query and an invalid token the same as the LLM path", async () => {
+    const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+      realBaseUrl: upstreamUrl || "http://127.0.0.1:1",
+      ttlMs: 30_000
+    });
+    try {
+      const missingQuery = await fetch(`${proxyBaseUrl}/__arivu_search`, { headers: { authorization: `Bearer ${token}` } });
+      expect(missingQuery.status).toBe(400);
+
+      const badToken = await fetch(`${proxyBaseUrl}/__arivu_search?q=test`, { headers: { authorization: "Bearer not-a-real-token" } });
+      expect(badToken.status).toBe(401);
+    } finally {
+      unregisterBrowserTaskProxyEntry(token);
+    }
+  });
+
   it("retries upstream 429s with backoff before surfacing them to the page", async () => {
     let hits = 0;
     const flaky = http.createServer((req, res) => {
@@ -183,6 +250,42 @@ describe("browserTaskProxy", () => {
       unregisterBrowserTaskProxyEntry(token);
     } finally {
       flaky.close();
+    }
+  });
+
+  it("bounds a hung upstream request and retries it once before returning 504", async () => {
+    let hits = 0;
+    const hanging = http.createServer((req) => {
+      req.resume();
+      hits += 1;
+      // Intentionally never send response headers. The proxy timeout must release the caller.
+    });
+    await new Promise<void>((resolve) => hanging.listen(0, "127.0.0.1", resolve));
+    const hangingUrl = `http://127.0.0.1:${(hanging.address() as AddressInfo).port}`;
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: hangingUrl,
+        realApiKey: REAL_API_KEY,
+        ttlMs: 30_000,
+        requestTimeoutMs: 20
+      });
+      const response = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ hello: "world" })
+      });
+
+      expect(response.status).toBe(504);
+      expect(hits).toBe(2);
+      expect(getBrowserTaskProxyDiagnostics(token)).toMatchObject([
+        { status: 504, outcome: "network_error", willRetry: true },
+        { status: 504, outcome: "network_error" }
+      ]);
+      expect(await response.json()).toMatchObject({ error: expect.stringContaining("timed out") });
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      hanging.closeAllConnections?.();
+      hanging.close();
     }
   });
 
@@ -338,6 +441,169 @@ describe("browserTaskProxy", () => {
   });
 });
 
+describe("newRecordNavigationMismatch", () => {
+  it("accepts the blank Variable form for a variable-list New task", () => {
+    expect(
+      newRecordNavigationMismatch(
+        'Click the "New" button in the Variables related list.',
+        "https://example.service-now.com/item_option_new.do?sys_id=-1&sys_is_related_list=true"
+      )
+    ).toBeUndefined();
+    expect(
+      newRecordNavigationMismatch(
+        'Click the "New" button in Variables to add the Priority choice variable.',
+        "https://example.service-now.com/item_option_new.do?sys_id=-1"
+      )
+    ).toBeUndefined();
+  });
+
+  it("rejects an existing Variable row reached through a stale New index", () => {
+    expect(
+      newRecordNavigationMismatch(
+        'Click the "New" button in the Variables related list to add Docking Station checkbox.',
+        "https://example.service-now.com/item_option_new.do?sys_id=15e4f9b22fce0b502fd58e7a6fa4e3b1"
+      )
+    ).toMatch(/prior index was stale.*sysverb_new/i);
+  });
+
+  it("requires the blank Question Choice form for a Question Choices New task", () => {
+    expect(
+      newRecordNavigationMismatch(
+        "Click the New button in the Question Choices related list.",
+        "https://example.service-now.com/question_choice.do?sys_id=existing-choice"
+      )
+    ).toMatch(/blank Question Choice form/);
+    expect(
+      newRecordNavigationMismatch(
+        "Click the New button in the Question Choices related list.",
+        "https://example.service-now.com/now/nav/ui/classic/params/target/question_choice.do%3Fsys_id%3D-1"
+      )
+    ).toBeUndefined();
+    expect(
+      newRecordNavigationMismatch(
+        "Click the New button to add a new choice to the Employment Type variable.",
+        "https://example.service-now.com/question_choice.do?sys_id=-1"
+      )
+    ).toBeUndefined();
+  });
+
+  it("does not apply to a full create-and-submit instruction", () => {
+    expect(
+      newRecordNavigationMismatch(
+        "Create and submit a new CheckBox variable.",
+        "https://example.service-now.com/sc_cat_item.do?sys_id=catalog-item"
+      )
+    ).toBeUndefined();
+  });
+
+  it("rejects a blank New form reached while selecting an existing lookup row", () => {
+    expect(
+      newRecordNavigationMismatch(
+        "Look at the categories list page. Search for IT or Hardware and click one of the available category rows.",
+        "https://example.service-now.com/sc_category.do?sys_id=-1&sys_is_list=true&sys_target=sc_category"
+      )
+    ).toMatch(/select an existing list\/lookup record opened a blank new sc_category\.do record/i);
+  });
+
+  it("rejects the same selection mismatch through an encoded classic-shell target", () => {
+    expect(
+      newRecordNavigationMismatch(
+        "Choose an existing matching category from the lookup list.",
+        "https://example.service-now.com/now/nav/ui/classic/params/target/sc_category.do%3Fsys_id%3D-1%26sys_is_list%3Dtrue"
+      )
+    ).toMatch(/never use New for a selection task/);
+  });
+
+  it("allows a blank New form when the instruction actually creates a record", () => {
+    expect(
+      newRecordNavigationMismatch(
+        "Create a new Category record and fill its fields.",
+        "https://example.service-now.com/sc_category.do?sys_id=-1"
+      )
+    ).toBeUndefined();
+  });
+
+  it("does not reject an existing row reached by a selection task", () => {
+    expect(
+      newRecordNavigationMismatch(
+        "Search the list and select an available category row.",
+        "https://example.service-now.com/sc_category.do?sys_id=existing-category"
+      )
+    ).toBeUndefined();
+  });
+
+  it("still rejects New when adding means selecting an existing lookup value", () => {
+    expect(
+      newRecordNavigationMismatch(
+        "Add an available Hardware category to the item by selecting its existing lookup row.",
+        "https://example.service-now.com/sc_category.do?sys_id=-1"
+      )
+    ).toMatch(/select an existing list\/lookup record/);
+  });
+});
+
+describe("stripStaleBrowserTaskIndices", () => {
+  it("removes copied DOM indices without changing semantic field values or orders", () => {
+    expect(
+      stripStaleBrowserTaskIndices(
+        'Click "Question Choices" (index 60), then use the New button [index: #61] to add Read Only (100) and order 200.'
+      )
+    ).toBe('Click "Question Choices", then use the New button to add Read Only (100) and order 200.');
+  });
+
+  it("removes a standalone index hint while preserving unrelated numbers", () => {
+    expect(stripStaleBrowserTaskIndices("Fill index 42 with Priority, set Order to 700, and submit.")).toBe(
+      "Fill with Priority, set Order to 700, and submit."
+    );
+  });
+});
+
+describe("browserTaskTargetsNavigationShell", () => {
+  it("routes global ServiceNow navigator instructions to the outer document", () => {
+    expect(browserTaskTargetsNavigationShell("Click the Application Navigator filter at the top left.")).toBe(true);
+    expect(browserTaskTargetsNavigationShell('Open the "All" menu and search for Maintain Items.')).toBe(true);
+  });
+
+  it("keeps ordinary form and variable-set instructions in the work frame", () => {
+    expect(browserTaskTargetsNavigationShell("Open Application Access Details and add Access Justification.")).toBe(false);
+    expect(browserTaskTargetsNavigationShell("Fill the catalog item form and click Submit.")).toBe(false);
+  });
+});
+
+describe("serviceNowNavigationSurfaceMismatch", () => {
+  it("rejects a global navigation task on the standalone Service Catalog page", () => {
+    expect(
+      serviceNowNavigationSurfaceMismatch(
+        'Type "Maintain Items" in the Application Navigator filter and click the result.',
+        "https://dev425223.service-now.com/catalog_home.do?sysparm_view=catalog_default"
+      )
+    ).toMatch(/standalone page.*has no navigator.*exact navpage\.do URL/is);
+  });
+
+  it("accepts the same task on navpage and unified-navigation shell URLs", () => {
+    const instruction = 'Open the "All" menu and search for Maintain Items.';
+    expect(serviceNowNavigationSurfaceMismatch(instruction, "https://dev425223.service-now.com/navpage.do")).toBeUndefined();
+    expect(
+      serviceNowNavigationSurfaceMismatch(
+        instruction,
+        "https://dev425223.service-now.com/now/nav/ui/classic/params/target/sc_cat_item_list.do"
+      )
+    ).toBeUndefined();
+  });
+
+  it("does not affect form work or non-ServiceNow sites", () => {
+    expect(
+      serviceNowNavigationSurfaceMismatch(
+        "Fill the catalog item form and click Submit.",
+        "https://dev425223.service-now.com/sc_cat_item.do?sys_id=-1"
+      )
+    ).toBeUndefined();
+    expect(
+      serviceNowNavigationSurfaceMismatch("Use the Application Navigator filter.", "https://example.com/catalog_home.do")
+    ).toBeUndefined();
+  });
+});
+
 describe("circuitFailureFromDiagnostics", () => {
   const base = { attempt: 1, timestamp: "2026-07-11T00:00:00.000Z", method: "POST", path: "/chat/completions", latencyMs: 100 };
 
@@ -488,6 +754,210 @@ describe("runBrowserTask", () => {
     }
   });
 
+  it("runs the page agent inside a substantial shadow-hosted work frame", async () => {
+    const topScripts: string[] = [];
+    const childScripts: string[] = [];
+    const mainFrame = {
+      name: "",
+      url: "https://example.test/",
+      parent: null,
+      framesInSubtree: [] as unknown[],
+      detached: false,
+      isDestroyed: () => false
+    };
+    const childFrame = {
+      name: "gsft_main",
+      url: "https://example.test/work-form.do",
+      parent: mainFrame,
+      processId: 7,
+      routingId: 11,
+      detached: false,
+      isDestroyed: () => false,
+      executeJavaScript: async (script: string) => {
+        childScripts.push(script);
+        if (script.includes("visibleInteractiveCount") && script.includes("document.querySelectorAll")) {
+          return {
+            readyState: "complete",
+            visible: true,
+            width: 900,
+            height: 650,
+            formCount: 1,
+            visibleInteractiveCount: 30,
+            textLength: 500
+          };
+        }
+        if (script.includes("__arivuPageAgentTask.history")) {
+          return null;
+        }
+        return { ok: true, success: true, data: "Completed in work frame.", stepCount: 1 };
+      }
+    };
+    mainFrame.framesInSubtree = [mainFrame, childFrame];
+    const contents = {
+      mainFrame,
+      getURL: () => "https://example.test/",
+      executeJavaScript: async (script: string) => {
+        topScripts.push(script);
+        return { ok: false, error: "outer shell should not run the task" };
+      },
+      on: () => contents,
+      off: () => contents
+    } as unknown as WebContents;
+
+    const result = await runBrowserTask(
+      contents,
+      { instruction: "fill the embedded work form" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    expect(result).toMatchObject({ success: true, data: "Completed in work frame.", stepCount: 1 });
+    expect(childScripts.some((script) => script.includes("new lib.PageAgentCore"))).toBe(true);
+    expect(topScripts).toEqual([]);
+  });
+
+  it("runs global-navigation instructions in the outer shell instead of the work frame", async () => {
+    const topScripts: string[] = [];
+    const childScripts: string[] = [];
+    const mainFrame = {
+      name: "",
+      url: "https://example.service-now.com/now/nav/ui/classic",
+      parent: null,
+      framesInSubtree: [] as unknown[],
+      detached: false,
+      isDestroyed: () => false
+    };
+    const childFrame = {
+      name: "gsft_main",
+      url: "https://example.service-now.com/ui_page.do",
+      parent: mainFrame,
+      processId: 7,
+      routingId: 11,
+      detached: false,
+      isDestroyed: () => false,
+      executeJavaScript: async (script: string) => {
+        childScripts.push(script);
+        return {
+          readyState: "complete",
+          visible: true,
+          width: 900,
+          height: 650,
+          formCount: 1,
+          visibleInteractiveCount: 30,
+          textLength: 500
+        };
+      }
+    };
+    mainFrame.framesInSubtree = [mainFrame, childFrame];
+    const contents = {
+      mainFrame,
+      getURL: () => "https://example.service-now.com/now/nav/ui/classic",
+      executeJavaScript: async (script: string) => {
+        topScripts.push(script);
+        if (script.includes("__arivuPageAgentTask.history")) {
+          return null;
+        }
+        return { ok: true, success: true, data: "Opened Application Navigator.", stepCount: 1 };
+      },
+      on: () => contents,
+      off: () => contents
+    } as unknown as WebContents;
+
+    const result = await runBrowserTask(
+      contents,
+      { instruction: "Click the Application Navigator filter and search for Maintain Items." },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    expect(result).toMatchObject({ success: true, data: "Opened Application Navigator.", stepCount: 1 });
+    expect(topScripts.some((script) => script.includes("new lib.PageAgentCore"))).toBe(true);
+    expect(childScripts).toEqual([]);
+  });
+
+  it("returns a safe checkpoint when a work-frame document is replaced without a stable routing id event", async () => {
+    let currentUrl = "https://example.test/work-form.do";
+    const mainFrame = {
+      name: "",
+      url: "https://example.test/",
+      parent: null,
+      framesInSubtree: [] as unknown[],
+      detached: false,
+      isDestroyed: () => false
+    };
+    const probe = {
+      readyState: "complete",
+      visible: true,
+      width: 900,
+      height: 650,
+      formCount: 1,
+      visibleInteractiveCount: 30,
+      textLength: 500
+    };
+    const replacementFrame = {
+      name: "gsft_main",
+      url: "https://example.test/new-record.do",
+      parent: mainFrame,
+      processId: 9,
+      routingId: 21,
+      detached: false,
+      isDestroyed: () => false,
+      executeJavaScript: async (script: string) => {
+        if (script.includes("visibleInteractiveCount") && script.includes("document.querySelectorAll")) {
+          return probe;
+        }
+        if (script.includes("__arivuPageAgentTask.history")) {
+          return null;
+        }
+        return { ok: true, success: true, data: "Read-only navigation checkpoint complete.", stepCount: 1 };
+      }
+    };
+    const originalFrame = {
+      name: "gsft_main",
+      url: currentUrl,
+      parent: mainFrame,
+      processId: 8,
+      routingId: 20,
+      detached: false,
+      isDestroyed: () => false,
+      executeJavaScript: async (script: string) => {
+        if (script.includes("visibleInteractiveCount") && script.includes("document.querySelectorAll")) {
+          return probe;
+        }
+        if (script.includes("__arivuPageAgentTask.history")) {
+          return null;
+        }
+        setTimeout(() => {
+          currentUrl = replacementFrame.url;
+          mainFrame.framesInSubtree = [mainFrame, replacementFrame];
+        }, 25);
+        return new Promise(() => undefined);
+      }
+    };
+    mainFrame.framesInSubtree = [mainFrame, originalFrame];
+    const contents = {
+      mainFrame,
+      getURL: () => currentUrl,
+      isLoading: () => false,
+      executeJavaScript: async () => {
+        throw new Error("outer shell should not run the task");
+      },
+      on: () => contents,
+      off: () => contents
+    } as unknown as WebContents;
+
+    const result = await runBrowserTask(
+      contents,
+      { instruction: "open the child record" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      navigationCount: 1
+    });
+    expect(String(result.data)).toContain("safe navigation boundary");
+    expect(String(result.data)).toContain("https://example.test/new-record.do");
+  });
+
   it("opens a model circuit after an unavailable endpoint response and blocks immediate retries", async () => {
     const unavailable = http.createServer((_req, res) => {
       res.writeHead(404, { "content-type": "application/json" });
@@ -530,6 +1000,159 @@ describe("runBrowserTask", () => {
       expect(second.scripts).toHaveLength(0);
     } finally {
       await new Promise<void>((resolve) => unavailable.close(() => resolve()));
+    }
+  });
+
+  function fetchThroughInjectedScript(script: string) {
+    const baseMatch = script.match(/baseURL: ("[^"]+")/);
+    const tokenMatch = script.match(/apiKey: ("[^"]+")/);
+    if (!baseMatch || !tokenMatch) {
+      return undefined;
+    }
+    return fetch(`${JSON.parse(baseMatch[1]) as string}/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${JSON.parse(tokenMatch[1]) as string}`, "content-type": "application/json" },
+      body: "{}"
+    });
+  }
+
+  it("rotates to a fallback model when the primary's circuit opens with zero progress", async () => {
+    const failing = http.createServer((_req, res) => {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "model not found" }));
+    });
+    await new Promise<void>((resolve) => failing.listen(0, "127.0.0.1", resolve));
+    const address = failing.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const { contents, scripts } = createFakeContents(async (script) => {
+      const fetched = await fetchThroughInjectedScript(script);
+      if (!fetched) {
+        return false;
+      }
+      return script.includes(`model: "rotate-primary-missing"`)
+        ? { ok: false, error: "HTTP 404" }
+        : { ok: true, success: true, data: "Recovered on the fallback model.", stepCount: 1 };
+    });
+
+    try {
+      const result = await runBrowserTask(contents, { instruction: "rotate on failure" }, {
+        baseUrl,
+        model: "rotate-primary-missing",
+        fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "rotate-fallback-model", apiKey: REAL_API_KEY }]
+      });
+
+      expect(result).toMatchObject({ success: true, data: "Recovered on the fallback model." });
+      expect(result.browserTaskModel).toMatchObject({ model: "rotate-fallback-model" });
+      expect(result.rotatedModels).toEqual([expect.stringContaining("rotate-primary-missing")]);
+      expect(mainTaskScriptCount(scripts)).toBe(2);
+    } finally {
+      await new Promise<void>((resolve) => failing.close(() => resolve()));
+    }
+  });
+
+  it("skips a fallback whose circuit is already open and uses the next viable candidate without attempting it", async () => {
+    const failing = http.createServer((_req, res) => {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "model not found" }));
+    });
+    await new Promise<void>((resolve) => failing.listen(0, "127.0.0.1", resolve));
+    const address = failing.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    try {
+      const opener = createFakeContents(async (script) => {
+        const fetched = await fetchThroughInjectedScript(script);
+        return fetched ? { ok: false, error: "HTTP 404" } : false;
+      });
+      await runBrowserTask(opener.contents, { instruction: "open the circuit" }, { baseUrl, model: "preopened-missing" });
+
+      const { contents, scripts } = createFakeContents(() => ({ ok: true, success: true, data: "Used the fallback directly.", stepCount: 1 }));
+      const result = await runBrowserTask(contents, { instruction: "should skip straight to the fallback" }, {
+        baseUrl,
+        model: "preopened-missing",
+        fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "healthy-fallback" }]
+      });
+
+      expect(result).toMatchObject({ success: true, data: "Used the fallback directly." });
+      expect(result.browserTaskModel).toMatchObject({ model: "healthy-fallback" });
+      expect(mainTaskScriptCount(scripts)).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => failing.close(() => resolve()));
+    }
+  });
+
+  it("reports every configured model unavailable when all their circuits are open", async () => {
+    const failingA = http.createServer((_req, res) => {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "missing" }));
+    });
+    const failingB = http.createServer((_req, res) => {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "missing" }));
+    });
+    await Promise.all([
+      new Promise<void>((resolve) => failingA.listen(0, "127.0.0.1", resolve)),
+      new Promise<void>((resolve) => failingB.listen(0, "127.0.0.1", resolve))
+    ]);
+    const addressA = failingA.address() as AddressInfo;
+    const addressB = failingB.address() as AddressInfo;
+    const baseUrlA = `http://127.0.0.1:${addressA.port}`;
+    const baseUrlB = `http://127.0.0.1:${addressB.port}`;
+    const failScript = async (script: string) => {
+      const fetched = await fetchThroughInjectedScript(script);
+      return fetched ? { ok: false, error: "HTTP 404" } : false;
+    };
+
+    try {
+      await runBrowserTask(createFakeContents(failScript).contents, { instruction: "open circuit A" }, { baseUrl: baseUrlA, model: "dead-primary" });
+      await runBrowserTask(createFakeContents(failScript).contents, { instruction: "open circuit B" }, { baseUrl: baseUrlB, model: "dead-fallback" });
+
+      const { contents, scripts } = createFakeContents(() => ({ ok: true, success: true, data: "should not run" }));
+      const result = await runBrowserTask(contents, { instruction: "no viable candidate" }, {
+        baseUrl: baseUrlA,
+        model: "dead-primary",
+        fallbacks: [{ baseUrl: baseUrlB, model: "dead-fallback" }]
+      });
+
+      expect(result).toMatchObject({ success: false, stopped: true, stopReason: "infrastructure", durationMs: 0 });
+      expect(String(result.data)).toContain("dead-primary");
+      expect(String(result.data)).toContain("dead-fallback");
+      expect(scripts).toHaveLength(0);
+    } finally {
+      await Promise.all([
+        new Promise<void>((resolve) => failingA.close(() => resolve())),
+        new Promise<void>((resolve) => failingB.close(() => resolve()))
+      ]);
+    }
+  });
+
+  it("does not rotate once real progress was made before the model became unavailable", async () => {
+    const flaky = http.createServer((_req, res) => {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "missing" }));
+    });
+    await new Promise<void>((resolve) => flaky.listen(0, "127.0.0.1", resolve));
+    const address = flaky.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const { contents, scripts } = createFakeContents(async (script) => {
+      const fetched = await fetchThroughInjectedScript(script);
+      return fetched ? { ok: false, error: "HTTP 404", stepCount: 2 } : false;
+    });
+
+    try {
+      const result = await runBrowserTask(contents, { instruction: "fail after progress" }, {
+        baseUrl,
+        model: "progressed-then-dead",
+        fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "should-not-be-tried" }]
+      });
+
+      expect(result).toMatchObject({ success: false, stopped: true, stopReason: "infrastructure", stepCount: 2 });
+      expect(result.rotatedModels).toBeUndefined();
+      expect(mainTaskScriptCount(scripts)).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => flaky.close(() => resolve()));
     }
   });
 
@@ -652,18 +1275,15 @@ describe("runBrowserTask", () => {
     expect(pollCount).toBe(1);
   }, 15_000);
 
-  it("resumes on a fresh document after a cross-document navigation destroys the context", async () => {
+  it("returns at the navigation boundary after a cross-document navigation destroys the context", async () => {
     let attempt = 0;
     const { contents, scripts, fireNavigate } = createFakeContents((script) => {
       if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
         return true;
       }
       attempt += 1;
-      if (attempt === 1) {
-        fireNavigate();
-        throw new Error("Execution context was destroyed.");
-      }
-      return { ok: true, success: true, data: "Done on page two.", stepCount: 1 };
+      fireNavigate();
+      throw new Error("Execution context was destroyed.");
     });
 
     const result = await runBrowserTask(
@@ -673,23 +1293,22 @@ describe("runBrowserTask", () => {
     );
 
     expect(result.success).toBe(true);
-    expect(result.data).toBe("Done on page two.");
+    expect(String(result.data)).toContain("Navigation checkpoint 1");
+    expect(String(result.data)).toContain("safe navigation boundary");
     expect(result.navigationCount).toBe(1);
-    expect(mainTaskScriptCount(scripts)).toBe(2);
+    expect(mainTaskScriptCount(scripts)).toBe(1);
+    expect(attempt).toBe(1);
   });
 
-  it("resumes when navigation leaves the old executeJavaScript promise pending", async () => {
+  it("returns promptly when navigation leaves the old executeJavaScript promise pending", async () => {
     let attempt = 0;
     const fake = createFakeContents((script) => {
       if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
         return true;
       }
       attempt += 1;
-      if (attempt === 1) {
-        setTimeout(fake.fireNavigate, 0);
-        return new Promise(() => undefined);
-      }
-      return { ok: true, success: true, data: "Resumed without waiting for the old context.", stepCount: 1 };
+      setTimeout(fake.fireNavigate, 0);
+      return new Promise(() => undefined);
     });
 
     const result = await runBrowserTask(
@@ -700,20 +1319,16 @@ describe("runBrowserTask", () => {
 
     expect(result).toMatchObject({
       success: true,
-      data: "Resumed without waiting for the old context.",
       navigationCount: 1
     });
-    expect(mainTaskScriptCount(fake.scripts)).toBe(2);
-    const resumedScript = fake.scripts.filter((script) => script.includes("new lib.PageAgentCore"))[1];
-    expect(resumedScript).toContain("Navigation checkpoint 1");
-    expect(resumedScript).toContain("Current page URL: https://example.test/");
-    expect(resumedScript).toContain("READ-ONLY CHECKPOINT");
-    expect(resumedScript).toContain("choose done in your next response");
-    expect(resumedScript).toContain("use snapshotAfter to decide whether any follow-up browser_task is needed");
-    expect(resumedScript).not.toContain("clear the list filter and continue");
+    expect(String(result.data)).toContain("Current page URL: https://example.test/");
+    expect(String(result.data)).toContain("inspect snapshotAfter");
+    expect(String(result.data)).not.toContain("clear the list filter and continue");
+    expect(mainTaskScriptCount(fake.scripts)).toBe(1);
+    expect(attempt).toBe(1);
   });
 
-  it("uses a read-only checkpoint after navigation even when earlier steps were recorded", async () => {
+  it("preserves recorded step progress in the direct navigation checkpoint", async () => {
     let attempt = 0;
     const fake = createFakeContents(
       (script) => {
@@ -721,13 +1336,10 @@ describe("runBrowserTask", () => {
           return true;
         }
         attempt += 1;
-        if (attempt === 1) {
-          // Let the supervisor's one-second progress poll capture the four completed steps
-          // before the document is replaced.
-          setTimeout(fake.fireNavigate, 1_100);
-          return new Promise(() => undefined);
-        }
-        return { ok: true, success: true, data: "Read-only checkpoint complete.", stepCount: 1 };
+        // Let the supervisor's one-second progress poll capture the four completed steps
+        // before the document is replaced.
+        setTimeout(fake.fireNavigate, 1_100);
+        return new Promise(() => undefined);
       },
       () => ({ stepCount: 4, lastAction: "click_element_by_index", lastGoal: "submit the variable form" })
     );
@@ -738,31 +1350,24 @@ describe("runBrowserTask", () => {
       { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
     );
 
-    expect(result).toMatchObject({ success: true, navigationCount: 1, stepCount: 5 });
-    const resumedScript = fake.scripts.filter((script) => script.includes("new lib.PageAgentCore"))[1];
-    expect(resumedScript).toContain("Navigation checkpoint 1");
-    expect(resumedScript).toContain("recorded 4 completed step(s)");
-    expect(resumedScript).toContain("READ-ONLY CHECKPOINT");
-    expect(resumedScript).toContain("Do not attempt or repeat any action from the previous document");
-    expect(resumedScript).not.toContain("fill fields and submit the variable");
+    expect(result).toMatchObject({ success: true, navigationCount: 1, stepCount: 4 });
+    expect(String(result.data)).toContain("recorded 4 completed step(s)");
+    expect(String(result.data)).toContain("do not repeat the completed action");
+    expect(String(result.data)).not.toContain("fill fields and submit the variable");
+    expect(mainTaskScriptCount(fake.scripts)).toBe(1);
+    expect(attempt).toBe(1);
   });
 
-  it("waits for the destination document to settle before re-injecting", async () => {
-    let attempt = 0;
+  it("waits for the destination document to settle before returning the checkpoint", async () => {
     let loading = true;
     const fake = createFakeContents(() => {
-      attempt += 1;
-      if (attempt === 1) {
+      setTimeout(() => {
+        fake.fireNavigate();
         setTimeout(() => {
-          fake.fireNavigate();
-          setTimeout(() => {
-            loading = false;
-          }, 120);
-        }, 0);
-        return new Promise(() => undefined);
-      }
-      expect(loading).toBe(false);
-      return { ok: true, success: true, data: "Injected after load settled.", stepCount: 1 };
+          loading = false;
+        }, 120);
+      }, 0);
+      return new Promise(() => undefined);
     });
     Object.assign(fake.contents, { isLoading: () => loading });
 
@@ -772,11 +1377,52 @@ describe("runBrowserTask", () => {
       { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
     );
 
-    expect(result).toMatchObject({ success: true, navigationCount: 1, data: "Injected after load settled." });
+    expect(result).toMatchObject({ success: true, navigationCount: 1 });
+    expect(loading).toBe(false);
+    expect(String(result.data)).toContain("safe navigation boundary");
+    expect(mainTaskScriptCount(fake.scripts)).toBe(1);
   });
 
-  it("gives up after exceeding the navigation-resume cap instead of looping forever", async () => {
-    const { contents, fireNavigate } = createFakeContents((script) => {
+  it("waits through ServiceNow's transient post-submit interaction URL before returning", async () => {
+    let currentUrl = "https://example.test/item_option_new.do?sys_id=priority";
+    const fake = createFakeContents(
+      () => {
+        // Give the progress poll time to capture that the last goal was Submit,
+        // then reproduce ServiceNow's delayed two-hop save redirect.
+        setTimeout(() => {
+          currentUrl = "https://example.test/question_choice.do?sysparm_now_ui_interaction=abc123&sys_id=-1";
+          fake.fireNavigate();
+          setTimeout(() => {
+            currentUrl = "https://example.test/item_option_new.do?sys_id=priority";
+          }, 900);
+        }, 1_100);
+        return new Promise(() => undefined);
+      },
+      () => ({ stepCount: 4, lastAction: "click_element_by_index", lastGoal: "submit the question choice form" })
+    );
+    Object.assign(fake.contents, {
+      getURL: () => currentUrl,
+      isLoading: () => false
+    });
+
+    const result = await runBrowserTask(
+      fake.contents,
+      { instruction: "create and submit the question choice" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      navigationCount: 1,
+      stepCount: 4
+    });
+    expect(currentUrl).toBe("https://example.test/item_option_new.do?sys_id=priority");
+    expect(String(result.data)).toContain(currentUrl);
+    expect(mainTaskScriptCount(fake.scripts)).toBe(1);
+  }, 10_000);
+
+  it("never loops across repeatedly redirecting documents", async () => {
+    const { contents, scripts, fireNavigate } = createFakeContents((script) => {
       if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
         return true;
       }
@@ -790,9 +1436,9 @@ describe("runBrowserTask", () => {
       { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
     );
 
-    expect(result.success).toBe(false);
-    expect(String(result.data)).toMatch(/navigations without finishing/);
-    expect(result.navigationCount).toBeGreaterThan(1);
+    expect(result.success).toBe(true);
+    expect(result.navigationCount).toBe(1);
+    expect(mainTaskScriptCount(scripts)).toBe(1);
   });
 
   it("flags zero-step network failures as infrastructure problems instead of task problems", async () => {
@@ -860,9 +1506,10 @@ describe("runBrowserTask", () => {
     expect(mainScript).toContain('["shop.example.com"]');
     expect(mainScript).toContain("arivuOnBeforeStep");
     expect(mainScript).toContain("enableMask: true");
-    expect(mainScript).toContain("new lib.Panel(core, { promptForNextTask: false })");
-    expect(mainScript).toContain('setAttribute("aria-label", "Browser agent activity")');
-    expect(mainScript).toContain("activityPanel.expand()");
+    expect(mainScript).toContain("core.onAskUser = undefined");
+    // The per-frame Panel is gone -- live status is the supervisor-driven presence chip instead
+    // (see the "presence chip" describe block below), never built from inside this script.
+    expect(mainScript).not.toContain("lib.Panel");
   });
 
   it("disables the action mask in background mode", async () => {
@@ -882,6 +1529,126 @@ describe("runBrowserTask", () => {
     const mainScript = mainScriptFrom(scripts);
     expect(mainScript).toContain("enableMask: false");
     expect(mainScript).toContain("if (false)");
+  });
+
+  describe("presence chip", () => {
+    // No per-frame duplication (the bug this replaced the old page-agent Panel to fix), no
+    // orphaned agent-frame mask, and -- new behavior -- an ordered, capped task history instead
+    // of a single line that gets wiped on every call.
+    function createFakeContentsWithMainFrame(onScript: (script: string) => unknown) {
+      const { contents, scripts } = createFakeContents((script) => {
+        if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+          return true;
+        }
+        return onScript(script);
+      });
+      const mainFrameScripts: string[] = [];
+      const mainFrame = {
+        executeJavaScript: async (script: string) => {
+          mainFrameScripts.push(script);
+          return undefined;
+        }
+      };
+      Object.assign(contents, { mainFrame });
+      return { contents, scripts, mainFrameScripts };
+    }
+
+    // The chip is upserted via `(${UPDATE_PRESENCE_CHIP_SNIPPET})(${JSON.stringify(tasks)})` --
+    // pull the trailing JSON array argument back out to assert on its structure directly instead
+    // of string-matching the whole minified call.
+    function lastChipTasks(mainFrameScripts: string[]): Array<{ instruction: string; status: string; detail?: string[] }> {
+      const match = mainFrameScripts.at(-1)?.match(/\)\((\[[\s\S]*\])\)$/);
+      if (!match) {
+        throw new Error(`No presence-chip update call found in: ${JSON.stringify(mainFrameScripts)}`);
+      }
+      return JSON.parse(match[1]);
+    }
+
+    it("shows the task as current while running, then done once it succeeds, and disposes the agent-frame mask", async () => {
+      const { contents, scripts, mainFrameScripts } = createFakeContentsWithMainFrame(
+        () => ({ ok: true, success: true, data: "Done.", stepCount: 1 })
+      );
+
+      await runBrowserTask(
+        contents,
+        { instruction: "fill out the form", visible: true },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+
+      const tasks = lastChipTasks(mainFrameScripts);
+      expect(tasks).toEqual([{ instruction: "fill out the form", status: "done" }]);
+
+      // The mask teardown runs against the agent's own frame (contents in this fixture), not
+      // mainFrame -- they're deliberately different scopes.
+      const maskDisposeCalls = scripts.filter((script) => script.includes("__arivuPageAgentController") && script.includes(".dispose()"));
+      expect(maskDisposeCalls).toHaveLength(1);
+    });
+
+    it("never touches the page for the presence chip in background mode", async () => {
+      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(
+        () => ({ ok: true, success: true, data: "Done.", stepCount: 1 })
+      );
+
+      await runBrowserTask(
+        contents,
+        { instruction: "fill out the form", visible: false },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+
+      expect(mainFrameScripts).toHaveLength(0);
+    });
+
+    it("marks the task failed rather than removing it when the call ends in failure", async () => {
+      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(() => ({ ok: false, error: "boom" }));
+
+      await runBrowserTask(
+        contents,
+        { instruction: "fill out the form", visible: true },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+
+      expect(lastChipTasks(mainFrameScripts)).toEqual([{ instruction: "fill out the form", status: "failed" }]);
+    });
+
+    it("accumulates separate browser_task calls on the same tab in order, done ones alongside the current one", async () => {
+      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(
+        () => ({ ok: true, success: true, data: "Done.", stepCount: 1 })
+      );
+
+      await runBrowserTask(
+        contents,
+        { instruction: "navigate to the service catalog", visible: true },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+      await runBrowserTask(
+        contents,
+        { instruction: "click the new button", visible: true },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+
+      expect(lastChipTasks(mainFrameScripts)).toEqual([
+        { instruction: "navigate to the service catalog", status: "done" },
+        { instruction: "click the new button", status: "done" }
+      ]);
+    });
+
+    it("caps the task history to the most recent calls instead of growing without bound", async () => {
+      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(
+        () => ({ ok: true, success: true, data: "Done.", stepCount: 1 })
+      );
+
+      for (let i = 1; i <= 7; i += 1) {
+        await runBrowserTask(
+          contents,
+          { instruction: `step ${i}`, visible: true },
+          { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+        );
+      }
+
+      const tasks = lastChipTasks(mainFrameScripts);
+      expect(tasks.length).toBeLessThan(7);
+      expect(tasks.map((task) => task.instruction)).toEqual(["step 3", "step 4", "step 5", "step 6", "step 7"]);
+    });
   });
 
   it("wires the in-page agent with instructions, content capping, reflection backfill and retry budget", async () => {
@@ -1007,6 +1774,30 @@ describe("runBrowserTask", () => {
     );
 
     expect(mainScriptFrom(scripts)).toContain("experimentalScriptExecutionTool: true");
+  });
+
+  it("always wires the in-page search_web custom tool, unlike the opt-in script tool", async () => {
+    const { contents, scripts } = createFakeContents((script) => {
+      if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+        return true;
+      }
+      return { ok: true, success: true, data: "Done.", stepCount: 1 };
+    });
+
+    await runBrowserTask(
+      contents,
+      { instruction: "fill out the form" },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    const mainScript = mainScriptFrom(scripts);
+    expect(mainScript).toContain("customTools: { search_web: arivuSearchWebTool }");
+    expect(mainScript).toContain("/__arivu_search?q=");
+    expect(mainScript).toContain("lib.z.object({ query: lib.z.string() })");
+    // arivuSearchWebTool's execute body is hand-escaped inside this template literal (\\" and
+    // \\n produce literal \" and \n in the generated source); new Function parses without
+    // executing, so this is the one guard against a silent escaping/syntax mistake there.
+    expect(() => new Function(mainScript)).not.toThrow();
   });
 
   it("clears any stale in-page stop reason and keeps the sensitive-text check on by default", async () => {

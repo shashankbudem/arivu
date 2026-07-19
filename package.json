@@ -41,6 +41,7 @@
     "desktop:dev": "npm run desktop:main:build && concurrently -k \"vite --config desktop/renderer/vite.config.ts --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && ARIVU_DESKTOP_DEV_URL=http://127.0.0.1:5173 electron dist-desktop/main/main.js\"",
     "desktop:start": "npm run desktop:build && electron dist-desktop/main/main.js",
     "test": "vitest run",
+    "bench": "tsx benchmarks/runner.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",

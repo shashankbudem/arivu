@@ -256,7 +256,10 @@ async function execArivu(args: string[]) {
       ARIVU_TAVILY_API_KEY: "",
       SHANKINSTER_TAVILY_API_KEY: "",
       TAVILY_API_KEY: "",
-      NO_COLOR: "1"
+      NO_COLOR: "1",
+      // chalk gives FORCE_COLOR precedence over NO_COLOR, so an inherited FORCE_COLOR (common under
+      // agent/CI tooling) would re-enable ANSI codes and break exact-output assertions.
+      FORCE_COLOR: "0"
     }
   });
 }
