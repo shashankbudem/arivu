@@ -993,7 +993,7 @@ export class DesktopBrowserController implements BrowserToolController {
       minWidth: 720,
       minHeight: 480,
       title: "Arivu Browser",
-      backgroundColor: "#11100f",
+      backgroundColor: "#000000",
       autoHideMenuBar: true,
       webPreferences: browserShellWebPreferences()
     });
@@ -1102,7 +1102,7 @@ export class DesktopBrowserController implements BrowserToolController {
         overrideBrowserWindowOptions: {
           show: false,
           autoHideMenuBar: true,
-          backgroundColor: "#11100f",
+          backgroundColor: "#000000",
           webPreferences: browserWebPreferences("visible")
         }
       };
@@ -3378,13 +3378,13 @@ function visibleStartPageHtml() {
   <style>
     :root {
       color-scheme: dark;
-      --bg: #11100f;
-      --panel: #171716;
-      --line: #302f2b;
-      --text: #f4f0e7;
-      --muted: #a7a199;
-      --accent: #47c797;
-      --accent-strong: #73e0b8;
+      --bg: #000000;
+      --panel: #0a0e10;
+      --line: #1a2a30;
+      --text: #e8f4f8;
+      --muted: #7a919c;
+      --accent: #00d4ff;
+      --accent-strong: #67e8f9;
       --error: #ff8b7f;
     }
     * {
@@ -3396,7 +3396,7 @@ function visibleStartPageHtml() {
       display: grid;
       place-items: center;
       padding: 40px;
-      background: linear-gradient(180deg, #11100f 0%, #101315 100%);
+      background: linear-gradient(180deg, #000000 0%, #050a0c 100%);
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
@@ -3429,7 +3429,7 @@ function visibleStartPageHtml() {
       outline: 0;
       border-radius: 10px;
       padding: 0 14px;
-      background: #100f0e;
+      background: #05080a;
       color: var(--text);
       font: inherit;
     }
@@ -3445,7 +3445,7 @@ function visibleStartPageHtml() {
       border-radius: 999px;
       padding: 0 22px;
       background: var(--accent);
-      color: #07100c;
+      color: #001018;
       font: inherit;
       font-weight: 720;
       cursor: pointer;
@@ -3467,8 +3467,8 @@ function visibleStartPageHtml() {
         --line: #d8d8d5;
         --text: #1c1c1b;
         --muted: #6d6d68;
-        --accent: #2b9f7e;
-        --accent-strong: #24896d;
+        --accent: #0891b2;
+        --accent-strong: #0e7490;
         --error: #a92f2a;
       }
       body { background: #f7f7f6; }

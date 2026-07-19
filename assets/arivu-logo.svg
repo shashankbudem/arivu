@@ -1,32 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
   <title id="title">Arivu logo</title>
-  <desc id="desc">A rounded square teal and gold mark with a stylized A and command cursor.</desc>
+  <desc id="desc">A rounded square black and cyan mark with a stylized A and command cursor.</desc>
   <defs>
     <linearGradient id="bg" x1="36" y1="28" x2="226" y2="224" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#2bbf9f" />
-      <stop offset="0.58" stop-color="#35dbc0" />
-      <stop offset="1" stop-color="#e5b95c" />
+      <stop offset="0" stop-color="#00a8d4" />
+      <stop offset="0.5" stop-color="#00d4ff" />
+      <stop offset="1" stop-color="#67e8f9" />
     </linearGradient>
     <linearGradient id="shade" x1="50" y1="36" x2="208" y2="222" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#07110f" stop-opacity="0" />
-      <stop offset="1" stop-color="#07110f" stop-opacity="0.24" />
+      <stop offset="0" stop-color="#000000" stop-opacity="0" />
+      <stop offset="1" stop-color="#000000" stop-opacity="0.24" />
     </linearGradient>
     <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#06100e" flood-opacity="0.32" />
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.32" />
     </filter>
   </defs>
-  <rect width="256" height="256" rx="54" fill="#11100f" />
+  <rect width="256" height="256" rx="54" fill="#000000" />
   <rect x="22" y="22" width="212" height="212" rx="45" fill="url(#bg)" filter="url(#softShadow)" />
   <rect x="22" y="22" width="212" height="212" rx="45" fill="url(#shade)" />
   <path
     d="M72 165.5 119.7 71c3.3-6.6 12.7-6.7 16.2-.2l50.5 94.7c3.2 6-.9 13.3-7.6 13.3h-14.6c-3.3 0-6.3-1.9-7.8-4.8l-8.7-17.6h-51l-8.1 17.3c-1.4 3.1-4.5 5.1-7.9 5.1H79.8c-6.5 0-10.7-6.9-7.8-12.8Zm37.1-36.2h25.8l-13.3-27.8-12.5 27.8Z"
-    fill="#07110f"
+    fill="#000000"
   />
   <path
     d="M83.4 97.7 59.2 76.4a8.5 8.5 0 0 1-.7-12l5.8-6.6a8.5 8.5 0 0 1 12-.8l35.9 31.6a8.5 8.5 0 0 1 0 12.8L76.3 133a8.5 8.5 0 0 1-12-.8l-5.8-6.6a8.5 8.5 0 0 1 .7-12l24.2-21.3Z"
-    fill="#07110f"
+    fill="#000000"
     opacity="0.9"
   />
-  <rect x="142" y="188" width="55" height="13" rx="6.5" fill="#07110f" opacity="0.92" />
+  <rect x="142" y="188" width="55" height="13" rx="6.5" fill="#000000" opacity="0.92" />
   <path d="M59 45c16-11 48-15 79-12 38 4 62 20 75 42" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" opacity="0.22" />
 </svg>

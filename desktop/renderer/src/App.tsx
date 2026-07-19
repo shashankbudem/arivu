@@ -5156,7 +5156,8 @@ function CodeBlock({ code, language, theme }: { code: string; language: string; 
 
 async function highlightCode(code: string, language: string, theme: ThemeMode) {
   const { codeToHtml } = await import("shiki");
-  const shikiTheme = theme === "light" ? "github-light" : "github-dark";
+  // vitesse-black: pure black canvas; min-light for light mode. CSS forces brand chrome.
+  const shikiTheme = theme === "light" ? "min-light" : "vitesse-black";
   try {
     return await codeToHtml(code, { lang: language || "text", theme: shikiTheme });
   } catch {

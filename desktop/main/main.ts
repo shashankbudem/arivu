@@ -3277,7 +3277,7 @@ function createWindow() {
     minWidth: 1040,
     minHeight: 720,
     title: "Arivu",
-    backgroundColor: "#11100f",
+    backgroundColor: "#000000",
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
