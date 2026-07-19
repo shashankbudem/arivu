@@ -5122,13 +5122,8 @@ function CodeBlock({ code, language, theme }: { code: string; language: string; 
 }
 
 async function highlightCode(code: string, language: string, theme: ThemeMode) {
-  const { codeToHtml } = await import("shiki");
-  const shikiTheme = theme === "light" ? "min-light" : "vitesse-black";
-  try {
-    return await codeToHtml(code, { lang: language || "text", theme: shikiTheme });
-  } catch {
-    return codeToHtml(code, { lang: "text", theme: shikiTheme });
-  }
+  const { highlightCodeHtml } = await import("./highlight");
+  return highlightCodeHtml(code, language || "text", theme === "light" ? "min-light" : "vitesse-black");
 }
 
 function languageLabel(language: string) {
