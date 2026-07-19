@@ -37,6 +37,7 @@ import {
   Info,
   LayoutDashboard,
   ListChecks,
+  LoaderCircle,
   MessageSquare,
   MoreHorizontal,
   Moon,
@@ -3243,7 +3244,7 @@ export function App() {
                 )}
                 {busy ? (
                   <div className={agentLoopRunning ? "agent-thinking loop-active" : "agent-thinking"} role="status" aria-live="polite">
-                    <span className="pulse-dot" />
+                    <LoaderCircle className="agent-working-spinner" size={16} aria-hidden="true" />
                     <span className="agent-thinking-label">
                       {agentLoopRunning && activeAgentLoop ? agentLoopLabel : "Agent is working"}
                     </span>
@@ -4889,7 +4890,7 @@ function HistoryView({
               <div className="history-main">
                 <strong>{session.title}</strong>
                 {session.pinnedAt ? <Pin className="chat-pin-indicator" size={12} aria-label="Pinned chat" /> : null}
-                {session.running ? <span className="chat-loading-dot" title="Response loading" aria-label="Response loading" /> : null}
+                {session.running ? <ChatRunningIndicator /> : null}
               </div>
               <div className="history-details">
                 <span>{formatDateTime(session.updatedAt)}</span>
@@ -4948,7 +4949,7 @@ function SidebarChatItem({
         <div className="recent-chat-main">
           <strong>{session.title}</strong>
           {session.pinnedAt ? <Pin className="chat-pin-indicator" size={11} aria-label="Pinned chat" /> : null}
-          {session.running ? <span className="chat-loading-dot" title="Response loading" aria-label="Response loading" /> : null}
+          {session.running ? <ChatRunningIndicator /> : null}
         </div>
         <div className="recent-chat-details">
           <span>{formatDateTime(session.updatedAt)}</span>
@@ -4968,6 +4969,14 @@ function SidebarChatItem({
         onDelete={onDelete}
       />
     </div>
+  );
+}
+
+function ChatRunningIndicator() {
+  return (
+    <span className="chat-running-indicator" role="status" title="Agent is running" aria-label="Agent is running">
+      <LoaderCircle size={12} aria-hidden="true" />
+    </span>
   );
 }
 
