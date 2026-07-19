@@ -17,6 +17,7 @@ import {
   type ConfigKey
 } from "./config.js";
 import { runDoctor, type DoctorReport, type DoctorStatus } from "./diagnostics/doctor.js";
+import { terminalElicit } from "./tools/elicitation.js";
 import { ModelCatalogStore } from "./models/ModelCatalogStore.js";
 import { resolveContextWindowTokens } from "./models/contextResolver.js";
 import type { ModelCatalog } from "./models/modelCatalogSchema.js";
@@ -410,6 +411,8 @@ async function runOneShot(task: string, config: AppConfig) {
     tavilyApiKey: config.tavilyApiKey,
     mcpServers: config.mcpServers,
     scopePolicyRules,
+    // Interactive terminal sessions can answer structured ask_user questions inline.
+    elicit: terminalElicit,
     // Per-model window from the catalog, capped by any hand-entered provider value.
     contextWindowTokens: resolveContextWindowTokens(config, { model: config.model, baseUrl: config.baseUrl }, await catalogStore.load()),
     onContextWindowObserved: (tokens) => recordContextFromRuntime(catalogStore, { baseUrl: config.baseUrl, model: config.model }, tokens)

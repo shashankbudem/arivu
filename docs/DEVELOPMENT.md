@@ -190,6 +190,15 @@ MCP tools check:
 3. Save settings.
 4. Ask the agent to call `mcp_list_tools` and inspect the Activity panel.
 
+Runtime self-management check:
+
+1. Configure a primary Browser task model and at least two ordered fallbacks in Settings, then save and reopen the Browser section to confirm order and provider/model values persist.
+2. Ask Arivu to inspect its runtime. Confirm `arivu_runtime_status` exposes sanitized endpoints, candidate ids, effective disabled tools, and protected control tools without API keys, URL credentials, query strings, or fragments.
+3. Ask Arivu to switch to a fallback for this run, then call `browser_task`. Confirm the delegated task receives that model while saved Settings remain unchanged.
+4. Repeat with session scope and send a second prompt in the same chat. Confirm the selected browser model remains active only for that chat session.
+5. Ask Arivu to disable a normal tool for the run and confirm it is unavailable on the next model step. Confirm attempts to disable `ask_user` or an `arivu_*` tool fail, and a tool disabled in saved Settings cannot be re-enabled through runtime control.
+6. Ask Arivu to add an MCP capability. Confirm Settings > Integrations shows a pending proposal containing command, arguments, requested environment-variable names, and reason. Dismiss it once; then create another and choose Add disabled. Confirm the MCP JSON receives a unique disabled server entry with blank credential placeholders and no process starts before review.
+
 With NVIDIA-style OpenAI-compatible endpoints, batch/fallback requests should omit `stream`; only streaming requests should send `stream: true`. Assistant tool-call history with no text should serialize as `content: null`, not `content: ""`, and blank assistant history messages without tool calls should be omitted from provider payloads. If a model/provider rejects tool payloads or empty assistant tool-call content, the client should retry without tools and convert tool history into plain-text transcript entries.
 
 For image-capable models, desktop image prompts should serialize as OpenAI-compatible text and `image_url` content parts. When `imageInput` is `disabled`, multimodal prompts should fail before sending a provider request. When an auto-mode provider rejects `image_url` content parts, desktop should save that provider's Image input mode as Disabled. Proactive multimodal provider capability probing is not implemented, so use a model endpoint that is known to accept image content when testing attachments.
@@ -231,6 +240,15 @@ ARIVU_BROWSER_SMOKE=1 ./node_modules/.bin/electron dist-desktop/main/main.js
 
 Browser smoke mode opens the visible browser window and exercises the native browser release path end to end. It verifies normal tabs, popup adoption and self-close cleanup, nonblank tab screenshots, shell tab cycling, scaled 4K device emulation, region annotation handoff to the Arivu composer, visible/background tab transfer, the categorized load-error page, and the expanded Settings surface. It prints tab ids plus page, shell, and review screenshot paths, then exits nonzero on any failed assertion.
 
+Benchmarks (scenarios captured from dev/test sessions, scored against the real model):
+
+```bash
+npm run bench -- list
+npm run bench -- run coding-fix-failing-test
+```
+
+See `BENCHMARKS.md` for the capture workflow, the automated browser bench entry (`ARIVU_BENCH_TASK`), and the live-site policy.
+
 Desktop workflows to check manually after UI changes:
 
 - Startup and `New chat` start with no project selected.
@@ -260,8 +278,12 @@ Desktop workflows to check manually after UI changes:
 - Recent workspace rows mark missing folders and expose a forget action that moves those saved chats to standalone history instead of deleting them.
 - `Compact context` summarizes older saved messages locally, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.
-- Browser tools appear in the Tools drawer in desktop mode. Verify `browser_state`, `browser_select_tab`, `browser_open`, `browser_snapshot`, `browser_console`, `browser_screenshot`, `browser_click`, and `browser_type` are listed with hidden-browser status.
+- Confirm the Tools drawer lists `arivu_runtime_status`, `arivu_set_tool_state`, `arivu_select_browser_model`, and `arivu_propose_mcp_server`; control-boundary tools must remain enabled even when other tools are runtime-disabled.
+- Browser tools appear in the Tools drawer in desktop mode. Verify `browser_state`, `browser_select_tab`, `browser_open`, `browser_snapshot`, `browser_console`, `browser_screenshot`, `browser_click`, `browser_type`, and `browser_execute_javascript` are listed with hidden-browser status.
+- Ask the agent to run `browser_execute_javascript` with a script that returns a plain value (confirm it comes back as the actual result, not a stringified duplicate) and with one that throws (confirm a clean `ok:false` error, not a raw tool failure). Try a script with a blocking `while(true){}` loop: confirm the tool call itself returns a timeout message within ~15s and that the tab still recovers after a reload.
+- Run a `browser_task` on a page with an unfamiliar control and confirm the in-page agent's activity trace shows it calling `search_web` when stuck rather than repeating the same failed interaction indefinitely. Confirm the search still succeeds with no Tavily key configured (Bing RSS fallback) and that revoking/expiring the task's proxy token also cuts off search, not just the LLM calls.
 - In Settings, choose a Browser task LLM provider and open the Browser task model picker. Confirm it loads models from that provider, excludes the chat-only `Auto` choice, supports search and manual model IDs, and the reset icon returns to the provider's default model.
+- Add, reorder, and remove Browser task fallbacks. Confirm each row can use a different configured provider, model search stays provider-specific, manual model ids work, and no more than five fallbacks can be saved.
 - Open prompt options and select Browser LLM; confirm the same picker opens above the composer. Verify `/browsermodel` opens it and `/browsermodel <model-id>` pins the exact model without sending a chat prompt.
 - Set browser task max loops and loop delay in Settings, save, reopen Settings, and confirm both values persist. Blank values should restore the 100-loop and 35000-ms defaults; delay values above 120000 ms must be rejected by the input/schema boundary.
 - Exercise a browser-task provider that returns a temporary 429/503 and confirm bounded backoff occurs inside the proxy. On a terminal failure, confirm Activity preserves the model/provider, trace, stop reason, and endpoint diagnostics and that an immediate retry is stopped by the model-specific circuit.
@@ -345,6 +367,7 @@ When adding or changing a tool:
 - Keep read-only local context tools side-effect-free and approval-free.
 - Keep `list_skills` and `read_skill` read-only; skills should be discovered from the global app data skills directory or `ARIVU_SKILLS_HOME`.
 - Treat MCP tools as configured external processes. `mcp_list_tools` is discovery; `mcp_call_tool` may perform whatever the selected MCP server implements.
+- Keep runtime self-management bounded: run/session model and tool changes may reference only registered candidates/tools; persistent saved settings and executable MCP activation must remain behind explicit user review.
 - Treat web tools as external data transmission; do not send secrets, private source, or personal data in search queries.
 - Treat browser tools as rendered-page access. Keep page content untrusted, use hidden isolated browser sessions by default, and prefer Chrome DevTools MCP for visual screenshots or deeper debugging when it is configured.
 - `browser_task` accepts integer-looking strings for `maxSteps` and `timeoutMs` because some OpenAI-compatible models serialize numeric tool arguments as strings. Nonnumeric strings, out-of-range values, and sensitive boolean arguments remain strictly validated.

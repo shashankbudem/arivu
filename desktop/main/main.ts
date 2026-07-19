@@ -98,7 +98,8 @@ import {
   workspaceScopeRulesForRoot,
   type AppConfig,
   type BrowserTaskModelConfigProfile,
-  type LlmProviderProfile
+  type LlmProviderProfile,
+  type McpToolProposal
 } from "../../src/config.js";
 import { resolveBrowserTaskContextWindowTokens, resolveBrowserTaskModel } from "../../src/agent/browserTaskModel.js";
 import { ModelCatalogStore } from "../../src/models/ModelCatalogStore.js";
@@ -118,18 +119,25 @@ import { SessionStore } from "../../src/sessions/SessionStore.js";
 import { detachSessionFromProject, sessionBelongsToProject, sessionProjectRoot } from "../../src/sessions/sessionList.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 import { createToolRegistry } from "../../src/tools/registry.js";
+import type { RuntimeMcpServerProposalInput, RuntimeMcpServerProposalResult } from "../../src/tools/runtimeControl.js";
 import type { BrowserMode, BrowserState, BrowserTaskModelConfig } from "../../src/tools/browserControl.js";
+import type { ElicitationRequest, ElicitationResponse } from "../../src/tools/elicitation.js";
 import { detectWorkspace, type WorkspaceInfo } from "../../src/workspace.js";
 import { DesktopBrowserController } from "./browserController.js";
+import { RuntimeControlService } from "./runtimeControlService.js";
 import { isExternalHttpUrl, isTrustedAppNavigationUrl } from "./navigationSafety.js";
+import { installProcessOutputPipeGuards } from "./outputPipeGuard.js";
+
+installProcessOutputPipeGuards();
 
 const PLAN_MODE_TOOL_NAMES = ["list", "read", "search", "git_status", "current_datetime", "current_location", "list_skills", "read_skill"];
 const MAX_CONTEXT_FILE_ATTACHMENTS = 6;
 const MAX_CONTEXT_FILE_BYTES = 256 * 1024;
 const MAX_CONTEXT_FILE_CHARS = 24_000;
 
-type PublicBrowserTaskModelProfile = Omit<BrowserTaskModelConfigProfile, "apiKey"> & {
+type PublicBrowserTaskModelProfile = Omit<BrowserTaskModelConfigProfile, "apiKey" | "fallbackModels"> & {
   apiKeyPresent: boolean;
+  fallbackModels?: PublicBrowserTaskModelProfile[];
 };
 
 type PublicConfig = {
@@ -147,6 +155,7 @@ type PublicConfig = {
   workspacePolicies: AppConfig["workspacePolicies"];
   workspacePolicyProfiles: AppConfig["workspacePolicyProfiles"];
   disabledTools: string[];
+  toolProposals: McpToolProposal[];
 };
 
 type DesktopState = {
@@ -322,9 +331,17 @@ type ConfigPatch = {
   workspacePolicies?: AppConfig["workspacePolicies"];
   workspacePolicyProfiles?: AppConfig["workspacePolicyProfiles"];
   /** Settings-managed browser_task model override; null clears it back to "follow the chat model". */
-  browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
+  browserTaskModel?: {
+    providerId?: string;
+    model?: string;
+    maxSteps?: number;
+    stepDelayMs?: number;
+    fallbackModels?: Array<{ providerId?: string; model?: string }>;
+  } | null;
   /** Full replacement list of tool names withheld from the agent; [] re-enables everything. */
   disabledTools?: string[];
+  /** Review-only MCP server proposals. They cannot execute until the user adds them to mcpServers. */
+  toolProposals?: McpToolProposal[];
 };
 
 type PublicLlmProviderProfile = Omit<LlmProviderProfile, "apiKey"> & {
@@ -387,6 +404,7 @@ const MODEL_LIST_BODY_LIMIT_BYTES = 256 * 1024;
 const WORKSPACE_POLICY_BUNDLE_MAX_BYTES = 64 * 1024;
 let mainWindow: BrowserWindow | undefined;
 const pendingApprovals = new Map<string, (approved: boolean) => void>();
+const pendingElicitations = new Map<string, (response: ElicitationResponse) => void>();
 const browserController = new DesktopBrowserController();
 // Read-only here: the scheduled `arivu models sync` CLI is the only writer, except for
 // recordContextFromRuntime, which latches a window the provider itself just reported.
@@ -411,7 +429,11 @@ class DesktopController {
   private readonly runningSessionIds = new Set<string>();
   private readonly loopStopRequests = new Set<string>();
   private readonly runAbortControllers = new Map<string, AbortController>();
+  /** Lets the headless bench entry await a run that sendPrompt intentionally fire-and-forgets. */
+  private readonly runCompletions = new Map<string, Promise<void>>();
   private readonly modelListCache = new Map<string, { models: string[]; fetchedAt: number }>();
+  private readonly sessionDisabledTools = new Map<string, Set<string>>();
+  private readonly sessionBrowserModelOverrides = new Map<string, BrowserTaskModelConfig>();
   private activeViewRevision = 0;
   private cwd: string;
   private projectRoot: string | null;
@@ -677,6 +699,8 @@ class DesktopController {
     }
     await this.store.delete(id);
     await rm(path.join(appDataDir(), "checkpoints", id), { recursive: true, force: true });
+    this.sessionDisabledTools.delete(id);
+    this.sessionBrowserModelOverrides.delete(id);
     if (this.session?.id === id) {
       this.session = undefined;
       this.markActiveViewChanged();
@@ -1290,6 +1314,9 @@ class DesktopController {
     if (patch.disabledTools !== undefined) {
       next.disabledTools = normalizeDisabledTools(patch.disabledTools);
     }
+    if (patch.toolProposals !== undefined) {
+      next.toolProposals = patch.toolProposals;
+    }
     if (activeProviderId && next.providers?.some((provider) => provider.id === activeProviderId)) {
       next.providers = updateProviderRuntime(next.providers, activeProviderId, patch);
       if (patch.activeProviderId !== undefined || patch.providers) {
@@ -1361,16 +1388,50 @@ class DesktopController {
     const workspace = await detectWorkspace(this.cwd);
     const policyOverrides = workspacePolicyOverridesForRoot(config, workspace.root);
     const scopePolicyRules = workspaceScopeRulesForRoot(config, workspace.root);
+    const activeProvider = config.providers.find((provider) => provider.id === config.activeProviderId);
+    const chatModel: ModelSelection = {
+      mode: "manual",
+      model: config.model,
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      toolCalling: config.toolCalling,
+      imageInput: config.imageInput,
+      providerId: config.activeProviderId,
+      providerName: activeProvider?.name ?? "Active provider",
+      task: "general",
+      reason: "Current saved model"
+    };
+    const configuredBrowserTaskModel = resolveBrowserTaskModel(config, chatModel);
+    const sessionId = this.session?.id;
+    const sessionDisabledTools = sessionId ? (this.sessionDisabledTools.get(sessionId) ?? new Set<string>()) : new Set<string>();
+    if (sessionId) {
+      this.sessionDisabledTools.set(sessionId, sessionDisabledTools);
+    }
+    const runtimeControl = new RuntimeControlService({
+      configuredBrowserTaskModel,
+      activeBrowserTaskModel: (sessionId ? this.sessionBrowserModelOverrides.get(sessionId) : undefined) ?? configuredBrowserTaskModel,
+      readSavedDisabledTools: createDisabledToolsReader(config.disabledTools ?? []),
+      sessionDisabledTools,
+      onSessionBrowserModelChange: (model) => {
+        if (sessionId) {
+          this.sessionBrowserModelOverrides.set(sessionId, model);
+        }
+      },
+      onProposeMcpServer: (input) => this.proposeMcpServer(input)
+    });
     const registry = createToolRegistry({
       workspaceRoot: workspace.root,
       approvals: new ApprovalManager(config.trustMode, async () => false, policyOverrides, undefined, scopePolicyRules, workspace.root),
       tavilyApiKey: config.tavilyApiKey,
       mcpServers: config.mcpServers,
       scopePolicyRules,
-      browser: browserController
+      browser: browserController,
+      browserTaskModel: configuredBrowserTaskModel,
+      runtimeControl
     });
+    runtimeControl.setAvailableToolNames(registry.schemas.map((schema) => schema.name));
 
-    const disabledTools = new Set(config.disabledTools ?? []);
+    const disabledTools = new Set(await runtimeControl.disabledToolNames());
     return {
       tools: registry.schemas.map((schema) => ({
         name: schema.name,
@@ -1418,6 +1479,42 @@ class DesktopController {
     };
   }
 
+  async proposeMcpServer(input: RuntimeMcpServerProposalInput): Promise<RuntimeMcpServerProposalResult> {
+    const saved = await loadConfig({ includeEnv: false });
+    const normalized = normalizeMcpServerProposalInput(input);
+    const existing = (saved.toolProposals ?? []).find(
+      (proposal) =>
+        proposal.name.toLowerCase() === normalized.name.toLowerCase() &&
+        proposal.command === normalized.command &&
+        JSON.stringify(proposal.args) === JSON.stringify(normalized.args)
+    );
+    if (existing) {
+      return {
+        id: existing.id,
+        name: existing.name,
+        status: "pending_review",
+        reviewLocation: "Settings > Integrations"
+      };
+    }
+
+    const proposal: McpToolProposal = {
+      id: randomUUID(),
+      kind: "mcp_server",
+      ...normalized,
+      createdAt: new Date().toISOString()
+    };
+    await saveConfig({
+      ...saved,
+      toolProposals: [proposal, ...(saved.toolProposals ?? [])].slice(0, 20)
+    });
+    return {
+      id: proposal.id,
+      name: proposal.name,
+      status: "pending_review",
+      reviewLocation: "Settings > Integrations"
+    };
+  }
+
   async sendPrompt(prompt: PromptPayload, eventTarget?: WebContents) {
     const content = normalizePromptPayload(prompt);
     const skillNames = normalizePromptSkillNames(prompt);
@@ -1462,6 +1559,9 @@ class DesktopController {
       browserTaskModel,
       modelCatalog
     );
+    for (const fallbackModel of browserTaskModel.fallbacks ?? []) {
+      fallbackModel.contextWindowTokens = resolveBrowserTaskContextWindowTokens(baseConfig, modelSelection, fallbackModel, modelCatalog);
+    }
     const now = new Date().toISOString();
     const session = applyModelSelectionToSession(
       originSession
@@ -1654,7 +1754,7 @@ class DesktopController {
     this.runningSessionIds.add(session.id);
     await this.sendSessionLifecycleEvent("started", session);
 
-    void this.runPromptInBackground({
+    const runPromise = this.runPromptInBackground({
       session,
       content,
       skillNames,
@@ -1667,6 +1767,12 @@ class DesktopController {
       executionCwd,
       eventTarget
     });
+    this.runCompletions.set(session.id, runPromise);
+    void runPromise.finally(() => {
+      if (this.runCompletions.get(session.id) === runPromise) {
+        this.runCompletions.delete(session.id);
+      }
+    });
 
     return {
       output: "",
@@ -1677,6 +1783,40 @@ class DesktopController {
       agentLoop: session.agentLoop,
       taskRuns: session.taskRuns,
       running: true
+    };
+  }
+
+  /**
+   * Headless bench entry (ARIVU_BENCH_TASK): the full sendPrompt path — model routing, task-run
+   * bookkeeping, browser tools — awaited to completion. Runs under an isolated data home, so the
+   * benchmark runner reads the one resulting session for metrics. Requires trustMode "trusted" in
+   * the seeded config: there is no renderer to answer approval prompts.
+   */
+  async runBenchPrompt(text: string): Promise<{
+    sessionId: string;
+    success: boolean;
+    output: string;
+    stopReason?: string;
+    error?: string;
+  }> {
+    const snapshot = await this.sendPrompt(text);
+    const sessionId = snapshot.sessionId;
+    await (this.runCompletions.get(sessionId) ?? Promise.resolve());
+    const session = await this.store.load(sessionId);
+    const lastRun = session.taskRuns?.[session.taskRuns.length - 1];
+    const lastAssistant = [...session.messages]
+      .reverse()
+      .find((message) => message.role === "assistant" && typeof message.content === "string" && message.content.trim().length > 0);
+    const browserTask = lastRun?.artifacts
+      ?.map((artifact) => artifact.browserTask)
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+      .at(-1);
+    return {
+      sessionId,
+      success: lastRun ? lastRun.status === "completed" : true,
+      output: typeof lastAssistant?.content === "string" ? lastAssistant.content : "",
+      stopReason: browserTask?.stopReason,
+      error: lastRun?.error
     };
   }
 
@@ -1718,6 +1858,18 @@ class DesktopController {
     );
     // Only checkpoint direct workspace runs; worktree runs are isolated and reverted via git instead.
     const checkpoint = executionCwd === undefined ? new ChangeCheckpoint() : undefined;
+    const savedDisabledTools = createDisabledToolsReader(config.disabledTools ?? []);
+    const sessionDisabledTools = this.sessionDisabledTools.get(session.id) ?? new Set<string>();
+    this.sessionDisabledTools.set(session.id, sessionDisabledTools);
+    const activeBrowserTaskModel = this.sessionBrowserModelOverrides.get(session.id) ?? browserTaskModel;
+    const runtimeControl = new RuntimeControlService({
+      configuredBrowserTaskModel: browserTaskModel,
+      activeBrowserTaskModel,
+      readSavedDisabledTools: savedDisabledTools,
+      sessionDisabledTools,
+      onSessionBrowserModelChange: (model) => this.sessionBrowserModelOverrides.set(session.id, model),
+      onProposeMcpServer: (input) => this.proposeMcpServer(input)
+    });
     const agent = new Agent({
       client: new OpenAICompatibleChatClient({
         ...config,
@@ -1739,7 +1891,9 @@ class DesktopController {
       mcpServers: config.mcpServers,
       scopePolicyRules: scopeRules,
       browser: browserController,
-      browserTaskModel,
+      browserTaskModel: activeBrowserTaskModel,
+      runtimeControl,
+      elicit: (request) => requestElicitation(request),
       directEditReview: executionCwd === undefined,
       contextWindowTokens: config.contextWindowTokens,
       // Free, always-fresh coverage of the active model: the scheduled sync only sweeps it on
@@ -1754,7 +1908,7 @@ class DesktopController {
     const abortController = new AbortController();
     this.runAbortControllers.set(session.id, abortController);
     const onUsage = (usage: ChatUsage) => this.recordTaskRunUsage(session, taskRunId, usage);
-    const disabledToolNames = createDisabledToolsReader(config.disabledTools ?? []);
+    const disabledToolNames = () => runtimeControl.disabledToolNames();
     try {
       this.markTaskRun(session, taskRunId, "running");
       const result = loopEnabled
@@ -2669,7 +2823,8 @@ function toPublicConfig(config: AppConfig): PublicConfig {
     mcpServers: redactMcpServers(config.mcpServers),
     workspacePolicies: config.workspacePolicies,
     workspacePolicyProfiles: config.workspacePolicyProfiles,
-    disabledTools: config.disabledTools ?? []
+    disabledTools: config.disabledTools ?? [],
+    toolProposals: config.toolProposals ?? []
   };
 }
 
@@ -2687,19 +2842,30 @@ function toPublicProvider(provider: LlmProviderProfile): PublicLlmProviderProfil
 }
 
 function toPublicBrowserTaskModel(profile: BrowserTaskModelConfigProfile): PublicBrowserTaskModelProfile {
-  const { apiKey, ...rest } = profile;
-  return { ...rest, apiKeyPresent: Boolean(apiKey) };
+  const { apiKey, fallbackModels, ...rest } = profile;
+  return {
+    ...rest,
+    apiKeyPresent: Boolean(apiKey),
+    fallbackModels: fallbackModels?.map((fallback) => toPublicBrowserTaskModel(fallback))
+  };
 }
 
 /**
  * Merges a settings-managed browser_task model patch onto the saved profile. The settings UI
- * manages providerId/model/maxSteps/stepDelayMs; hand-configured fields (apiKey, baseUrl) in
- * the config file are preserved. `null` clears the whole override so browser_task follows the
- * chat model again; a profile with nothing left set collapses to undefined for the same reason.
+ * manages providerId/model/maxSteps/stepDelayMs and the ordered fallback list; hand-configured
+ * fields (apiKey, baseUrl) are preserved when a fallback still matches the same provider/model.
+ * `null` clears the whole override so browser_task follows the chat model again; a profile with
+ * nothing left set collapses to undefined for the same reason.
  */
 function mergeBrowserTaskModelPatch(
   saved: BrowserTaskModelConfigProfile | undefined,
-  patch: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null
+  patch: {
+    providerId?: string;
+    model?: string;
+    maxSteps?: number;
+    stepDelayMs?: number;
+    fallbackModels?: Array<{ providerId?: string; model?: string }>;
+  } | null
 ): BrowserTaskModelConfigProfile | undefined {
   if (patch === null) {
     return undefined;
@@ -2709,9 +2875,32 @@ function mergeBrowserTaskModelPatch(
     providerId: patch.providerId?.trim() || undefined,
     model: patch.model?.trim() || undefined,
     maxSteps: sanitizeSettingsInt(patch.maxSteps, 1, 200),
-    stepDelayMs: sanitizeSettingsInt(patch.stepDelayMs, 0, 120_000)
+    stepDelayMs: sanitizeSettingsInt(patch.stepDelayMs, 0, 120_000),
+    fallbackModels:
+      patch.fallbackModels === undefined ? saved?.fallbackModels : mergeBrowserFallbackModels(saved?.fallbackModels, patch.fallbackModels)
   };
   return Object.values(merged).some((value) => value !== undefined) ? merged : undefined;
+}
+
+function mergeBrowserFallbackModels(
+  saved: BrowserTaskModelConfigProfile["fallbackModels"],
+  patch: Array<{ providerId?: string; model?: string }>
+): BrowserTaskModelConfigProfile["fallbackModels"] {
+  const merged = patch
+    .slice(0, 5)
+    .map((candidate) => ({
+      providerId: candidate.providerId?.trim() || undefined,
+      model: candidate.model?.trim() || undefined
+    }))
+    .filter((candidate) => candidate.providerId || candidate.model)
+    .map((candidate) => {
+      const matchingSaved = saved?.find((item) => item.providerId === candidate.providerId && item.model === candidate.model);
+      return {
+        ...matchingSaved,
+        ...candidate
+      };
+    });
+  return merged.length > 0 ? merged : undefined;
 }
 
 function sanitizeSettingsInt(value: number | undefined, min: number, max: number): number | undefined {
@@ -2723,6 +2912,33 @@ function sanitizeSettingsInt(value: number | undefined, min: number, max: number
 
 function normalizeDisabledTools(names: string[]): string[] {
   return [...new Set(names.map((name) => name.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+function normalizeMcpServerProposalInput(input: RuntimeMcpServerProposalInput): Omit<McpToolProposal, "id" | "kind" | "createdAt"> {
+  const name = input.name.trim().replace(/\s+/g, " ");
+  const command = input.command.trim();
+  const reason = input.reason.trim();
+  if (!name || name.length > 80) {
+    throw new Error("MCP proposal name must be between 1 and 80 characters.");
+  }
+  if (!command || command.length > 500) {
+    throw new Error("MCP proposal command must be between 1 and 500 characters.");
+  }
+  if (!reason || reason.length > 1_000) {
+    throw new Error("MCP proposal reason must be between 1 and 1000 characters.");
+  }
+  const envKeys = [...new Set(input.envKeys.map((key) => key.trim()).filter(Boolean))];
+  if (envKeys.some((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))) {
+    throw new Error("MCP proposal environment keys must be variable names, not secret values.");
+  }
+  return {
+    name,
+    description: input.description.trim().slice(0, 500),
+    command,
+    args: input.args.slice(0, 40).map((arg) => arg.slice(0, 500)),
+    envKeys: envKeys.slice(0, 40),
+    reason
+  };
 }
 
 /**
@@ -3105,6 +3321,26 @@ function requestApproval(message: string, request?: ApprovalPromptRequest): Prom
   });
 }
 
+function requestElicitation(request: ElicitationRequest): Promise<ElicitationResponse> {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve({ status: "unavailable", note: "The desktop window is not available." });
+  }
+  const id = randomUUID();
+  mainWindow.webContents.send("elicitation:request", { id, request });
+  // Focus etiquette: a pending question signals politely and waits — it never surfaces or
+  // focuses the window itself. The user comes to it.
+  if (process.platform === "darwin" && !BrowserWindow.getFocusedWindow()) {
+    try {
+      app.dock?.bounce("informational");
+    } catch {
+      // Dock signaling is decorative.
+    }
+  }
+  return new Promise((resolve) => {
+    pendingElicitations.set(id, resolve);
+  });
+}
+
 function normalizeScaffoldOptions(options: WorkspaceScaffoldOptions): Required<WorkspaceScaffoldOptions> {
   return {
     initGit: Boolean(options.initGit),
@@ -3311,10 +3547,60 @@ function createWindow() {
     });
   }
 
+  const benchTaskFile = appEnv("BENCH_TASK");
+  if (benchTaskFile) {
+    window.webContents.once("did-finish-load", () => {
+      console.log("bench: renderer loaded");
+      setTimeout(() => {
+        void runBenchEntry(benchTaskFile)
+          .then((code) => (code === 0 ? app.quit() : app.exit(code)))
+          .catch((error) => {
+            console.error(`bench entry failed: ${error instanceof Error ? error.message : String(error)}`);
+            app.exit(1);
+          });
+      }, 500);
+    });
+  }
+
   window.on("closed", () => {
     browserController.detach(window);
     mainWindow = undefined;
   });
+}
+
+/**
+ * Headless benchmark entry (see BENCHMARKS.md). Gated on ARIVU_BENCH_TASK like the smoke modes:
+ * reads {task, taskOptions} from the task file, runs it through the real desktop prompt path with
+ * browser tools attached, writes the outcome to ARIVU_BENCH_RESULT, and exits 0/1. The benchmark
+ * runner spawns this against an isolated ARIVU_DATA_HOME / ARIVU_CONFIG_HOME.
+ */
+async function runBenchEntry(taskFile: string): Promise<number> {
+  const resultFile = appEnv("BENCH_RESULT");
+  const writeOutcome = async (outcome: Record<string, unknown>) => {
+    if (resultFile) {
+      await writeFile(resultFile, `${JSON.stringify(outcome, null, 2)}\n`, "utf8").catch(() => undefined);
+    }
+  };
+  try {
+    const spec = JSON.parse(await readFile(taskFile, "utf8")) as { task?: string; taskOptions?: Record<string, unknown> };
+    if (!spec.task || typeof spec.task !== "string") {
+      throw new Error(`Task file ${taskFile} has no "task" string.`);
+    }
+    const prompt =
+      spec.taskOptions && Object.keys(spec.taskOptions).length > 0
+        ? `${spec.task}\n\nWhen you delegate to the browser_task tool, pass these options: ${JSON.stringify(spec.taskOptions)}`
+        : spec.task;
+    console.log(`bench: starting task (${prompt.length} chars)`);
+    const outcome = await controller.runBenchPrompt(prompt);
+    console.log(`bench: finished success=${outcome.success} stopReason=${outcome.stopReason ?? "-"} session=${outcome.sessionId}`);
+    await writeOutcome(outcome);
+    return outcome.success ? 0 : 1;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`bench: failed — ${message}`);
+    await writeOutcome({ success: false, error: message });
+    return 1;
+  }
 }
 
 function configureMainWindowNavigation(window: BrowserWindow) {
@@ -3356,6 +3642,17 @@ async function prepareDesktopSmokeView(window: BrowserWindow) {
   const smokeView = appEnv("DESKTOP_SMOKE_VIEW");
   if (smokeView !== "settings" && smokeView !== "browser-task-model") {
     return;
+  }
+  const runtimeToolsVisible = await window.webContents.executeJavaScript(
+    `window.arivu.listTools().then(({ tools }) => {
+      const names = new Set(tools.map((tool) => tool.name));
+      return ["arivu_runtime_status", "arivu_set_tool_state", "arivu_select_browser_model", "arivu_propose_mcp_server"]
+        .every((name) => names.has(name));
+    })`,
+    true
+  );
+  if (!runtimeToolsVisible) {
+    throw new Error("desktop smoke: guarded runtime controls are missing from the Tools list");
   }
   await window.webContents.executeJavaScript(`document.querySelector('button[aria-label="Settings"]')?.click()`, true);
   if (!(await waitForRendererSelector(window, '.settings-navigation [data-settings-section="models"]', 5_000))) {
@@ -3842,6 +4139,52 @@ handleFromMain("approval:respond", (_event, response: { id: string; approved: bo
   }
   pendingApprovals.delete(response.id);
   resolve(response.approved);
+});
+handleFromMain("elicitation:chooseFiles", async (_event, kind: "images" | "files") => {
+  const result = await dialog.showOpenDialog({
+    title: kind === "images" ? "Choose images" : "Choose files",
+    properties: ["openFile", "multiSelections"],
+    ...(kind === "images" ? { filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }] } : {})
+  });
+  if (result.canceled) {
+    return { files: [] };
+  }
+  const files = await Promise.all(
+    result.filePaths.map(async (filePath) => {
+      const base = { path: filePath, name: path.basename(filePath) };
+      if (kind !== "images") {
+        return base;
+      }
+      try {
+        const image = await readImageAttachment(filePath);
+        return { ...base, previewDataUrl: image.dataUrl };
+      } catch {
+        // Preview is decorative; the ordered path is the answer.
+        return base;
+      }
+    })
+  );
+  return { files };
+});
+handleFromMain("elicitation:respond", (_event, payload: { id: string; response: ElicitationResponse }) => {
+  const resolve = pendingElicitations.get(payload.id);
+  if (!resolve) {
+    return;
+  }
+  pendingElicitations.delete(payload.id);
+  // The renderer's payload crosses an IPC boundary; keep only the fields the tool consumes.
+  const response = payload.response;
+  const status = response?.status === "answered" || response?.status === "declined" ? response.status : "declined";
+  resolve({
+    status,
+    answers: Array.isArray(response?.answers)
+      ? response.answers.map((answer) => ({
+          id: String(answer?.id ?? ""),
+          value: answer?.value,
+          skipped: Boolean(answer?.skipped)
+        }))
+      : undefined
+  });
 });
 
 function handleFromMain<T extends unknown[]>(

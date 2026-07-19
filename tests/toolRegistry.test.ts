@@ -9,7 +9,8 @@ import type { WorkspaceScopePolicyRules } from "../src/permissions/scopePolicy.j
 import type { BrowserToolController } from "../src/tools/browserControl.js";
 import { ChangeCheckpoint } from "../src/tools/changeCheckpoint.js";
 import { DIRECT_EDIT_REVIEW_CHANGED_LINE_THRESHOLD } from "../src/tools/directEditReview.js";
-import { createToolRegistry } from "../src/tools/registry.js";
+import { createToolRegistry, recoverLeakedBrowserTaskMode } from "../src/tools/registry.js";
+import type { RuntimeControl } from "../src/tools/runtimeControl.js";
 
 describe("createToolRegistry", () => {
   it("includes current date/time and location tools", () => {
@@ -96,6 +97,46 @@ describe("createToolRegistry", () => {
       expect(names).not.toContain(disabled);
       await expect(registry.execute(disabled, {})).rejects.toThrow(/Unknown tool/);
     }
+    // Unlike the manual DOM tools above, browser_execute_javascript has no browser_task
+    // equivalent for the orchestrator itself, so it stays available even while they are steered
+    // away from.
+    expect(names).toContain("browser_execute_javascript");
+  });
+
+  it("runs browser_execute_javascript and returns the wrapped result", async () => {
+    const browser = createFakeBrowser();
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser
+    });
+
+    const result = JSON.parse(await registry.execute("browser_execute_javascript", { script: "return 1 + 1;" })) as Record<
+      string,
+      unknown
+    >;
+    expect(result.action).toBe("execute_javascript");
+    expect(result.ok).toBe(true);
+    expect(result.result).toBe("ran: return 1 + 1;");
+  });
+
+  it("allows browser_execute_javascript in readonly mode without prompting, like other browser actions", async () => {
+    // browser_control has no risky-escalation rule in the capability policy table (unlike
+    // run_command/network_fetch), so destructive:true here does not force a prompt under the
+    // default policy — it only participates if a workspace policy override later escalates
+    // browser actions. This matches every other browser_* tool's approval posture today.
+    let prompted = false;
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("readonly", async () => {
+        prompted = true;
+        return false;
+      }),
+      browser: createFakeBrowser()
+    });
+
+    await expect(registry.execute("browser_execute_javascript", { script: "return 1;" })).resolves.toMatch(/"ok": true/);
+    expect(prompted).toBe(false);
   });
 
   it("allows browser actions in readonly mode without prompting", async () => {
@@ -128,6 +169,96 @@ describe("createToolRegistry", () => {
     expect(withBrowser.schemas.map((schema) => schema.name)).toContain("browser_task");
   });
 
+  it("registers guarded runtime controls and reads the current browser model for each task", async () => {
+    let currentModel = { baseUrl: "https://primary.example/v1", model: "primary-model" };
+    const runtimeControl: RuntimeControl = {
+      async status() {
+        return {
+          browserModel: {
+            id: "active",
+            model: currentModel.model,
+            endpoint: currentModel.baseUrl,
+            active: true
+          },
+          browserModelCandidates: [],
+          disabledTools: [],
+          runDisabledTools: [],
+          sessionDisabledTools: [],
+          protectedTools: ["arivu_runtime_status"],
+          toolProposalMode: "review_required"
+        };
+      },
+      setAvailableToolNames() {},
+      async setToolState(input) {
+        return {
+          name: input.name,
+          requestedState: input.enabled ? "enabled" : "disabled",
+          effectiveState: input.enabled ? "enabled" : "disabled",
+          scope: input.scope,
+          reason: input.reason
+        };
+      },
+      async selectBrowserModel(input) {
+        currentModel = { baseUrl: "https://fallback.example/v1", model: "fallback-model" };
+        return {
+          candidateId: input.candidateId,
+          scope: input.scope,
+          reason: input.reason,
+          model: {
+            id: input.candidateId,
+            model: currentModel.model,
+            endpoint: currentModel.baseUrl,
+            active: true
+          }
+        };
+      },
+      async proposeMcpServer(input) {
+        return {
+          id: "proposal-1",
+          name: input.name,
+          status: "pending_review",
+          reviewLocation: "Settings > Integrations"
+        };
+      },
+      currentBrowserTaskModel() {
+        return currentModel;
+      },
+      async disabledToolNames() {
+        return [];
+      }
+    };
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      runtimeControl
+    });
+    expect(registry.schemas.map((schema) => schema.name)).toEqual(
+      expect.arrayContaining(["arivu_runtime_status", "arivu_set_tool_state", "arivu_select_browser_model", "arivu_propose_mcp_server"])
+    );
+
+    await expect(registry.execute("arivu_runtime_status", {})).resolves.toContain('"toolProposalMode": "review_required"');
+    await registry.execute("arivu_select_browser_model", {
+      candidateId: "fallback-1",
+      scope: "run",
+      reason: "Primary model returned HTTP 503."
+    });
+    const taskResult = JSON.parse(await registry.execute("browser_task", { instruction: "inspect the page" })) as {
+      modelConfig?: { model?: string };
+    };
+    expect(taskResult.modelConfig?.model).toBe("fallback-model");
+    await expect(
+      registry.execute("arivu_propose_mcp_server", {
+        name: "servicenow",
+        description: "ServiceNow tools",
+        command: "npx",
+        args: ["-y", "@example/servicenow-mcp"],
+        envKeys: ["SERVICENOW_TOKEN"],
+        reason: "Structured ServiceNow operations are needed."
+      })
+    ).resolves.toContain('"status": "pending_review"');
+  });
+
   it("gates browser_task behind approval as a destructive action and forwards instruction/budgets", async () => {
     const browser = createFakeBrowser();
     let prompted = false;
@@ -148,7 +279,7 @@ describe("createToolRegistry", () => {
     });
 
     const result = JSON.parse(
-      await registry.execute("browser_task", { instruction: "fill out the form", maxSteps: 12, timeoutMs: 45_000 })
+      await registry.execute("browser_task", { instruction: "fill out the form", maxSteps: 25, timeoutMs: 45_000 })
     ) as Record<string, unknown>;
 
     expect(prompted).toBe(true);
@@ -156,7 +287,7 @@ describe("createToolRegistry", () => {
     expect(result.action).toBe("task");
     expect(result.success).toBe(true);
     expect(result.data).toBe("Completed: fill out the form");
-    expect(result.maxSteps).toBe(12);
+    expect(result.maxSteps).toBe(25);
     expect(result.timeoutMs).toBe(600_000);
     expect(result.modelConfig).toMatchObject({ baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" });
   });
@@ -170,10 +301,11 @@ describe("createToolRegistry", () => {
     });
 
     const result = JSON.parse(
-      await registry.execute("browser_task", { instruction: "complete a multi-step form", timeoutMs: 120_000 })
+      await registry.execute("browser_task", { instruction: "complete a multi-step form", maxSteps: 5, timeoutMs: 120_000 })
     ) as Record<string, unknown>;
 
     expect(result.timeoutMs).toBe(600_000);
+    expect(result.maxSteps).toBe(20);
   });
 
   it("accepts integer budget strings emitted by OpenAI-compatible providers", async () => {
@@ -229,6 +361,28 @@ describe("createToolRegistry", () => {
     expect(optedInResult.allowJavaScript).toBe(true);
   });
 
+  it("recovers a provider-leaked browser mode from the end of an instruction", async () => {
+    expect(recoverLeakedBrowserTaskMode('Fill Text, Value, and Order. Then click Save.",\n  "mode">background')).toEqual({
+      instruction: "Fill Text, Value, and Order. Then click Save.",
+      mode: "background"
+    });
+
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+    const result = JSON.parse(
+      await registry.execute("browser_task", {
+        instruction: 'Fill Text, Value, and Order. Then click Save.",\n  "mode">background'
+      })
+    ) as { mode?: string; data?: string };
+
+    expect(result.mode).toBe("background");
+    expect(result.data).toBe("Completed: Fill Text, Value, and Order. Then click Save.");
+  });
+
   it("surfaces browser_task denial as text instead of throwing", async () => {
     const registry = createToolRegistry({
       workspaceRoot: process.cwd(),
@@ -252,6 +406,38 @@ describe("createToolRegistry", () => {
     );
   });
 
+  it("rejects instructions that ask the in-page agent to navigate an explicit URL", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    await expect(
+      registry.execute("browser_task", {
+        instruction:
+          "Navigate directly to the catalog item by going to: https://example.com/sc_cat_item.do?sys_id=abc. Then click Variables."
+      })
+    ).resolves.toMatch(/browser_task cannot navigate to an explicit URL or control the address bar/);
+    await expect(
+      registry.execute("browser_task", {
+        instruction: "Navigate to https://example.com/guessed_table.do?sys_id=-1"
+      })
+    ).resolves.toMatch(/never guess or construct an endpoint/);
+    await expect(
+      registry.execute("browser_task", {
+        instruction: "Click Back, then navigate to the variable set list using variable_set.do or a similar endpoint and create a variable."
+      })
+    ).resolves.toMatch(/never guess or construct an endpoint/);
+
+    await expect(
+      registry.execute("browser_task", {
+        instruction: "Verify that the current URL is https://example.com/sc_cat_item.do?sys_id=abc and report the visible record name."
+      })
+    ).resolves.toMatch(/"action": "task"/);
+  });
+
   it("rejects incompatible browser_task mode and tab targets before execution", async () => {
     const registry = createToolRegistry({
       workspaceRoot: process.cwd(),
@@ -266,6 +452,22 @@ describe("createToolRegistry", () => {
     await expect(
       registry.execute("browser_task", { instruction: "do something", mode: "background", tabId: "visible-tab-1" })
     ).resolves.toMatch(/cannot target a visible tab id in background mode/);
+  });
+
+  it("rejects a task that confuses an MRVS child with a catalog-level MRVS variable", async () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    await expect(
+      registry.execute("browser_task", {
+        instruction:
+          "Add a new variable with Question=Access Justification, Type=Multi Row Variable Set, and Variable Set=Application Access Details."
+      })
+    ).resolves.toMatch(/instruction contradicts MRVS child creation/);
   });
 
   it("forwards an aborted run signal into browser_task", async () => {
@@ -1063,6 +1265,14 @@ function createFakeBrowser(): BrowserToolController {
         ok: true,
         index: args.index,
         optionText: args.optionText
+      };
+    },
+    async executeJavaScript(args) {
+      activeMode = args.mode ?? activeMode;
+      return {
+        mode: activeMode,
+        ok: true,
+        result: `ran: ${args.script}`
       };
     }
   };

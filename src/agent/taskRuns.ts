@@ -209,7 +209,12 @@ export function recordTaskRunEvent(
   now = new Date().toISOString(),
   options: RecordTaskRunEventOptions = {}
 ): boolean {
-  if (event.type === "tool_call_delta" || event.type === "assistant_delta" || event.type === "browser_task_progress") {
+  if (
+    event.type === "tool_call_delta" ||
+    event.type === "assistant_delta" ||
+    event.type === "browser_task_progress" ||
+    event.type === "empty_response_retry"
+  ) {
     return false;
   }
 

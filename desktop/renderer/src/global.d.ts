@@ -599,6 +599,7 @@ type DesktopState = {
     workspacePolicies: WorkspaceCapabilityPolicies;
     workspacePolicyProfiles: WorkspacePolicyProfiles;
     disabledTools: string[];
+    toolProposals: McpToolProposal[];
   };
   sessionId?: string;
   messages: ChatMessage[];
@@ -720,6 +721,15 @@ type AgentStreamEvent =
       sessionId?: string;
       stepIndex: number;
       summary: string;
+      evaluation?: string;
+      memory?: string;
+    }
+  | {
+      type: "empty_response_retry";
+      sessionId?: string;
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
     };
 
 type SessionLifecycleEvent = {
@@ -752,6 +762,44 @@ type ApprovalRequest = {
   request?: ApprovalPromptRequest;
 };
 
+// Mirrors src/tools/elicitation.ts: structured ask_user questions from the agent.
+type ElicitationQuestion = {
+  id: string;
+  type: "select" | "multiselect" | "text" | "url" | "number" | "images" | "files";
+  label: string;
+  description?: string;
+  required?: boolean;
+  options?: { value: string; label?: string; description?: string }[];
+  allowOther?: boolean;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  minCount?: number;
+  maxCount?: number;
+};
+
+type ElicitationPrompt = {
+  id: string;
+  request: {
+    title?: string;
+    reason?: string;
+    questions: ElicitationQuestion[];
+  };
+};
+
+type ElicitationAnswerValue = string | string[] | number | undefined;
+
+type ElicitationResponse = {
+  status: "answered" | "declined";
+  answers?: { id: string; value?: ElicitationAnswerValue; skipped?: boolean }[];
+};
+
+type ElicitationPickedFile = {
+  path: string;
+  name: string;
+  previewDataUrl?: string;
+};
+
 type BrowserTaskModelSettings = {
   providerId?: string;
   baseUrl?: string;
@@ -759,6 +807,19 @@ type BrowserTaskModelSettings = {
   maxSteps?: number;
   stepDelayMs?: number;
   apiKeyPresent: boolean;
+  fallbackModels?: BrowserTaskModelSettings[];
+};
+
+type McpToolProposal = {
+  id: string;
+  kind: "mcp_server";
+  name: string;
+  description: string;
+  command: string;
+  args: string[];
+  envKeys: string[];
+  reason: string;
+  createdAt: string;
 };
 
 type ConfigPatch = {
@@ -774,8 +835,15 @@ type ConfigPatch = {
   mcpServers?: McpServersConfig;
   workspacePolicies?: WorkspaceCapabilityPolicies;
   workspacePolicyProfiles?: WorkspacePolicyProfiles;
-  browserTaskModel?: { providerId?: string; model?: string; maxSteps?: number; stepDelayMs?: number } | null;
+  browserTaskModel?: {
+    providerId?: string;
+    model?: string;
+    maxSteps?: number;
+    stepDelayMs?: number;
+    fallbackModels?: Array<{ providerId?: string; model?: string }>;
+  } | null;
   disabledTools?: string[];
+  toolProposals?: McpToolProposal[];
 };
 
 type WorkspaceScaffoldOptions = {
@@ -1034,6 +1102,9 @@ type DesktopApi = {
   captureBrowserScreenshot(args?: { mode?: BrowserMode; tabId?: string }): Promise<Record<string, unknown>>;
   respondApproval(id: string, approved: boolean): Promise<void>;
   onApprovalRequest(callback: (payload: ApprovalRequest) => void): () => void;
+  respondElicitation(id: string, response: ElicitationResponse): Promise<void>;
+  elicitationChooseFiles(kind: "images" | "files"): Promise<{ files: ElicitationPickedFile[] }>;
+  onElicitationRequest(callback: (payload: ElicitationPrompt) => void): () => void;
   onAgentEvent(callback: (payload: AgentStreamEvent) => void): () => void;
   onSessionEvent(callback: (payload: SessionLifecycleEvent) => void): () => void;
   onBrowserState(callback: (payload: BrowserState) => void): () => void;

@@ -8,7 +8,17 @@ import prettier from "eslint-config-prettier";
 export default tseslint.config(
   {
     // build/ holds electron-builder packaging hooks (CommonJS, Node globals) outside the TS project.
-    ignores: ["dist/**", "dist-desktop/**", "node_modules/**", "coverage/**", "**/*.d.ts", "build/**"]
+    ignores: [
+      "dist/**",
+      "dist-desktop/**",
+      "node_modules/**",
+      "coverage/**",
+      "**/*.d.ts",
+      "build/**",
+      "benchmarks/results/**",
+      "benchmarks/scenarios/**/fixture-repo/**",
+      "benchmarks/scenarios/**/fixtures/**"
+    ]
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

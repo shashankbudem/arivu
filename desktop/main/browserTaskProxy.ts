@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import http from "node:http";
 import { Readable } from "node:stream";
+import { searchWeb } from "../../src/tools/webSearch.js";
 
 /**
  * Loopback-only reverse proxy that lets an injected page-agent instance call the real LLM
@@ -12,7 +13,10 @@ import { Readable } from "node:stream";
 type ProxyRegistration = {
   realBaseUrl: string;
   realApiKey?: string;
+  /** Forwarded to searchWeb() for the in-page search_web tool; undefined falls back to Bing. */
+  tavilyApiKey?: string;
   expiresAt: number;
+  requestTimeoutMs: number;
   requestCount: number;
   diagnostics: BrowserTaskProxyDiagnostic[];
   unsupportedParams: Set<string>;
@@ -46,6 +50,12 @@ const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 500, 502, 503, 504]);
 const UPSTREAM_RETRY_LIMIT = 3;
 const UPSTREAM_RETRY_BASE_DELAY_MS = 1_000;
 const UPSTREAM_RETRY_MAX_DELAY_MS = 30_000;
+// A provider connection that accepts the request but never returns headers otherwise pins one
+// browser-agent step until the entire browser_task wall-clock budget expires. NIM completions
+// observed in production can legitimately take over a minute, so keep this generous while
+// still giving the proxy a finite recovery boundary.
+const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 120_000;
+const UPSTREAM_NETWORK_RETRY_LIMIT = 1;
 // The in-page client patches requests with vendor-specific parameters (e.g. `thinking` to
 // disable reasoning for deepseek/glm/kimi). OpenAI-compatible gateways vary: the vendor's own
 // API accepts them, but e.g. NVIDIA NIM's deepseek endpoint rejects the request outright with
@@ -56,6 +66,12 @@ const MAX_PARAM_STRIP_RETRIES = 2;
 // Buffering the request body is what makes retries possible (a consumed stream cannot be
 // replayed); chat-completion payloads are far below this cap.
 const MAX_BUFFERED_BODY_BYTES = 20 * 1024 * 1024;
+
+// Reserved path for the in-page search_web tool (browserTaskSupervisor.ts's injectedTaskScript).
+// Handled entirely separately from the LLM-forwarding path below, before any upstream request is
+// built, so it can never interact with that path's retry/backoff/param-stripping state.
+const SEARCH_PATH = "/__arivu_search";
+const MAX_SEARCH_QUERY_LENGTH = 300;
 
 const TOKEN_SWEEP_INTERVAL_MS = 30_000;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -116,14 +132,19 @@ export async function ensureBrowserTaskProxy(): Promise<{ port: number }> {
 export async function registerBrowserTaskProxyEntry(options: {
   realBaseUrl: string;
   realApiKey?: string;
+  tavilyApiKey?: string;
   ttlMs: number;
+  /** Test/diagnostic override; production callers use the bounded default above. */
+  requestTimeoutMs?: number;
 }): Promise<{ token: string; proxyBaseUrl: string }> {
   const { port } = await ensureBrowserTaskProxy();
   const token = randomBytes(24).toString("hex");
   registrations.set(token, {
     realBaseUrl: options.realBaseUrl.replace(/\/+$/, ""),
     realApiKey: options.realApiKey,
+    tavilyApiKey: options.tavilyApiKey,
     expiresAt: Date.now() + options.ttlMs,
+    requestTimeoutMs: Math.max(1, options.requestTimeoutMs ?? DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS),
     requestCount: 0,
     diagnostics: [],
     unsupportedParams: new Set()
@@ -164,6 +185,31 @@ function corsHeaders(req: http.IncomingMessage): Record<string, string> {
   };
 }
 
+async function handleSearchRequest(req: http.IncomingMessage, res: http.ServerResponse, registration: ProxyRegistration) {
+  try {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const query = (url.searchParams.get("q") ?? "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
+    if (!query) {
+      res
+        .writeHead(400, { "content-type": "application/json", ...corsHeaders(req) })
+        .end(JSON.stringify({ error: "Missing search query." }));
+      return;
+    }
+    const requestedResults = Number(url.searchParams.get("n"));
+    const maxResults = Number.isFinite(requestedResults) ? Math.min(10, Math.max(1, Math.round(requestedResults))) : 5;
+    const results = await searchWeb(query, maxResults, { tavilyApiKey: registration.tavilyApiKey });
+    const body = JSON.stringify({
+      query,
+      results: results.map((result) => ({ title: result.title, url: result.url, snippet: result.snippet }))
+    });
+    res.writeHead(200, { "content-type": "application/json", ...corsHeaders(req) }).end(body);
+  } catch (error) {
+    res
+      .writeHead(502, { "content-type": "application/json", ...corsHeaders(req) })
+      .end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
 function handlePreflight(req: http.IncomingMessage, res: http.ServerResponse) {
   const requestedHeaders = req.headers["access-control-request-headers"];
   const headers: Record<string, string> = {
@@ -200,6 +246,12 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
         .end(JSON.stringify({ error: "Invalid or expired browser task session." }));
       return;
     }
+
+    if (req.method === "GET" && safeRequestPath(req.url) === SEARCH_PATH) {
+      await handleSearchRequest(req, res, registration);
+      return;
+    }
+
     startedAt = Date.now();
     attempt = ++registration.requestCount;
 
@@ -238,11 +290,57 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
     let paramStripRetries = 0;
     for (let upstreamRetry = 0; ; upstreamRetry++) {
       consumedErrorBody = undefined;
-      upstreamResponse = await fetch(targetUrl, {
-        method: req.method,
-        headers: forwardHeaders,
-        body: requestBody
-      } as NodeFetchInit);
+      const controller = new AbortController();
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, registration.requestTimeoutMs);
+      timeout.unref();
+      const abortForClosedDownstream = () => controller.abort();
+      res.once("close", abortForClosedDownstream);
+      try {
+        upstreamResponse = await fetch(targetUrl, {
+          method: req.method,
+          headers: forwardHeaders,
+          body: requestBody,
+          signal: controller.signal
+        } as NodeFetchInit);
+      } catch (error) {
+        if (res.destroyed || res.writableEnded || res.socket?.destroyed) {
+          return;
+        }
+        const willRetry = upstreamRetry < UPSTREAM_NETWORK_RETRY_LIMIT;
+        const status = timedOut ? 504 : 502;
+        const message = timedOut
+          ? `Upstream request timed out after ${registration.requestTimeoutMs}ms.`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+        recordDiagnostic(registration, {
+          attempt,
+          timestamp: new Date().toISOString(),
+          method: req.method ?? "GET",
+          path: safeRequestPath(req.url),
+          status,
+          latencyMs: Date.now() - startedAt,
+          outcome: "network_error",
+          message: boundDiagnosticMessage(message),
+          willRetry: willRetry || undefined
+        });
+        if (!willRetry) {
+          res.writeHead(status, { "content-type": "application/json", ...corsHeaders(req) }).end(JSON.stringify({ error: message }));
+          return;
+        }
+        await sleep(Math.min(UPSTREAM_RETRY_BASE_DELAY_MS * 2 ** upstreamRetry, UPSTREAM_RETRY_MAX_DELAY_MS));
+        if (res.destroyed || res.writableEnded || res.socket?.destroyed) {
+          return;
+        }
+        continue;
+      } finally {
+        clearTimeout(timeout);
+        res.off("close", abortForClosedDownstream);
+      }
 
       // Self-healing for gateway parameter validation: strip the named parameters and retry.
       let strippedParams: string[] = [];

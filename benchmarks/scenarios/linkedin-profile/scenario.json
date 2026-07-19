@@ -1,0 +1,50 @@
+{
+  "id": "linkedin-profile",
+  "title": "Fill LinkedIn profile fields to match the scenario's expected values",
+  "kind": "browser",
+  "task": "Open https://www.linkedin.com/in/me/ in the browser (you are already signed in) and edit the profile so it matches the values described in the scenario file benchmarks/browser/linkedin_profile.scenario.local.json. Edit only the fields that scenario lists, then reply with a one-line summary of the changes.",
+  "notes": "Wraps the pre-existing Python+Playwright validator (benchmarks/browser/) as a bench scenario. Defaults to a human-driven app run: automating a personal LinkedIn account is checkpoint- and ToS-sensitive.",
+  "bounds": { "timeoutMs": 1800000 },
+  "browser": {
+    "target": "live",
+    "execution": "manual",
+    "live": {
+      "requiresLocalFile": "../../browser/linkedin_profile.scenario.local.json",
+      "setup": {
+        "command": "python3",
+        "args": [
+          "benchmarks/browser/linkedin_profile_benchmark.py",
+          "capture-baseline",
+          "--scenario",
+          "benchmarks/browser/linkedin_profile.scenario.local.json"
+        ]
+      },
+      "reset": {
+        "command": "python3",
+        "args": [
+          "benchmarks/browser/linkedin_profile_benchmark.py",
+          "reset",
+          "--scenario",
+          "benchmarks/browser/linkedin_profile.scenario.local.json",
+          "--yes"
+        ]
+      },
+      "confirmReset": true
+    }
+  },
+  "verify": [
+    {
+      "type": "command",
+      "command": "python3",
+      "args": [
+        "benchmarks/browser/linkedin_profile_benchmark.py",
+        "verify",
+        "--scenario",
+        "benchmarks/browser/linkedin_profile.scenario.local.json",
+        "--headless"
+      ],
+      "reportPath": "output/playwright/linkedin-benchmark/result.json",
+      "label": "LinkedIn profile fields match scenario"
+    }
+  ]
+}
