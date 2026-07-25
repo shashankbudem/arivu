@@ -6,6 +6,8 @@ build/*
 !build/notarize.cjs
 !build/entitlements.mac.plist
 !build/icon.png
+!build/icon.icon
+!build/icon-layers
 release/
 coverage/
 .agents/
