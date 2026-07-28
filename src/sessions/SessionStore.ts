@@ -5,6 +5,7 @@ import { z } from "zod";
 import { appDataDir } from "../config.js";
 import { chatContentToText } from "../agent/content.js";
 import type { AgentSession, ChatMessage } from "../agent/types.js";
+import { ensureSessionTitle } from "./sessionList.js";
 
 const ATTACHMENT_REF_PREFIX = "arivu-attachment:v1:";
 const ATTACHMENT_INLINE_THRESHOLD_BYTES = 2 * 1024;
@@ -27,9 +28,18 @@ const ImagePartSchema = z.object({
 
 const ContentSchema = z.union([z.string(), z.array(z.union([TextPartSchema, ImagePartSchema]))]);
 
+const QueuedPromptSchema = z.object({
+  id: z.string(),
+  content: ContentSchema,
+  skillNames: z.array(z.string()).optional(),
+  state: z.enum(["queued", "steering"]),
+  createdAt: z.string().datetime()
+});
+
 const MessageSchema = z.object({
   role: z.enum(["system", "user", "assistant", "tool"]),
   content: ContentSchema,
+  createdAt: z.string().datetime().optional(),
   name: z.string().optional(),
   toolCallId: z.string().optional(),
   toolCalls: z
@@ -41,6 +51,15 @@ const MessageSchema = z.object({
       })
     )
     .optional()
+});
+
+const ContextCompactionSchema = z.object({
+  version: z.literal(1),
+  source: z.enum(["model", "deterministic"]),
+  compactedAt: z.string(),
+  compactedMessageCount: z.number().int().min(0),
+  sourceNonSystemMessageCount: z.number().int().min(0),
+  messages: z.array(MessageSchema)
 });
 
 const AgentLoopSchema = z.object({
@@ -521,6 +540,8 @@ const SessionSchema = z.object({
   modelSelectionReason: z.string().optional(),
   agentLoop: AgentLoopSchema.optional(),
   taskRuns: z.array(AgentTaskRunSchema).optional(),
+  contextCompaction: ContextCompactionSchema.optional(),
+  queuedPrompts: z.array(QueuedPromptSchema).max(50).optional(),
   messages: z.array(MessageSchema),
   createdAt: z.string(),
   updatedAt: z.string()
@@ -536,6 +557,10 @@ export class SessionStore {
 
   async save(session: AgentSession) {
     normalizeTaskRunUserMessageIndexes(session);
+    hydrateLegacyMessageTimestamps(session);
+    // Freeze title into session JSON before write so compaction (or list loads of old
+    // files) cannot leave chats permanently untitled after user messages are dropped.
+    ensureSessionTitle(session);
     const snapshot = structuredClone(session);
     this.fileFor(snapshot.id);
     return this.enqueueWrite(snapshot.id, async () => this.persistSnapshot(snapshot));
@@ -586,6 +611,7 @@ export class SessionStore {
       });
     }
     normalizeTaskRunUserMessageIndexes(session);
+    hydrateLegacyMessageTimestamps(session);
     return this.rehydrateAttachments(session);
   }
 
@@ -603,29 +629,31 @@ export class SessionStore {
   }
 
   private async externalizeAttachments(session: AgentSession): Promise<AgentSession> {
-    if (!session.messages.some((message) => Array.isArray(message.content))) {
+    if (!sessionMessageCollections(session).some((messages) => messages.some((message) => Array.isArray(message.content)))) {
       return session;
     }
     const clone: AgentSession = structuredClone(session);
     const dir = this.attachmentsDir(session.id);
     let dirEnsured = false;
-    for (const message of clone.messages) {
-      for (const part of imageParts(message)) {
-        const data = parseDataUrl(part.image_url.url);
-        if (!data || data.bytes.length < ATTACHMENT_INLINE_THRESHOLD_BYTES) {
-          continue;
+    for (const messages of sessionMessageCollections(clone)) {
+      for (const message of messages) {
+        for (const part of imageParts(message)) {
+          const data = parseDataUrl(part.image_url.url);
+          if (!data || data.bytes.length < ATTACHMENT_INLINE_THRESHOLD_BYTES) {
+            continue;
+          }
+          const hash = crypto.createHash("sha256").update(data.bytes).digest("hex");
+          if (!dirEnsured) {
+            await mkdir(dir, { recursive: true, mode: 0o700 });
+            dirEnsured = true;
+          }
+          const filePath = path.join(dir, hash);
+          if (!(await fileExists(filePath))) {
+            await writeFile(filePath, data.bytes, { mode: 0o600 });
+          }
+          part.mimeType = part.mimeType ?? data.mimeType;
+          part.image_url.url = `${ATTACHMENT_REF_PREFIX}${hash}`;
         }
-        const hash = crypto.createHash("sha256").update(data.bytes).digest("hex");
-        if (!dirEnsured) {
-          await mkdir(dir, { recursive: true, mode: 0o700 });
-          dirEnsured = true;
-        }
-        const filePath = path.join(dir, hash);
-        if (!(await fileExists(filePath))) {
-          await writeFile(filePath, data.bytes, { mode: 0o600 });
-        }
-        part.mimeType = part.mimeType ?? data.mimeType;
-        part.image_url.url = `${ATTACHMENT_REF_PREFIX}${hash}`;
       }
     }
     return clone;
@@ -633,19 +661,21 @@ export class SessionStore {
 
   private async rehydrateAttachments(session: AgentSession): Promise<AgentSession> {
     const dir = this.attachmentsDir(session.id);
-    for (const message of session.messages) {
-      for (const part of imageParts(message)) {
-        const url = part.image_url.url;
-        if (!url.startsWith(ATTACHMENT_REF_PREFIX)) {
-          continue;
-        }
-        const hash = url.slice(ATTACHMENT_REF_PREFIX.length);
-        try {
-          const bytes = await readFile(path.join(dir, hash));
-          const mimeType = part.mimeType ?? "image/png";
-          part.image_url.url = `data:${mimeType};base64,${bytes.toString("base64")}`;
-        } catch {
-          // Missing attachment file; leave the reference so the gap is visible rather than silently blank.
+    for (const messages of sessionMessageCollections(session)) {
+      for (const message of messages) {
+        for (const part of imageParts(message)) {
+          const url = part.image_url.url;
+          if (!url.startsWith(ATTACHMENT_REF_PREFIX)) {
+            continue;
+          }
+          const hash = url.slice(ATTACHMENT_REF_PREFIX.length);
+          try {
+            const bytes = await readFile(path.join(dir, hash));
+            const mimeType = part.mimeType ?? "image/png";
+            part.image_url.url = `data:${mimeType};base64,${bytes.toString("base64")}`;
+          } catch {
+            // Missing attachment file; leave the reference so the gap is visible rather than silently blank.
+          }
         }
       }
     }
@@ -682,18 +712,25 @@ export class SessionStore {
       if (!info.isFile()) {
         return undefined;
       }
-      if (info.size > MAX_SESSION_LIST_FILE_BYTES) {
-        console.warn(
-          `[SessionStore] Hiding "${entry}" from the session list: ${info.size} bytes exceeds the ${MAX_SESSION_LIST_FILE_BYTES}-byte cap. The file is intact on disk.`
-        );
-        return undefined;
-      }
       const raw = await readFile(filePath, "utf8");
-      return normalizeTaskRunUserMessageIndexes(parseSession(raw, sessionId));
+      const session = normalizeTaskRunUserMessageIndexes(parseSession(raw, sessionId));
+      if (info.size > MAX_SESSION_LIST_FILE_BYTES) {
+        // Do NOT drop oversized sessions from the list — that silently vanished long chats from the
+        // sidebar while they stayed openable on disk (store.load has no cap). The list only needs
+        // metadata, task runs, and a message count, never message bodies, so strip the bodies to keep
+        // memory bounded (many multi-MB sessions would otherwise be held at once) while the session
+        // stays visible. Index repair above ran first, so it still had full content to match against.
+        console.warn(
+          `[SessionStore] Trimming message bodies of "${entry}" for the session list: ${info.size} bytes exceeds the ${MAX_SESSION_LIST_FILE_BYTES}-byte cap. The full file is intact on disk and opens normally.`
+        );
+        return stripMessageBodiesForList(session);
+      }
+      return session;
     } catch (error) {
       try {
-        const recovered = await this.readBackup(sessionId, error, MAX_SESSION_LIST_FILE_BYTES);
-        return normalizeTaskRunUserMessageIndexes(recovered.session);
+        const recovered = await this.readBackup(sessionId, error);
+        const session = normalizeTaskRunUserMessageIndexes(recovered.session);
+        return Buffer.byteLength(recovered.raw, "utf8") > MAX_SESSION_LIST_FILE_BYTES ? stripMessageBodiesForList(session) : session;
       } catch {
         // A single unreadable file must not drop the rest of the list, but swallowing it silently
         // is what let a schema drift hide sessions with no signal. Log which file and why.
@@ -703,18 +740,8 @@ export class SessionStore {
     }
   }
 
-  private async readBackup(
-    sessionId: string,
-    primaryError: unknown,
-    maximumBytes?: number
-  ): Promise<{ raw: string; session: AgentSession }> {
+  private async readBackup(sessionId: string, primaryError: unknown): Promise<{ raw: string; session: AgentSession }> {
     const backup = this.backupFileFor(sessionId);
-    if (maximumBytes !== undefined) {
-      const info = await stat(backup);
-      if (!info.isFile() || info.size > maximumBytes) {
-        throw primaryError;
-      }
-    }
     const raw = await readFile(backup, "utf8");
     const session = parseSession(raw, sessionId);
     console.warn(
@@ -862,6 +889,53 @@ function normalizeTaskRunUserMessageIndexes(session: AgentSession) {
     }
   }
   return session;
+}
+
+/**
+ * Return a copy of the session with message bodies emptied, for the session-list path only. The list
+ * needs message *roles* (for the non-system message count) plus metadata and task runs — never the
+ * message content — so blanking bodies bounds the memory an oversized session costs while listing,
+ * without dropping it from the sidebar. Never use this for anything that reads message content.
+ */
+function stripMessageBodiesForList(session: AgentSession): AgentSession {
+  return {
+    ...session,
+    contextCompaction: session.contextCompaction
+      ? {
+          ...session.contextCompaction,
+          messages: session.contextCompaction.messages.map((message) => ({ role: message.role, content: "" }))
+        }
+      : undefined,
+    queuedPrompts: session.queuedPrompts?.map((prompt) => ({ ...prompt, content: "" })),
+    messages: session.messages.map((message) => ({ role: message.role, content: "" }))
+  };
+}
+
+function sessionMessageCollections(session: AgentSession): ChatMessage[][] {
+  return session.contextCompaction ? [session.messages, session.contextCompaction.messages] : [session.messages];
+}
+
+/**
+ * Old session files predate per-message timestamps. Give their transcript a stable, ordered
+ * approximation within the session's known lifetime instead of displaying the time it was opened.
+ * The values are only written back on the next normal save, preserving read-only legacy sessions.
+ */
+function hydrateLegacyMessageTimestamps(session: AgentSession) {
+  const start = Date.parse(session.createdAt);
+  const end = Date.parse(session.updatedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return;
+  }
+  const messages = session.messages;
+  const range = Math.max(0, end - start);
+  const divisor = Math.max(1, messages.length - 1);
+  messages.forEach((message, index) => {
+    if (message.createdAt) {
+      return;
+    }
+    const offset = Math.round((range * index) / divisor);
+    message.createdAt = new Date(start + offset).toISOString();
+  });
 }
 
 function taskRunMatchesUserMessage(promptPreview: string, content: AgentSession["messages"][number]["content"]) {

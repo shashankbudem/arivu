@@ -44,7 +44,7 @@ Implemented:
 - Desktop inline available-tools drawer, backed by the actual tool registry through IPC.
 - Desktop Capability policy matrix in Settings, backed by the same trust-mode table used by approvals and tool status labels, with stricter per-workspace overrides for enforceable capabilities including repo reads plus path-prefix, network-domain, MCP-server, and browser target-class scope rules. Preset buttons apply common default, review-first, local-only, and locked-down workspace policies, named local profiles save/apply reusable bundles, and Workspace policy JSON can copy/apply normalized override and scope-rule bundles. Active scope rules are summarized in Settings and shown as chips on affected Tools drawer rows.
 - Desktop MCP server JSON config in Settings plus `mcp_list_tools` and `mcp_call_tool`.
-- Desktop Settings doctor and CLI `arivu doctor` diagnostics for API key, model listing, selected model, basic chat completions, streaming, tool calling, and Tavily. Settings doctor persists Tool calling as disabled for auto-mode saved providers when the tool probe proves unsupported.
+- Desktop Settings doctor and CLI `arivu doctor` diagnostics for API key, model listing, selected model, basic chat completions, streaming, tool calling, and the active web-search provider. Settings doctor persists Tool calling as disabled for auto-mode saved providers when the tool probe proves unsupported.
 - Desktop browser-style chat search with match navigation.
 - Desktop collapsible/resizable left sidebar and slim Activity rail/panel.
 - Desktop collapsible sidebar sections and Activity rows.
@@ -53,7 +53,7 @@ Implemented:
 - Desktop icon-only message actions: Edit/Copy on user messages, Retry/Copy on agent replies, assistant-reply retry that regenerates from the existing user bubble instead of duplicating it, failed-user-message Retry/Edit/Copy after send errors, and failed-prompt retry from the error strip with hover/focus labels.
 - Desktop compact-context action that locally summarizes older session messages, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
 - Token-aware composer paste guard with truncate/full/cancel options.
-- Tavily-first `web_search` tool with Bing/Bing News RSS fallback.
+- Managed Tavily, Brave Search, Exa, Serper, and Bing RSS profiles shared by main-agent `web_search` and browser-agent `search_web`.
 - Local `current_datetime` and timezone-only `current_location` tools.
 - Global skill discovery from the app data skills directory, explicit `$skill-name` skill attachment, and read-only `list_skills`/`read_skill` tools.
 - OpenAI-compatible provider hardening for NVIDIA-style tool/fallback JSON decode errors, empty assistant content rejection, empty no-tool run rejection, and blank assistant history cleanup.
@@ -131,13 +131,13 @@ Desktop provider behavior:
 - Provider drafts with blank URLs are not persisted, saved provider names must be unique, and saved providers need a model id.
 - If a provider does not expose `/models`, the user can manually enter a model id.
 
-Tavily config behavior:
+Legacy Tavily config migration:
 
 ```text
 ARIVU_TAVILY_API_KEY > SHANKINSTER_TAVILY_API_KEY > TAVILY_API_KEY > saved tavilyApiKey
 ```
 
-The user has a Tavily key in shell config; do not print or commit it.
+The environment key is overlaid onto a Tavily profile without replacing an explicitly selected search profile. Never print or commit search-provider keys.
 
 ## Important decisions
 
@@ -164,7 +164,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Full-file writes are allowed for creation and explicit replacement only.
 - The agent must not write outside the active workspace.
 - Assistant system prompts include a no-emoji instruction for new and resumed sessions.
-- Web search uses local function tools, not MCP. Tavily is preferred when configured and uses `basic` depth by default to avoid casually spending extra credits. The no-key fallback uses Bing RSS, with Bing News RSS for news-like queries.
+- Web search uses local function tools, not MCP. Settings manages one active Tavily, Brave Search, Exa, Serper, or Bing RSS profile; the selection, endpoint, and key are shared with the in-page browser agent. Tavily uses `basic` depth, and Bing RSS remains the no-key option with Bing News RSS for news-like queries.
 - `current_datetime` and `current_location` are local read-only tools. `current_location` intentionally uses timezone context only and avoids GPS, IP lookup, browser geolocation, and network location.
 - The desktop Tools drawer lists registry schemas from the Electron main process instead of duplicating tool metadata in renderer state, and it receives active workspace scope labels from the same policy path used for enforcement.
 - Browser tools are desktop-only and route through `desktop/main/browserController.ts`. Agent calls default to the hidden isolated Electron target, while explicit visible calls use a separate maximized tabbed browser window. Normal visible tabs are individual `BrowserView`s. Website-created popups remain native maximized child windows so `window.open()` receives a valid handle; Arivu registers their `WebContents` in the same visible tab state so the agent can select, inspect, and close them by `tabId`. All visible targets share Arivu's persistent browser partition. `browser_open` can create a visible tab with `newTab: true` and turns non-URL text into a Google search URL. `browser_state` exposes active mode, active visible tab id, visible tabs, background target, and last snapshot/screenshot timestamps, while `browser_select_tab` switches visible targets before inspection. The Review surface transfers pages between visible and background ownership and sends annotation text plus saved screenshot evidence into the chat composer. Browser profile passwords use Electron `safeStorage`; import supports Chrome password CSV and Arivu JSON, and extensions are unpacked-only. Current-browser prompts are preflighted with `browser_state` and a targeted `browser_screenshot`. Chrome DevTools MCP remains optional for deeper diagnostics or real Chrome behavior.

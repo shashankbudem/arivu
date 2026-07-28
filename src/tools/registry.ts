@@ -7,6 +7,7 @@ import type { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { analyzeArgvCommand, analyzeShellCommand } from "../permissions/destructive.js";
 import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "../permissions/scopePolicy.js";
 import type { AppConfig } from "../config.js";
+import { defaultWebSearchProvider, type WebSearchProviderProfile } from "./webSearchProvider.js";
 import { resolveCommandExecutionProfile } from "../execution/profile.js";
 import { discoverSkills, formatSkillList, readSkill } from "../agent/skills.js";
 import type { ToolSchema } from "../agent/types.js";
@@ -68,7 +69,7 @@ import type { RuntimeControl } from "./runtimeControl.js";
 type ToolContext = {
   workspaceRoot: string;
   approvals: ApprovalManager;
-  tavilyApiKey?: string;
+  webSearchProvider?: WebSearchProviderProfile;
   mcpServers?: AppConfig["mcpServers"];
   scopePolicyRules?: WorkspaceScopePolicyRules;
   browser?: BrowserToolController;
@@ -416,11 +417,11 @@ export function createToolRegistry(context: ToolContext) {
       await context.approvals.require({
         type: "network",
         summary: "web_search",
-        destination: context.tavilyApiKey ? "https://api.tavily.com/search" : "https://www.bing.com/search",
+        destination: (context.webSearchProvider ?? defaultWebSearchProvider("bing")).baseUrl,
         query: parsed.query,
         destructive: true
       });
-      const results = await searchWeb(parsed.query, parsed.maxResults, { tavilyApiKey: context.tavilyApiKey });
+      const results = await searchWeb(parsed.query, parsed.maxResults, { provider: context.webSearchProvider });
       return formatWebSearchResults(parsed.query, results);
     }
   });
@@ -990,7 +991,7 @@ export function createToolRegistry(context: ToolContext) {
             maxSteps,
             mode,
             modelConfig: browserTaskModel,
-            tavilyApiKey: context.tavilyApiKey,
+            webSearchProvider: context.webSearchProvider,
             signal: context.signal,
             onProgress: context.onBrowserTaskProgress
           })

@@ -1,20 +1,26 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WebContents, WebFrameMain } from "electron";
 import type { BrowserTaskModelConfig, BrowserToolResult } from "../../src/tools/browserControl.js";
+import type { WebSearchProviderProfile } from "../../src/tools/webSearchProvider.js";
 import {
   getBrowserTaskProxyDiagnostics,
   registerBrowserTaskProxyEntry,
   unregisterBrowserTaskProxyEntry,
-  type BrowserTaskProxyDiagnostic
+  type BrowserTaskProxyDiagnostic,
+  type BrowserTaskScreenshot,
+  type BrowserTaskVisualClickResult
 } from "./browserTaskProxy.js";
 import {
   ANNOTATE_CUSTOM_CONTROLS_SNIPPET,
   ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS,
   BACKFILL_REFLECTION_SNIPPET,
+  BUILD_ACTIONS_SNIPPET,
   BUILD_TRACE_SNIPPET,
   CAP_PAGE_CONTENT_SNIPPET,
+  CREATE_SCREENSHOT_RECOVERY_SNIPPET,
   INSTALL_AGENT_VISUAL_THEME_SNIPPET,
   INSTALL_SERVICE_NOW_VARIABLE_TYPE_GUARD_SNIPPET,
   INSTALL_UNRELATED_CHECKBOX_LABEL_GUARD_SNIPPET,
@@ -45,8 +51,12 @@ export type BrowserTaskArgs = {
   allowedDomains?: string[];
   allowJavaScript?: boolean;
   allowSensitiveActions?: boolean;
-  /** Forwarded to the in-page search_web tool's Tavily fallback; undefined uses Bing. */
-  tavilyApiKey?: string;
+  /** Forwarded to the in-page search_web tool; undefined uses keyless Bing RSS. */
+  webSearchProvider?: WebSearchProviderProfile;
+  /** Trusted main-process viewport capture; falls back to WebContents.capturePage in tests. */
+  captureScreenshot?: () => Promise<BrowserTaskScreenshot>;
+  /** Optional LocateAnything-backed coordinate click. Omitted when visual grounding is disabled. */
+  visualClick?: (target: string, signal: AbortSignal) => Promise<BrowserTaskVisualClickResult>;
   visible?: boolean;
 };
 
@@ -81,15 +91,7 @@ const STEP_DELAY_SECONDS = 35;
 // both. Extra attempts are cheap relative to failing the whole multi-step task.
 const LLM_MAX_RETRIES = 4;
 const PROGRESS_POLL_INTERVAL_MS = 1_000;
-// The presence chip is a fixed-width, non-scrolling glance -- keep each line short rather than
-// relying on the chip's own CSS ellipsis to do all the work.
-const PRESENCE_CHIP_LINE_CHARS = 90;
-const PRESENCE_CHIP_INSTRUCTION_CHARS = 70;
-// A rolling window, not the full history: unbounded growth over a long session would turn a
-// glanceable on-page chip into its own scrolling list. Arivu's chrome-side Activity sidebar is
-// the authoritative, unbounded record of every browser_task call; this chip only needs enough
-// recent context to answer "what has Arivu been doing on this tab lately."
-const MAX_PRESENCE_CHIP_TASKS = 5;
+const PRESENCE_CHIP_INSTRUCTION_CHARS = 240;
 const NAVIGATION_SETTLE_TIMEOUT_MS = 10_000;
 const NAVIGATION_STABLE_MS = 300;
 const POST_SUBMIT_NAVIGATION_SETTLE_TIMEOUT_MS = 30_000;
@@ -103,6 +105,12 @@ const MAX_RESULT_PROXY_DIAGNOSTICS = 10;
 // fallback candidate can't accomplish anything and just burns the remainder on a doomed attempt.
 const MIN_ROTATION_REMAINING_MS = 5_000;
 const FRAME_PROBE_TIMEOUT_MS = 1_500;
+const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
+const SCREENSHOT_MAX_DIMENSION = 1_600;
+const SCREENSHOT_JPEG_QUALITY = 82;
+const STUCK_SCREENSHOT_THRESHOLD_MS = 90_000;
+const STUCK_SCREENSHOT_COOLDOWN_MS = 120_000;
+const MAX_SCREENSHOT_DATA_URL_CHARS = 8_000_000;
 const FRAME_PROBE_SCRIPT = `(function() {
   var selector = 'input:not([type="hidden"]),button,select,textarea,a[href],[role="button"],[role="combobox"],[contenteditable="true"]';
   var elements = document.querySelectorAll ? document.querySelectorAll(selector) : [];
@@ -144,6 +152,7 @@ type InjectedTaskResult = {
   error?: string;
   trace?: string[];
   tokensUsed?: number;
+  actions?: BrowserTaskAction[];
 };
 
 type PolledProgress = {
@@ -152,6 +161,8 @@ type PolledProgress = {
   lastGoal?: string;
   lastEvaluation?: string;
   lastMemory?: string;
+  phase?: string;
+  actions: BrowserTaskAction[];
 };
 
 export type JavaScriptExecutionTarget = {
@@ -159,15 +170,33 @@ export type JavaScriptExecutionTarget = {
 };
 
 type PresenceChipTask = {
+  id: string;
   instruction: string;
-  status: "current" | "done" | "failed";
-  detail?: string[];
+  status: "current" | "paused" | "stopping" | "done" | "failed" | "stopped";
+  phase?: string;
+  actions: BrowserTaskAction[];
 };
 
-// Per-tab rolling history for the presence chip -- one entry per browser_task call, in call
-// order. Keyed by WebContents (not a manually-tracked tab id) so it naturally scopes itself to
-// a tab's lifetime and needs no explicit cleanup when the tab closes.
+type BrowserTaskAction = {
+  stepIndex: number;
+  name: string;
+  input?: string;
+  output?: string;
+  evaluation?: string;
+  memory?: string;
+  goal?: string;
+};
+
+type PresenceCommand = {
+  type: "pause" | "resume" | "stop";
+  taskId: string;
+};
+
+// Per-tab complete task history for the on-page panel -- one entry per browser_task call, in
+// call order. Keyed by WebContents (not a manually-tracked tab id) so the history naturally
+// disappears with the tab and needs no explicit cleanup.
 const presenceChipTasksByTab = new WeakMap<WebContents, PresenceChipTask[]>();
+let nextPresenceChipTaskId = 1;
 
 function presenceChipTasksFor(contents: WebContents): PresenceChipTask[] {
   let tasks = presenceChipTasksByTab.get(contents);
@@ -378,12 +407,7 @@ export async function runBrowserTask(
   args: BrowserTaskArgs,
   modelConfig: BrowserTaskModelConfig,
   signal?: AbortSignal,
-  onProgress?: (progress: {
-    stepIndex: number;
-    summary: string;
-    evaluation?: string;
-    memory?: string;
-  }) => void
+  onProgress?: (progress: { stepIndex: number; summary: string; evaluation?: string; memory?: string }) => void
 ): Promise<BrowserToolResult> {
   const instruction = stripStaleBrowserTaskIndices(args.instruction);
   const timeoutMs = clamp(Math.trunc(args.timeoutMs ?? DEFAULT_TIMEOUT_MS), MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
@@ -454,25 +478,36 @@ export async function runBrowserTask(
   const allowedDomains = normalizeAllowedDomains(args.allowedDomains?.length ? args.allowedDomains : defaultAllowedDomains(contents));
   const bundleText = await loadPageAgentBundle();
 
-  // Record this call in the tab's rolling task list and show it immediately (before the first
-  // step lands) so the chip reflects a new task starting without waiting on the first poll tick.
+  // Record this call in the tab's complete task list and show it immediately (before the first
+  // step lands) so the panel reflects a new task without waiting on the first poll tick.
   let presenceChipTask: PresenceChipTask | undefined;
   if (args.visible) {
     const tasks = presenceChipTasksFor(contents);
-    presenceChipTask = { instruction: boundText(instruction, PRESENCE_CHIP_INSTRUCTION_CHARS), status: "current" };
+    presenceChipTask = {
+      // Ordered prefix for debuggability + an unguessable random suffix. The panel runs in the
+      // page's own main world, so its command channel (window.__arivuPageAgentPresenceCommand) is
+      // inherently page-writable; a guessable "task-N" id would let a hostile page forge a
+      // pause/resume/stop for the current task. The current task's id is never written to a
+      // page-readable global or DOM attribute, so a random id it cannot read closes that gap.
+      id: `task-${nextPresenceChipTaskId++}-${randomUUID().replace(/-/g, "").slice(0, 12)}`,
+      instruction: boundText(instruction, PRESENCE_CHIP_INSTRUCTION_CHARS),
+      status: "current",
+      actions: []
+    };
     tasks.push(presenceChipTask);
-    while (tasks.length > MAX_PRESENCE_CHIP_TASKS) {
-      tasks.shift();
-    }
     void updatePresenceChip(contents.mainFrame, tasks);
   }
 
   const startedAt = Date.now();
   let deadlineTimer: NodeJS.Timeout | undefined;
+  let deadlineActiveSince = startedAt;
+  let deadlineRemainingMs = timeoutMs;
+  let deadlinePaused = false;
   let stopReason: BrowserTaskStopReason | undefined;
   let onTargetDestroyed: (() => void) | undefined;
   let onPopupCreated: (() => void) | undefined;
   let settleInfrastructureStop: ((result: InjectedTaskResult) => void) | undefined;
+  let settleTaskStop: ((reason: "timeout" | "cancelled" | "target_closed", message: string) => void) | undefined;
   let popupOpened = false;
   const infrastructureStopPromise = new Promise<InjectedTaskResult>((resolve) => {
     settleInfrastructureStop = resolve;
@@ -492,24 +527,53 @@ export async function runBrowserTask(
     contents.on("did-create-window", onPopupCreated);
   });
   const stopPromise = new Promise<InjectedTaskResult>((resolve) => {
-    const settleStop = (reason: "timeout" | "cancelled" | "target_closed", message: string) => {
+    settleTaskStop = (reason: "timeout" | "cancelled" | "target_closed", message: string) => {
       if (stopReason) {
         return;
       }
       stopReason = reason;
       resolve({ ok: false, error: message });
     };
-    deadlineTimer = setTimeout(() => settleStop("timeout", `Browser task exceeded its ${timeoutMs}ms budget.`), timeoutMs);
-    onTargetDestroyed = () => settleStop("target_closed", "The browser tab closed while the delegated task was running.");
+    deadlineTimer = setTimeout(
+      () => settleTaskStop?.("timeout", `Browser task exceeded its ${timeoutMs}ms active-time budget.`),
+      deadlineRemainingMs
+    );
+    onTargetDestroyed = () => settleTaskStop?.("target_closed", "The browser tab closed while the delegated task was running.");
     contents.on("destroyed", onTargetDestroyed);
     if (signal) {
       if (signal.aborted) {
-        settleStop("cancelled", "Browser task was cancelled.");
+        settleTaskStop("cancelled", "Browser task was cancelled.");
       } else {
-        signal.addEventListener("abort", () => settleStop("cancelled", "Browser task was cancelled."), { once: true });
+        signal.addEventListener("abort", () => settleTaskStop?.("cancelled", "Browser task was cancelled."), { once: true });
       }
     }
   });
+  const pauseDeadline = () => {
+    if (deadlinePaused || stopReason) {
+      return;
+    }
+    deadlineRemainingMs = Math.max(1, deadlineRemainingMs - (Date.now() - deadlineActiveSince));
+    deadlinePaused = true;
+    if (deadlineTimer) {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+    }
+  };
+  const resumeDeadline = () => {
+    if (!deadlinePaused || stopReason) {
+      return;
+    }
+    deadlinePaused = false;
+    deadlineActiveSince = Date.now();
+    deadlineTimer = setTimeout(
+      () => settleTaskStop?.("timeout", `Browser task exceeded its ${timeoutMs}ms active-time budget.`),
+      deadlineRemainingMs
+    );
+  };
+  // Active (non-paused) budget still left, mirroring the pause-adjusted deadline timer. Rotation
+  // eligibility must use this rather than raw wall-clock (timeoutMs - elapsed), or a task paused by
+  // the user would count its paused time against the budget and be wrongly denied a fallback.
+  const activeRemainingMs = () => (deadlinePaused ? deadlineRemainingMs : deadlineRemainingMs - (Date.now() - deadlineActiveSince));
 
   let stepsUsedSoFar = 0;
   let navigationResumeCount = 0;
@@ -558,7 +622,9 @@ export async function runBrowserTask(
       const registered = await registerBrowserTaskProxyEntry({
         realBaseUrl: candidate.baseUrl,
         realApiKey: candidate.apiKey,
-        tavilyApiKey: args.tavilyApiKey,
+        webSearchProvider: args.webSearchProvider,
+        captureScreenshot: args.captureScreenshot ?? (() => captureBrowserTaskViewport(contents)),
+        visualClick: args.visualClick,
         ttlMs: timeoutMs + PROXY_TOKEN_TTL_SLOP_MS
       });
       token = registered.token;
@@ -579,6 +645,7 @@ export async function runBrowserTask(
         allowedDomains,
         allowJavaScript: Boolean(args.allowJavaScript),
         allowSensitiveActions: Boolean(args.allowSensitiveActions),
+        visualGroundingEnabled: Boolean(args.visualClick),
         visible: Boolean(args.visible)
       });
       const executionTarget = await selectBrowserTaskExecutionTarget(contents, allowedDomains, instruction);
@@ -656,10 +723,11 @@ export async function runBrowserTask(
       // renderer woke. Skipping ticks while a poll is outstanding costs nothing (the next
       // answered tick reads the same cumulative history) and bounds the backlog at one.
       let pollInFlight = false;
+      let commandPollInFlight = false;
       const pollTimer = setInterval(() => {
         if (!pollInFlight) {
           pollInFlight = true;
-          void pollProgress(executionTarget.target)
+          void pollProgress(executionTarget.target, stepsUsedSoFar, lastProgress?.stepCount ?? 0)
             .then((progress) => {
               // An in-flight poll can resolve after the instance settled (and, on a navigation
               // resume, after its steps were folded into stepsUsedSoFar) — drop it.
@@ -677,17 +745,22 @@ export async function runBrowserTask(
               }
               const isNewStep = progress.stepCount !== lastProgress?.stepCount;
               lastProgress = progress;
+              let presenceChanged = false;
+              if (presenceChipTask && progress.actions.length > 0) {
+                mergePresenceChipActions(presenceChipTask, progress.actions);
+                presenceChanged = true;
+              }
+              if (presenceChipTask && progress.phase && progress.phase !== presenceChipTask.phase) {
+                presenceChipTask.phase = progress.phase;
+                presenceChanged = true;
+              }
+              if (presenceChipTask && presenceChanged) {
+                void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
+              }
               if (isNewStep && progress.stepCount > 0) {
                 const stepIndex = stepsUsedSoFar + progress.stepCount;
                 const summary = progress.lastGoal ?? progress.lastAction ?? `step ${progress.stepCount}`;
                 onProgress?.({ stepIndex, summary, evaluation: progress.lastEvaluation, memory: progress.lastMemory });
-                if (presenceChipTask) {
-                  presenceChipTask.detail = [`Step ${stepIndex}: ${boundText(summary, PRESENCE_CHIP_LINE_CHARS)}`];
-                  if (progress.lastEvaluation) {
-                    presenceChipTask.detail.push(boundText(progress.lastEvaluation, PRESENCE_CHIP_LINE_CHARS));
-                  }
-                  void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
-                }
               }
             })
             .catch(() => {
@@ -697,6 +770,42 @@ export async function runBrowserTask(
             })
             .finally(() => {
               pollInFlight = false;
+            });
+        }
+        if (presenceChipTask && !commandPollInFlight) {
+          commandPollInFlight = true;
+          void pollPresenceCommand(contents.mainFrame)
+            .then(async (command) => {
+              if (!command || instanceSettled || command.taskId !== presenceChipTask?.id) {
+                return;
+              }
+              if (command.type === "pause" && presenceChipTask.status === "current") {
+                const paused = await setInjectedTaskPaused(executionTarget.target, true);
+                if (!instanceSettled && paused && presenceChipTask) {
+                  pauseDeadline();
+                  presenceChipTask.status = "paused";
+                  void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
+                }
+                return;
+              }
+              if (command.type === "resume" && presenceChipTask.status === "paused") {
+                const resumed = await setInjectedTaskPaused(executionTarget.target, false);
+                if (!instanceSettled && resumed && presenceChipTask) {
+                  resumeDeadline();
+                  presenceChipTask.status = "current";
+                  void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
+                }
+                return;
+              }
+              if (command.type === "stop" && presenceChipTask.status !== "stopping") {
+                presenceChipTask.status = "stopping";
+                void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
+                settleTaskStop?.("cancelled", "Browser task stopped by the user from the page-agent panel.");
+              }
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              commandPollInFlight = false;
             });
         }
         const circuitFailure = circuitFailureFromDiagnostics(getBrowserTaskProxyDiagnostics(token));
@@ -734,9 +843,14 @@ export async function runBrowserTask(
         // tab. Stop it promptly so it cannot keep scrolling/clicking the parent while the popup
         // is active, then preserve any action progress that became visible during the stop.
         await Promise.race([stopInjectedTask(executionTarget.target).catch(() => undefined), delay(STOP_GRACE_MS)]);
-        const popupProgress = await pollProgress(executionTarget.target).catch(() => undefined);
+        const popupProgress = await pollProgress(executionTarget.target, stepsUsedSoFar, lastProgress?.stepCount ?? 0).catch(
+          () => undefined
+        );
         if (popupProgress) {
           lastKnownProgress = popupProgress;
+          if (presenceChipTask && popupProgress.actions.length > 0) {
+            mergePresenceChipActions(presenceChipTask, popupProgress.actions);
+          }
         }
         finalResult = {
           ...result,
@@ -758,9 +872,11 @@ export async function runBrowserTask(
         finalResult = settled ?? result;
         if (stopReason === "infrastructure" && !finalResult.ok) {
           const progressStepCount = stepsUsedSoFar + (finalResult.stepCount ?? lastKnownProgress?.stepCount ?? 0);
-          const remainingMs = timeoutMs - (Date.now() - startedAt);
+          const remainingMs = activeRemainingMs();
           if (canRotateToNextCandidate(progressStepCount, hasNextCandidate, remainingMs)) {
-            rotatedFrom.push(`${candidate.model} (${activeModelCircuit(circuitKey)?.reason ?? finalResult.error ?? "endpoint unavailable"})`);
+            rotatedFrom.push(
+              `${candidate.model} (${activeModelCircuit(circuitKey)?.reason ?? finalResult.error ?? "endpoint unavailable"})`
+            );
             stopReason = undefined;
             continue;
           }
@@ -819,7 +935,7 @@ export async function runBrowserTask(
             reason: freshCircuitFailure.reason
           });
           const progressStepCount = stepsUsedSoFar + (finalResult.stepCount ?? lastKnownProgress?.stepCount ?? 0);
-          const remainingMs = timeoutMs - (Date.now() - startedAt);
+          const remainingMs = activeRemainingMs();
           if (canRotateToNextCandidate(progressStepCount, hasNextCandidate, remainingMs)) {
             rotatedFrom.push(`${candidate.model} (${freshCircuitFailure.reason})`);
             stopReason = undefined;
@@ -841,11 +957,25 @@ export async function runBrowserTask(
       // replace it with what actually happened and how to avoid it next time.
       const inPageReport =
         finalResult.ok && finalResult.data && finalResult.data !== "Task aborted" ? ` Last in-page report: ${finalResult.data}` : "";
-      data = `Browser task exceeded its ${timeoutMs}ms budget after ${stepCount} step(s). For multi-step tasks on slow model providers, raise timeoutMs (up to ${MAX_TIMEOUT_MS}) or split the instruction into smaller tasks.${inPageReport}`;
+      // A timeout after many steps often isn't the instruction's fault: each retried/failed
+      // upstream attempt (visible in-page as "InvokeError: Network request failed") burns real
+      // wall-clock before the retry succeeds. Surface that so the reported budget/split advice
+      // isn't the only explanation offered when the provider connection was actually the cause.
+      const failedAttempts = getBrowserTaskProxyDiagnostics(token).filter((diagnostic) => diagnostic.outcome !== "success").length;
+      const instabilityHint =
+        failedAttempts > 0
+          ? ` The model provider connection was unstable during this task (${failedAttempts} request ${
+              failedAttempts === 1 ? "attempt" : "attempts"
+            } failed and had to be retried), which likely used up part of the budget independent of task complexity.`
+          : "";
+      data = `Browser task exceeded its ${timeoutMs}ms budget after ${stepCount} step(s). For multi-step tasks on slow model providers, raise timeoutMs (up to ${MAX_TIMEOUT_MS}) or split the instruction into smaller tasks.${instabilityHint}${inPageReport}`;
     }
     if (stopReason === "infrastructure" && !success) {
       const failure = activeModelCircuit(circuitKey);
       data = `${failure?.reason ?? data} Browser-task retries for this model are paused temporarily; choose another configured model/provider or retry after the circuit cools down.`;
+    }
+    if (stopReason === "cancelled" && !success) {
+      data = "Browser task stopped by the user.";
     }
     if (stopReason === "target_closed" && !success) {
       data =
@@ -877,14 +1007,14 @@ export async function runBrowserTask(
     if (rotatedFrom.length > 0) {
       result.rotatedModels = rotatedFrom;
     }
-    // Collapse this task's chip entry to its final state -- done/failed, detail cleared -- so it
-    // reads as a finished line in the list rather than lingering on its last live step. The chip
-    // itself is never removed here: it's the tab's rolling task history now, not scoped to a
-    // single call, and naturally goes away when the page navigates (fresh JS context, nothing to
-    // carry the WeakMap entry into) rather than needing an explicit teardown on every call.
+    if (presenceChipTask && finalResult.actions?.length) {
+      mergePresenceChipActions(presenceChipTask, finalResult.actions);
+    }
+    // Terminal tasks collapse in-page but retain their action timeline and remain expandable.
+    // The panel itself is never removed here: it is the tab's complete task history, not scoped
+    // to a single call, and naturally disappears with the tab.
     if (presenceChipTask) {
-      presenceChipTask.status = success ? "done" : "failed";
-      presenceChipTask.detail = undefined;
+      presenceChipTask.status = success ? "done" : stopReason === "cancelled" ? "stopped" : "failed";
       void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
     }
     return result;
@@ -904,9 +1034,8 @@ export async function runBrowserTask(
     // Safety net for a thrown error skipping the normal finalize-and-return above: still marked
     // "current" here means that never ran, so this call ended some other way. Covers every exit
     // path without needing try-scoped variables like `success`, which finally can't see.
-    if (presenceChipTask?.status === "current") {
+    if (presenceChipTask?.status === "current" || presenceChipTask?.status === "paused" || presenceChipTask?.status === "stopping") {
       presenceChipTask.status = "failed";
-      presenceChipTask.detail = undefined;
       void updatePresenceChip(contents.mainFrame, presenceChipTasksFor(contents));
     }
   }
@@ -1076,6 +1205,49 @@ function condenseForPrompt(text: string | undefined, maxChars: number): string |
   return collapsed ? collapsed.slice(0, maxChars) : undefined;
 }
 
+async function captureBrowserTaskViewport(contents: WebContents): Promise<{ image: string; width: number; height: number }> {
+  if (contents.isDestroyed()) {
+    throw new Error("The browser tab closed before its recovery screenshot could be captured.");
+  }
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const captured = await Promise.race([
+      contents.capturePage(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Browser recovery screenshot timed out after ${SCREENSHOT_CAPTURE_TIMEOUT_MS}ms.`)),
+          SCREENSHOT_CAPTURE_TIMEOUT_MS
+        );
+        timeout.unref();
+      })
+    ]);
+    const size = captured.getSize();
+    if (captured.isEmpty() || size.width <= 0 || size.height <= 0) {
+      throw new Error("The browser returned an empty recovery screenshot.");
+    }
+    const scale = Math.min(1, SCREENSHOT_MAX_DIMENSION / Math.max(size.width, size.height));
+    const image =
+      scale < 1
+        ? captured.resize({
+            width: Math.max(1, Math.round(size.width * scale)),
+            height: Math.max(1, Math.round(size.height * scale)),
+            quality: "good"
+          })
+        : captured;
+    const outputSize = image.getSize();
+    const bytes = image.toJPEG(SCREENSHOT_JPEG_QUALITY);
+    const dataUrl = `data:image/jpeg;base64,${bytes.toString("base64")}`;
+    if (dataUrl.length > MAX_SCREENSHOT_DATA_URL_CHARS) {
+      throw new Error("The browser recovery screenshot exceeded its safe transfer limit.");
+    }
+    return { image: dataUrl, width: outputSize.width, height: outputSize.height };
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 function injectedTaskScript(
   bundleText: string,
   options: {
@@ -1089,6 +1261,7 @@ function injectedTaskScript(
     allowedDomains: string[];
     allowJavaScript: boolean;
     allowSensitiveActions: boolean;
+    visualGroundingEnabled: boolean;
     visible: boolean;
   }
 ): string {
@@ -1109,6 +1282,18 @@ if (window.__arivuPageAgentTask && window.__arivuPageAgentTask.status === "runni
 // Clear any stop reason left by a previous task in this JS context; without this a later
 // task on the same page would report a stale, false safety stop.
 window.__arivuPageAgentStopReason = undefined;
+var arivuControl = {
+  paused: false,
+  waitUntilResumed: async function(agentInstance) {
+    while (this.paused) {
+      if (!agentInstance || agentInstance.status !== "running") {
+        return;
+      }
+      await new Promise(function(resolve) { setTimeout(resolve, 100); });
+    }
+  }
+};
+window.__arivuPageAgentControl = arivuControl;
 var lib = window.__ArivuPageAgentLib;
 if (!lib) {
   return { ok: false, error: "The browser task engine failed to load." };
@@ -1130,6 +1315,7 @@ function arivuHostAllowed(host) {
 }
 var arivuAnnotateCustomControls = ${ANNOTATE_CUSTOM_CONTROLS_SNIPPET};
 var arivuOnBeforeStep = async function(agentInstance) {
+  await arivuControl.waitUntilResumed(agentInstance);
   try {
     arivuAnnotateCustomControls(document);
   } catch (err) {
@@ -1160,6 +1346,18 @@ var arivuOnBeforeStep = async function(agentInstance) {
 };
 var arivuCapPageContent = ${CAP_PAGE_CONTENT_SNIPPET};
 var arivuBackfillReflection = ${BACKFILL_REFLECTION_SNIPPET};
+var arivuScreenshotRecovery = (${CREATE_SCREENSHOT_RECOVERY_SNIPPET})({
+  endpoint: ${JSON.stringify(options.proxyBaseUrl)} + "/__arivu_screenshot",
+  token: ${JSON.stringify(options.token)},
+  thresholdMs: ${JSON.stringify(STUCK_SCREENSHOT_THRESHOLD_MS)},
+  cooldownMs: ${JSON.stringify(STUCK_SCREENSHOT_COOLDOWN_MS)},
+  minimumRepeats: 3
+});
+var arivuOnAfterStep = async function(agentInstance, history) {
+  arivuBackfillReflection(agentInstance, history);
+  await arivuScreenshotRecovery.afterStep(agentInstance, history);
+};
+var arivuBuildActions = ${BUILD_ACTIONS_SNIPPET};
 var arivuBuildTrace = ${BUILD_TRACE_SNIPPET};
 var arivuInstallAgentVisualTheme = ${INSTALL_AGENT_VISUAL_THEME_SNIPPET};
 var arivuInstallServiceNowVariableTypeGuard = ${INSTALL_SERVICE_NOW_VARIABLE_TYPE_GUARD_SNIPPET};
@@ -1216,6 +1414,57 @@ var arivuSearchWebTool = lib.tool({
     }).join("\\n\\n");
   }
 });
+var arivuInspectScreenshotTool = lib.tool({
+  description: "Capture the current visible browser viewport and attach its pixels to your NEXT observation. Last-resort recovery only: use after the same DOM action failed twice and browser_state does not explain why, when Arivu reports a no-progress loop, or once immediately before giving up / reporting task failure. Analyze the image on the next turn, then act with current DOM indices. Do not use for routine verification or repeatedly capture an unchanged page.",
+  inputSchema: lib.z.object({ reason: lib.z.string().optional() }),
+  execute: async function(input, ctx) {
+    return arivuScreenshotRecovery.capture(input && input.reason, ctx && ctx.signal);
+  }
+});
+var arivuCustomTools = {
+  search_web: arivuSearchWebTool,
+  inspect_screenshot: arivuInspectScreenshotTool
+};
+if (${JSON.stringify(options.visualGroundingEnabled)}) {
+  arivuCustomTools.locate_and_click = lib.tool({
+    description: "Last-resort GUI grounding for a visible control that current browser_state cannot expose or click. Arivu captures the viewport, asks LocateAnything for one unique point, checks that the page did not move, then clicks that point. First try the current DOM index twice. Describe one visually unique target and include nearby text or region; never use this for destructive/sensitive confirmation.",
+    inputSchema: lib.z.object({
+      target: lib.z.string(),
+      reason: lib.z.string().optional()
+    }),
+    execute: async function(input, ctx) {
+      var response;
+      try {
+        response = await fetch(${JSON.stringify(options.proxyBaseUrl)} + "/__arivu_visual_click", {
+          method: "POST",
+          headers: {
+            authorization: "Bearer " + ${JSON.stringify(options.token)},
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({ target: input.target }),
+          signal: ctx && ctx.signal
+        });
+      } catch (err) {
+        return "Visual click failed: " + String(err && err.message ? err.message : err) + ". Refresh browser_state before retrying.";
+      }
+      var data;
+      try {
+        data = await response.json();
+      } catch (err) {
+        return "Visual click returned an invalid response. Refresh browser_state before retrying.";
+      }
+      if (!response.ok || !data || data.ok !== true) {
+        return "Visual click failed" +
+          (response && typeof response.status === "number" ? " (HTTP " + response.status + ")" : "") +
+          ": " + String(data && data.error ? data.error : "unknown error") +
+          ". Refresh browser_state before retrying.";
+      }
+      return "LocateAnything clicked \\"" + data.target + "\\" at viewport (" +
+        Math.round(data.x) + ", " + Math.round(data.y) + ") using " + data.model +
+        ". Verify the result in the next browser_state.";
+    }
+  });
+}
 var core = new lib.PageAgentCore({
   pageController: pageController,
   baseURL: ${JSON.stringify(options.proxyBaseUrl)},
@@ -1224,13 +1473,30 @@ var core = new lib.PageAgentCore({
   maxSteps: ${JSON.stringify(options.maxSteps)},
   stepDelay: ${JSON.stringify(options.stepDelaySeconds)},
   maxRetries: ${JSON.stringify(LLM_MAX_RETRIES)},
+  transformRequestBody: arivuScreenshotRecovery.transformRequestBody,
   experimentalScriptExecutionTool: ${JSON.stringify(options.allowJavaScript)},
-  customTools: { search_web: arivuSearchWebTool },
+  customTools: arivuCustomTools,
   instructions: { system: ${JSON.stringify(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS)} },
   transformPageContent: arivuCapPageContent,
   onBeforeStep: arivuOnBeforeStep,
-  onAfterStep: arivuBackfillReflection
+  onAfterStep: arivuOnAfterStep
 });
+window.__arivuPageAgentActivity = { type: "starting" };
+try {
+  core.addEventListener("activity", function(event) {
+    var detail = (event && event.detail) || {};
+    window.__arivuPageAgentActivity = {
+      type: detail.type,
+      tool: detail.tool,
+      attempt: detail.attempt,
+      maxAttempts: detail.maxAttempts,
+      duration: detail.duration,
+      message: detail.message
+    };
+  });
+} catch (err) {
+  console.warn("[Arivu] Live activity reporting unavailable:", err);
+}
 // The in-page agent's own ask_user UI stays disabled regardless of visibility -- Arivu always
 // routes user-facing questions through its own ask_user tool/dialog instead (see
 // ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS). Live on-page status is now the supervisor-driven
@@ -1276,8 +1542,12 @@ return core.execute(${JSON.stringify(options.instruction)}).then(function(result
     }
   }
   var trace = { entries: [], tokensUsed: 0 };
+  var actions = [];
   try {
     trace = arivuBuildTrace(history, ${JSON.stringify(options.stepIndexOffset)});
+  } catch (err) {}
+  try {
+    actions = arivuBuildActions(history, ${JSON.stringify(options.stepIndexOffset)}, 0);
   } catch (err) {}
   var stopReason = window.__arivuPageAgentStopReason;
   var data = (result && result.data) || "";
@@ -1291,7 +1561,8 @@ return core.execute(${JSON.stringify(options.instruction)}).then(function(result
     stepCount: stepCount,
     safetyStop: !!stopReason,
     trace: trace.entries,
-    tokensUsed: trace.tokensUsed
+    tokensUsed: trace.tokensUsed,
+    actions: actions
   };
 }).catch(function(err) {
   try {
@@ -1300,7 +1571,17 @@ return core.execute(${JSON.stringify(options.instruction)}).then(function(result
   try {
     arivuCleanupUnrelatedCheckboxLabelGuard();
   } catch {}
-  return { ok: false, error: String(err && err.message ? err.message : err) };
+  var history = (core && core.history) || [];
+  var actions = [];
+  try {
+    actions = arivuBuildActions(history, ${JSON.stringify(options.stepIndexOffset)}, 0);
+  } catch (actionError) {}
+  return {
+    ok: false,
+    error: String(err && err.message ? err.message : err),
+    stepCount: actions.length,
+    actions: actions
+  };
 });
 })()`;
 }
@@ -1425,6 +1706,35 @@ const MAX_RESULT_DATA_CHARS = 16_000;
 // enough for the persisted browser-task artifact while avoiding the old last-30-only gap.
 const MAX_RESULT_TRACE_ENTRIES = MAX_MAX_STEPS;
 const MAX_RESULT_TRACE_ENTRY_CHARS = 120;
+const MAX_ACTION_NAME_CHARS = 80;
+const MAX_ACTION_FIELD_CHARS = 500;
+
+function sanitizeBrowserTaskActions(raw: unknown): BrowserTaskAction[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.slice(0, MAX_MAX_STEPS).flatMap((candidate, index) => {
+    if (!candidate || typeof candidate !== "object") {
+      return [];
+    }
+    const action = candidate as Record<string, unknown>;
+    const rawStepIndex =
+      typeof action.stepIndex === "number" && Number.isFinite(action.stepIndex) ? Math.trunc(action.stepIndex) : index + 1;
+    const sanitized: BrowserTaskAction = {
+      stepIndex: clamp(rawStepIndex, 1, MAX_MAX_STEPS),
+      name:
+        typeof action.name === "string" && action.name.trim()
+          ? boundText(action.name.replace(/\s+/g, " ").trim(), MAX_ACTION_NAME_CHARS)
+          : "unknown_action"
+    };
+    for (const field of ["input", "output", "evaluation", "memory", "goal"] as const) {
+      if (typeof action[field] === "string" && action[field].trim()) {
+        sanitized[field] = boundText(action[field].replace(/\s+/g, " ").trim(), MAX_ACTION_FIELD_CHARS);
+      }
+    }
+    return [sanitized];
+  });
+}
 
 function sanitizeInjectedResult(raw: unknown): InjectedTaskResult {
   if (!raw || typeof raw !== "object") {
@@ -1453,6 +1763,7 @@ function sanitizeInjectedResult(raw: unknown): InjectedTaskResult {
   if (typeof result.tokensUsed === "number" && Number.isFinite(result.tokensUsed) && result.tokensUsed > 0) {
     sanitized.tokensUsed = Math.trunc(result.tokensUsed);
   }
+  sanitized.actions = sanitizeBrowserTaskActions(result.actions);
   return sanitized;
 }
 
@@ -1472,6 +1783,9 @@ async function executeInjectedTask(target: JavaScriptExecutionTarget, script: st
 async function stopInjectedTask(target: JavaScriptExecutionTarget): Promise<void> {
   await target.executeJavaScript(
     `(function() {
+      if (window.__arivuPageAgentControl) {
+        window.__arivuPageAgentControl.paused = false;
+      }
       if (window.__arivuPageAgentTask && typeof window.__arivuPageAgentTask.stop === "function") {
         return window.__arivuPageAgentTask.stop().then(function() { return true; }).catch(function() { return false; });
       }
@@ -1481,8 +1795,75 @@ async function stopInjectedTask(target: JavaScriptExecutionTarget): Promise<void
   );
 }
 
-async function pollProgress(target: JavaScriptExecutionTarget): Promise<PolledProgress | undefined> {
-  const result = (await target.executeJavaScript(
+async function setInjectedTaskPaused(target: JavaScriptExecutionTarget, paused: boolean): Promise<boolean> {
+  try {
+    return Boolean(
+      await target.executeJavaScript(
+        `(function() {
+          if (!window.__arivuPageAgentControl || !window.__arivuPageAgentTask) {
+            return false;
+          }
+          window.__arivuPageAgentControl.paused = ${JSON.stringify(paused)};
+          return true;
+        })()`,
+        true
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function pollPresenceCommand(target: JavaScriptExecutionTarget | undefined): Promise<PresenceCommand | undefined> {
+  if (!target) {
+    return undefined;
+  }
+  try {
+    const raw = await target.executeJavaScript(
+      `(function() {
+        var command = window.__arivuPageAgentPresenceCommand;
+        window.__arivuPageAgentPresenceCommand = undefined;
+        return command || null;
+      })()`,
+      true
+    );
+    if (!raw || typeof raw !== "object") {
+      return undefined;
+    }
+    const command = raw as Record<string, unknown>;
+    if ((command.type !== "pause" && command.type !== "resume" && command.type !== "stop") || typeof command.taskId !== "string") {
+      return undefined;
+    }
+    return { type: command.type, taskId: boundText(command.taskId, 100) };
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizePolledProgress(raw: unknown): PolledProgress | undefined {
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const progress = raw as Record<string, unknown>;
+  const stepCount =
+    typeof progress.stepCount === "number" && Number.isFinite(progress.stepCount)
+      ? clamp(Math.trunc(progress.stepCount), 0, MAX_MAX_STEPS)
+      : 0;
+  const optionalText = (value: unknown, maxChars: number): string | undefined =>
+    typeof value === "string" && value.trim() ? boundText(value.replace(/\s+/g, " ").trim(), maxChars) : undefined;
+  return {
+    stepCount,
+    lastAction: optionalText(progress.lastAction, MAX_ACTION_NAME_CHARS),
+    lastGoal: optionalText(progress.lastGoal, MAX_ACTION_FIELD_CHARS),
+    lastEvaluation: optionalText(progress.lastEvaluation, MAX_ACTION_FIELD_CHARS),
+    lastMemory: optionalText(progress.lastMemory, MAX_ACTION_FIELD_CHARS),
+    phase: optionalText(progress.phase, 160),
+    actions: sanitizeBrowserTaskActions(progress.actions)
+  };
+}
+
+async function pollProgress(target: JavaScriptExecutionTarget, stepOffset = 0, startStep = 0): Promise<PolledProgress | undefined> {
+  const result = await target.executeJavaScript(
     `(function() {
       if (!window.__arivuPageAgentTask) {
         return null;
@@ -1491,17 +1872,34 @@ async function pollProgress(target: JavaScriptExecutionTarget): Promise<PolledPr
       var steps = history.filter(function(event) { return event && event.type === "step"; });
       var last = steps[steps.length - 1];
       var reflection = last && last.reflection;
+      var activity = window.__arivuPageAgentActivity || {};
+      var phase =
+        activity.type === "thinking"
+          ? "Thinking about the next action…"
+          : activity.type === "executing"
+            ? "Running " + String(activity.tool || "page action") + "…"
+            : activity.type === "executed"
+              ? "Finished " + String(activity.tool || "page action") +
+                (typeof activity.duration === "number" ? " in " + Math.max(0, Math.trunc(activity.duration)) + "ms." : ".")
+              : activity.type === "retrying"
+                ? "Retrying the browser model (" + String(activity.attempt || "?") + "/" + String(activity.maxAttempts || "?") + ")…"
+                : activity.type === "error"
+                  ? "Action error: " + String(activity.message || "unknown error")
+                  : "Preparing the next action…";
+      var buildActions = ${BUILD_ACTIONS_SNIPPET};
       return {
         stepCount: steps.length,
         lastAction: last && last.action && last.action.name || undefined,
         lastGoal: reflection && reflection.next_goal || undefined,
         lastEvaluation: reflection && reflection.evaluation_previous_goal || undefined,
-        lastMemory: reflection && reflection.memory || undefined
+        lastMemory: reflection && reflection.memory || undefined,
+        phase: phase,
+        actions: buildActions(history, ${JSON.stringify(stepOffset)}, ${JSON.stringify(startStep)})
       };
     })()`,
     true
-  )) as PolledProgress | null;
-  return result ?? undefined;
+  );
+  return sanitizePolledProgress(result);
 }
 
 /**
@@ -1539,6 +1937,14 @@ async function disposeAgentMask(target: JavaScriptExecutionTarget | undefined): 
  * itself, since a tab has exactly one of those. See PRESENCE_CHIP_ID's doc comment for why
  * this makes cross-frame duplication structurally impossible rather than merely patched.
  */
+function mergePresenceChipActions(task: PresenceChipTask, additions: BrowserTaskAction[]): void {
+  const byStep = new Map(task.actions.map((action) => [action.stepIndex, action]));
+  for (const action of additions) {
+    byStep.set(action.stepIndex, action);
+  }
+  task.actions = [...byStep.values()].sort((left, right) => left.stepIndex - right.stepIndex);
+}
+
 async function updatePresenceChip(mainFrame: JavaScriptExecutionTarget | undefined, tasks: PresenceChipTask[]): Promise<void> {
   try {
     await mainFrame?.executeJavaScript(`(${UPDATE_PRESENCE_CHIP_SNIPPET})(${JSON.stringify(tasks)})`, true);

@@ -3,11 +3,16 @@ import blessed from "blessed";
 import { execa } from "execa";
 import { Agent } from "../agent/Agent.js";
 import { chatContentToText } from "../agent/content.js";
-import { COMPACT_RECENT_MESSAGE_COUNT, compactSessionMessages } from "../agent/contextCompaction.js";
+import {
+  COMPACT_RECENT_MESSAGE_COUNT,
+  applyContextCompactionCheckpoint,
+  compactSessionMessages,
+  contextMessagesForSession
+} from "../agent/contextCompaction.js";
 import { OpenAICompatibleChatClient } from "../agent/OpenAICompatibleChatClient.js";
 import { AgentRunAbortedError } from "../agent/types.js";
 import type { AgentRunEvent, AgentSession, ChatMessage, ChatUsage } from "../agent/types.js";
-import { workspacePolicyOverridesForRoot, workspaceScopeRulesForRoot, type AppConfig } from "../config.js";
+import { resolveWebSearchProvider, workspacePolicyOverridesForRoot, workspaceScopeRulesForRoot, type AppConfig } from "../config.js";
 import { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { ModelCatalogStore } from "../models/ModelCatalogStore.js";
 import { resolveContextWindowTokens } from "../models/contextResolver.js";
@@ -305,7 +310,7 @@ export class TuiApp {
       cwd: this.cwd,
       model: this.config.model,
       baseUrl: this.config.baseUrl,
-      tavilyApiKey: this.config.tavilyApiKey,
+      webSearchProvider: resolveWebSearchProvider(this.config),
       mcpServers: this.config.mcpServers,
       scopePolicyRules,
       // Per-model window from the catalog, capped by any hand-entered provider value.
@@ -727,7 +732,7 @@ export class TuiApp {
 
     try {
       const now = new Date();
-      const result = compactSessionMessages(this.currentSession.messages, {
+      const result = compactSessionMessages(contextMessagesForSession(this.currentSession), {
         recentMessageCount,
         now
       });
@@ -744,9 +749,9 @@ export class TuiApp {
 
       const compactedSession: AgentSession = {
         ...this.currentSession,
-        messages: result.messages,
         updatedAt: now.toISOString()
       };
+      applyContextCompactionCheckpoint(compactedSession, result, "deterministic", now);
       await this.store.save(compactedSession);
 
       this.currentSession = compactedSession;
@@ -764,7 +769,8 @@ export class TuiApp {
           `Compacted session ${compactedSession.id}.`,
           `Compacted messages: ${result.compactedMessageCount}`,
           `Kept recent messages: ${result.remainingMessageCount}`,
-          `Stored messages now: ${result.messages.length}`
+          `Working context messages: ${result.messages.length}`,
+          `Full transcript messages preserved: ${compactedSession.messages.length}`
         ].join("\n"),
         time: now
       });
@@ -823,7 +829,8 @@ export class TuiApp {
         text: [
           `Summarized session ${summarizedSession.id} (${result.source}).`,
           `Summarized messages: ${result.compactedMessageCount}`,
-          `Stored messages now: ${summarizedSession.messages.length}`
+          `Working context messages: ${result.remainingMessageCount}`,
+          `Full transcript messages preserved: ${summarizedSession.messages.length}`
         ].join("\n"),
         time: now
       });

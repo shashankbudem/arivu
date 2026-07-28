@@ -3,6 +3,7 @@ import type { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { createToolRegistry } from "../tools/registry.js";
 import type { ChangeCheckpoint } from "../tools/changeCheckpoint.js";
 import type { BrowserTaskModelConfig, BrowserToolController } from "../tools/browserControl.js";
+import type { WebSearchProviderProfile } from "../tools/webSearchProvider.js";
 import type { Elicitor } from "../tools/elicitation.js";
 import type { RuntimeControl } from "../tools/runtimeControl.js";
 import { detectWorkspace } from "../workspace.js";
@@ -11,9 +12,11 @@ import { stripFencedCodeBlocks } from "./textualToolCalls.js";
 import {
   AUTO_COMPACT_REQUEST_TOKEN_LIMIT,
   MODEL_SUMMARY_PREFIX,
+  applyContextCompactionCheckpoint,
   applyModelSummary,
   compactMessagesForModelRequest,
   compactSessionMessages,
+  contextMessagesForSession,
   estimateMessageTokens,
   messagesToSummarize
 } from "./contextCompaction.js";
@@ -22,6 +25,7 @@ import { parseContextLimit } from "../models/contextLimitParser.js";
 import { AgentRunAbortedError } from "./types.js";
 import type { AgentRunOptions, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse, ToolCall } from "./types.js";
 import type { AppConfig } from "../config.js";
+import { ensureSessionTitle } from "../sessions/sessionList.js";
 
 const MAX_STEPS = 500;
 const SYSTEM_PROMPT_VERSION = 13;
@@ -61,6 +65,10 @@ const MAX_TOOL_MIMICRY_RETRIES = 2;
 // plausible recovery window between attempts instead.
 const MAX_EMPTY_RESPONSE_RETRIES = 3;
 const EMPTY_RESPONSE_RETRY_DELAY_MS = 150_000;
+/** Throttle between successive provider requests within one run, to avoid tripping rate limits
+ *  on multi-step tasks that make many tool-call round trips in quick succession. Not applied by
+ *  default (see AgentOptions.minStepIntervalMs) -- callers opt in explicitly with this value. */
+export const DEFAULT_MIN_STEP_INTERVAL_MS = 10_000;
 /** A stuck summary call must not stall the run; past this the step proceeds on transient compaction. */
 const AUTO_SUMMARY_TIMEOUT_MS = 120_000;
 /** After an auto-summary attempt, wait for this much message growth before trying again. */
@@ -69,6 +77,20 @@ const AUTO_SUMMARY_RETRY_MESSAGE_GROWTH = 8;
 const MIN_AUTO_SUMMARY_MESSAGE_COUNT = 6;
 /** Bound provider mistakes without letting a multi-TODO browser run silently terminate early. */
 const MAX_BROWSER_CHECKLIST_COMPLETION_RETRIES = 4;
+// Some models never internalize a tool rejection: a benchmarked ServiceNow run re-issued one
+// invalid browser_task call 45 times, each rejected with the identical guard error, and burned
+// most of its three hours doing so. Identical failures are tracked per (tool, error text) for the
+// whole run — not per exact arguments, so retrying the same rejected pattern with a different URL
+// still counts — and from the second one the model is steered twice over: an inline notice
+// appended to the failing tool result, and a transient system instruction on every later step.
+const REPEATED_TOOL_FAILURE_THRESHOLD = 2;
+/** Identity and display use this much normalized error text; identical prefixes are the same failure. */
+const REPEATED_TOOL_FAILURE_ERROR_LIMIT = 400;
+/** The transient instruction lists at most this many distinct repeated failures, newest first. */
+const REPEATED_TOOL_FAILURE_REPORT_LIMIT = 3;
+const RUN_RECOVERY_NOTE_PREFIX = "Run recovery note:";
+const RUN_RECOVERY_ERROR_LIMIT = 800;
+const RUN_RECOVERY_CHECKLIST_LIMIT = 12_000;
 
 export class Agent {
   private readonly session: AgentSession;
@@ -83,13 +105,15 @@ export class Agent {
       projectRoot?: string | null;
       model?: string;
       baseUrl?: string;
-      tavilyApiKey?: string;
+      webSearchProvider?: WebSearchProviderProfile;
       mcpServers?: AppConfig["mcpServers"];
       scopePolicyRules?: AppConfig["workspacePolicies"][string]["scopeRules"];
       browser?: BrowserToolController;
       browserTaskModel?: BrowserTaskModelConfig;
       runtimeControl?: RuntimeControl;
       directEditReview?: boolean;
+      /** Appended to the built-in system prompt every run (AppConfig.customSystemPrompt). */
+      customInstructions?: string;
       /** Frontend renderer for the ask_user tool's structured questions; omit for headless runs. */
       elicit?: Elicitor;
       contextWindowTokens?: number;
@@ -103,6 +127,10 @@ export class Agent {
       autoSummaryTimeoutMs?: number;
       /** Test seam for the empty-assistant-response retry delay; production uses the default. */
       emptyResponseRetryDelayMs?: number;
+      /** Pause between successive normal main-loop provider requests in this run.
+       *  0/undefined (the default) means no delay -- pass DEFAULT_MIN_STEP_INTERVAL_MS or a
+       *  custom value to throttle. */
+      minStepIntervalMs?: number;
       checkpoint?: ChangeCheckpoint;
       session?: AgentSession;
     }
@@ -121,19 +149,28 @@ export class Agent {
 
   /**
    * Model-generated summary compaction: ask the model to summarize the older conversation, then
-   * replace it with that summary while keeping recent turns verbatim. Falls back to deterministic
-   * compaction if the model call fails or produces nothing usable.
+   * save that summary as the model's derived working context while preserving every canonical
+   * transcript message. Falls back to deterministic compaction if the model call fails or
+   * produces nothing usable.
    */
   async summarizeContext(runOptions: AgentRunOptions = {}): Promise<{
     session: AgentSession;
     compacted: boolean;
     compactedMessageCount: number;
+    remainingMessageCount: number;
     source: "model" | "deterministic" | "none";
   }> {
     throwIfAborted(runOptions.signal);
-    const older = messagesToSummarize(this.session.messages);
+    const workingMessages = contextMessagesForSession(this.session);
+    const older = messagesToSummarize(workingMessages);
     if (older.length === 0) {
-      return { session: this.session, compacted: false, compactedMessageCount: 0, source: "none" };
+      return {
+        session: this.session,
+        compacted: false,
+        compactedMessageCount: 0,
+        remainingMessageCount: workingMessages.filter((message) => message.role !== "system").length,
+        source: "none"
+      };
     }
 
     const tokenLimit = requestTokenLimitForContextWindow(this.options.contextWindowTokens);
@@ -154,15 +191,17 @@ export class Agent {
       if (!summary) {
         throw new Error("Model returned an empty summary.");
       }
-      const result = applyModelSummary(this.session.messages, summary);
+      const compactedAt = new Date();
+      const result = applyModelSummary(workingMessages, summary, { now: compactedAt });
       if (result.compacted) {
-        this.session.messages.splice(0, this.session.messages.length, ...result.messages);
+        applyContextCompactionCheckpoint(this.session, result, "model", compactedAt);
         this.touch();
       }
       return {
         session: this.session,
         compacted: result.compacted,
         compactedMessageCount: result.compactedMessageCount,
+        remainingMessageCount: result.remainingMessageCount,
         source: result.compacted ? "model" : "none"
       };
     } catch (error) {
@@ -170,30 +209,33 @@ export class Agent {
         throw error;
       }
       // Deterministic fallback keeps the feature reliable when a provider cannot summarize.
-      const result = compactSessionMessages(this.session.messages);
+      const compactedAt = new Date();
+      const result = compactSessionMessages(workingMessages, { now: compactedAt });
       if (result.compacted) {
-        this.session.messages.splice(0, this.session.messages.length, ...result.messages);
+        applyContextCompactionCheckpoint(this.session, result, "deterministic", compactedAt);
         this.touch();
       }
       return {
         session: this.session,
         compacted: result.compacted,
         compactedMessageCount: result.compactedMessageCount,
+        remainingMessageCount: result.remainingMessageCount,
         source: result.compacted ? "deterministic" : "none"
       };
     }
   }
 
   /**
-   * In-run compaction: when the transcript outgrows the request budget, replace the older
-   * conversation with a model-written summary BEFORE the next step, so the model keeps working
-   * from a coherent brief instead of the blind per-request truncation. Deliberately quiet about
-   * failure: on timeout or provider error the step proceeds and transient request compaction
-   * still bounds the payload — a degraded request beats a stalled run. A user stop still aborts.
+   * In-run compaction: when the working context outgrows the request budget, derive a
+   * model-written summary BEFORE the next step. The canonical transcript remains untouched.
+   * Deliberately quiet about failure: on timeout or provider error the step proceeds and
+   * transient request compaction still bounds the payload — a degraded request beats a stalled
+   * run. A user stop still aborts.
    */
   private async maybeAutoSummarizeSession(runOptions: AgentRunOptions): Promise<void> {
     const tokenLimit = requestTokenLimitForContextWindow(this.options.contextWindowTokens) ?? AUTO_COMPACT_REQUEST_TOKEN_LIMIT;
-    if (estimateMessageTokens(this.session.messages) <= tokenLimit) {
+    const workingMessages = contextMessagesForSession(this.session);
+    if (estimateMessageTokens(workingMessages) <= tokenLimit) {
       return;
     }
     if (this.autoSummaryFloor > 0 && this.session.messages.length < this.autoSummaryFloor + AUTO_SUMMARY_RETRY_MESSAGE_GROWTH) {
@@ -201,7 +243,7 @@ export class Agent {
       // that could not get under the limit does not re-fire on every step.
       return;
     }
-    const older = messagesToSummarize(this.session.messages);
+    const older = messagesToSummarize(workingMessages);
     if (older.length < MIN_AUTO_SUMMARY_MESSAGE_COUNT) {
       return;
     }
@@ -236,24 +278,12 @@ export class Agent {
       if (!summary) {
         return;
       }
-      // Recent message objects survive by reference, so task-run indexes can be remapped by
-      // identity; runs whose user message was folded into the summary point at the summary itself.
-      const trackedRuns = (this.session.taskRuns ?? []).map((run) => ({ run, message: this.session.messages[run.userMessageIndex] }));
-      const result = applyModelSummary(this.session.messages, summary);
+      const compactedAt = new Date();
+      const result = applyModelSummary(workingMessages, summary, { now: compactedAt });
       if (!result.compacted) {
         return;
       }
-      this.session.messages.splice(0, this.session.messages.length, ...result.messages);
-      const summaryIndex = Math.max(
-        0,
-        this.session.messages.findIndex(
-          (message) => message.role === "system" && chatContentToText(message.content).startsWith(MODEL_SUMMARY_PREFIX)
-        )
-      );
-      for (const { run, message } of trackedRuns) {
-        const index = message ? this.session.messages.indexOf(message) : -1;
-        run.userMessageIndex = index >= 0 ? index : summaryIndex;
-      }
+      applyContextCompactionCheckpoint(this.session, result, "model", compactedAt);
       this.autoSummaryFloor = this.session.messages.length;
       this.touch();
     } catch {
@@ -271,8 +301,10 @@ export class Agent {
     runOptions: AgentRunOptions,
     mode: "prompt" | "continue"
   ): Promise<{ output: string; session: AgentSession }> {
-    const rollbackMessages = cloneMessages(this.session.messages);
-    const rollbackTaskRunIndexes = taskRunIndexSnapshot(this.session);
+    // A signal that was already stopped never started a turn, so leave the session byte-for-byte
+    // unchanged. Once setup or a model/tool step begins, however, the catch below deliberately keeps
+    // every completed message so a later Continue can resume from the real partial state.
+    throwIfAborted(runOptions.signal);
     const promptAlreadyInSession = runOptions.promptAlreadyInSession === true;
     const existingPromptMessage = promptAlreadyInSession ? this.session.messages.at(-1) : undefined;
     if (promptAlreadyInSession && mode !== "prompt") {
@@ -291,7 +323,7 @@ export class Agent {
     const tools = createToolRegistry({
       workspaceRoot: workspace.root,
       approvals: this.options.approvals,
-      tavilyApiKey: this.options.tavilyApiKey,
+      webSearchProvider: this.options.webSearchProvider,
       mcpServers: this.options.mcpServers,
       scopePolicyRules: this.options.scopePolicyRules,
       browser: this.options.browser,
@@ -313,14 +345,14 @@ export class Agent {
     if (!existingSystem) {
       this.session.messages.unshift({
         role: "system",
-        content: systemPrompt(workspace.root)
+        content: systemPrompt(workspace.root, this.options.customInstructions)
       });
       shiftTaskRunMessageIndexes(this.session, 0, 1);
     } else {
       // Rebuild the base prompt from scratch each run so it stays at the current version and reflects
       // the active workspace, rather than accreting appended sentences forever. Separate system
       // messages (loop instructions, loaded skills) are untouched.
-      existingSystem.content = systemPrompt(workspace.root);
+      existingSystem.content = systemPrompt(workspace.root, this.options.customInstructions);
     }
 
     const insertBeforeSavedPrompt = (message: ChatMessage) => {
@@ -346,16 +378,31 @@ export class Agent {
 
     const attachedSkillMessages = mode === "prompt" ? await skillMessagesForPrompt(prompt, availableSkillNames, loadedSkillNames) : [];
     if (mode === "prompt" && !promptAlreadyInSession) {
-      this.session.messages.push({ role: "user", content: trimChatContent(prompt) });
+      this.session.messages.push({ role: "user", content: trimChatContent(prompt), createdAt: new Date().toISOString() });
+      // Freeze a permanent title from the first real user turn so later context compaction
+      // (which may drop that message) does not blank the chat list label.
+      ensureSessionTitle(this.session);
     }
 
+    const promptText = chatContentToText(prompt);
+    const recoveryNotesAtStart = this.session.messages.filter(isRunRecoveryNote);
+    // A terse "Continue" must inherit the original browser checklist from conversation history.
+    // Otherwise the completion gate disappears exactly when a stopped/failed run needs it most.
+    const browserContinuationRequested = mode === "continue" || isBrowserContinuationPrompt(promptText);
+    if (!browserContinuationRequested) {
+      // Recovery guidance belongs only to a continuation. A new, unrelated prompt must not be
+      // biased toward resuming stale work from an earlier failed turn.
+      removeRunRecoveryNotes(this.session, recoveryNotesAtStart);
+    }
+    const browserChecklist = browserChecklistScopeForRun(promptText, this.session.messages, browserContinuationRequested);
+    const continuingBrowserRun = browserContinuationRequested && hasRecentBrowserActivity(this.session.messages);
     try {
       throwIfAborted(runOptions.signal);
       let webSearchCalls = 0;
-      const browserChecklist = browserChecklistScope(chatContentToText(prompt));
-      let browserTaskUsed = false;
+      let browserTaskUsed = continuingBrowserRun;
       let checklistCompletionRetries = 0;
       let checklistMissingIds: string[] = [];
+      let rejectedFutureIntent = false;
 
       const allowedToolNames = runOptions.allowedToolNames ? new Set(runOptions.allowedToolNames) : undefined;
       const toolSchemas = allowedToolNames ? tools.schemas.filter((tool) => allowedToolNames.has(tool.name)) : tools.schemas;
@@ -372,12 +419,31 @@ export class Agent {
 
       let mimicryRetries = 0;
       let emptyResponseRetries = 0;
+      let previousNormalMainRequestCompleted = false;
+      const waitBeforeNextNormalMainRequest = async () => {
+        if (!previousNormalMainRequestCompleted || !this.options.minStepIntervalMs) {
+          return;
+        }
+        await delay(this.options.minStepIntervalMs, runOptions.signal);
+        previousNormalMainRequestCompleted = false;
+      };
+      const applySteeringMessages = async () => {
+        const messages = (await runOptions.takeSteeringMessages?.()) ?? [];
+        if (messages.length === 0) {
+          return 0;
+        }
+        this.session.messages.push(...messages);
+        await runOptions.onSteeringMessagesApplied?.(messages);
+        return messages.length;
+      };
+      const repeatedToolFailures: RepeatedToolFailureTracker = { nextOrder: 0, failures: new Map() };
       const emptyResponseRetryDelayMs = this.options.emptyResponseRetryDelayMs ?? EMPTY_RESPONSE_RETRY_DELAY_MS;
       for (let step = 0; step < MAX_STEPS; step += 1) {
         throwIfAborted(runOptions.signal);
         // When the transcript has outgrown the request budget, fold the older conversation into a
         // model-written summary before this step; on failure the transient compaction below copes.
         await this.maybeAutoSummarizeSession(runOptions);
+        await applySteeringMessages();
         // Re-resolved every step so in-app tool toggles flipped mid-run take effect at the next
         // model request instead of waiting for the next prompt.
         const disabledToolNames = await resolveDisabledToolNames(runOptions.disabledToolNames);
@@ -387,13 +453,18 @@ export class Agent {
         const availableTools = toolSchemas.filter(
           (tool) => !disabledToolNames.has(tool.name) && (webSearchCalls === 0 || tool.name !== WEB_SEARCH_TOOL)
         );
+        // Keep the configured pause strictly between normal main-loop requests. Waiting here
+        // means tool work happens immediately after its requesting response, and a final answer
+        // returns immediately rather than sitting through an unnecessary trailing delay.
+        await waitBeforeNextNormalMainRequest();
         const response = await this.complete(
           {
-            messages: messagesForStep(this.session.messages, webSearchCalls, [
+            messages: messagesForStep(contextMessagesForSession(this.session), webSearchCalls, [
               skillInstruction,
               ...attachedSkillMessages,
-              browserChecklistInstruction(browserChecklist, checklistMissingIds, checklistCompletionRetries > 0),
-              toolMimicryInstruction(mimicryRetries)
+              browserChecklistInstruction(browserChecklist, checklistMissingIds, checklistCompletionRetries > 0, rejectedFutureIntent),
+              toolMimicryInstruction(mimicryRetries),
+              repeatedToolFailureInstruction(repeatedToolFailures)
             ]),
             tools: availableTools
           },
@@ -402,8 +473,13 @@ export class Agent {
         if (response.usage) {
           await runOptions.onUsage?.(response.usage);
         }
+        previousNormalMainRequestCompleted = true;
         const toolCalls = allowedToolCalls(response.message.toolCalls, availableTools);
-        const message = toolCalls === response.message.toolCalls ? response.message : { ...response.message, toolCalls };
+        const message = {
+          ...(toolCalls === response.message.toolCalls ? response.message : { ...response.message, toolCalls }),
+          // Provider messages have no local transcript timestamp; stamp once when accepted.
+          createdAt: response.message.createdAt ?? new Date().toISOString()
+        };
         this.session.messages.push(message);
 
         if (!toolCalls || toolCalls.length === 0) {
@@ -430,6 +506,10 @@ export class Agent {
               // it forward -- the next attempt should look identical to this one, not "answer
               // the same prompt again, but there's now an empty assistant turn in the history."
               this.session.messages.pop();
+              // Preserve the existing ordering for empty-response recovery: the configured
+              // main-request throttle is observed before its dedicated retry backoff. This also
+              // consumes the pending interval so the next loop does not wait twice.
+              await waitBeforeNextNormalMainRequest();
               // The wait below can run for minutes with no other activity -- tell the UI why,
               // so it doesn't read as a hang worth cancelling.
               await runOptions.onEvent?.({
@@ -463,21 +543,34 @@ export class Agent {
             this.session.messages.pop();
             continue;
           }
+          // A steering message may arrive while the provider is producing what it believes is a
+          // final response. Keep that response in the transcript, append the user's new direction,
+          // and take another model step instead of ending the run underneath the user.
+          if ((await applySteeringMessages()) > 0) {
+            emptyResponseRetries = 0;
+            continue;
+          }
           const incompleteChecklistIds =
             browserTaskUsed && browserChecklist ? browserChecklist.ids.filter((id) => !outputMarksTodoComplete(output, id)) : [];
-          if (
-            incompleteChecklistIds.length > 0 &&
-            checklistCompletionRetries < MAX_BROWSER_CHECKLIST_COMPLETION_RETRIES &&
-            !outputReportsExternalBlocker(output)
-          ) {
+          const promisesMoreBrowserWork = browserTaskUsed && outputPromisesFurtherBrowserWork(output);
+          if ((incompleteChecklistIds.length > 0 || promisesMoreBrowserWork) && !outputReportsExternalBlocker(output)) {
+            // A reply without a native tool call ends the run. Future-tense narration such as
+            // "Let me create the remaining variables" is therefore not progress; reject it just
+            // like an incomplete checklist final and explicitly demand the next real tool call.
+            this.session.messages.pop();
+            if (checklistCompletionRetries >= MAX_BROWSER_CHECKLIST_COMPLETION_RETRIES) {
+              const missing = incompleteChecklistIds.length > 0 ? ` Missing: TODO ${incompleteChecklistIds.join(", TODO ")}.` : "";
+              throw new Error(
+                `Browser run did not reach a verified final after ${MAX_BROWSER_CHECKLIST_COMPLETION_RETRIES} corrective retries.${missing} The partial browser transcript was preserved so Continue can resume after inspecting current state.`
+              );
+            }
             checklistCompletionRetries += 1;
             checklistMissingIds = incompleteChecklistIds;
-            // A no-tool assistant message ends the run. Drop the premature summary and
-            // re-prompt with the original completion scope instead.
-            this.session.messages.pop();
+            rejectedFutureIntent = promisesMoreBrowserWork;
             continue;
           }
           emptyResponseRetries = 0;
+          removeRunRecoveryNotes(this.session, recoveryNotesAtStart);
           this.touch();
           return {
             output,
@@ -491,19 +584,28 @@ export class Agent {
         if (toolCalls.some((call) => call.name === BROWSER_TASK_TOOL)) {
           browserTaskUsed = true;
         }
-        webSearchCalls += await this.executeToolCalls(toolCalls, tools, runOptions);
+        // The corrective future-intent notice did its job once the model emitted a real tool call.
+        rejectedFutureIntent = false;
+        webSearchCalls += await this.executeToolCalls(toolCalls, tools, runOptions, repeatedToolFailures);
       }
 
       const output = `Stopped after reaching the maximum tool-call depth (${MAX_STEPS} steps). Continue to resume from here.`;
-      this.session.messages.push({ role: "assistant", content: output });
+      this.session.messages.push({ role: "assistant", content: output, createdAt: new Date().toISOString() });
       this.touch();
       return {
         output,
         session: this.session
       };
     } catch (error) {
-      this.session.messages.splice(0, this.session.messages.length, ...rollbackMessages);
-      restoreTaskRunMessageIndexes(this.session, rollbackTaskRunIndexes);
+      const aborted = error instanceof AgentRunAbortedError || runOptions.signal?.aborted === true;
+      // Never roll an in-progress turn back. Reads are useful continuation evidence too, and a user
+      // Stop is precisely when browser side effects may already exist. Remove only an unsendable
+      // empty assistant shell, repair any tool call interrupted before its result was recorded, then
+      // leave a compact durable instruction explaining how the next run must resume safely.
+      removeTrailingEmptyAssistant(this.session.messages);
+      repairDanglingToolCalls(this.session.messages, error);
+      appendRunRecoveryNote(this.session.messages, error, aborted, browserChecklist);
+      this.touch();
       throw error;
     }
   }
@@ -517,7 +619,8 @@ export class Agent {
   private async executeToolCalls(
     toolCalls: NonNullable<ChatMessage["toolCalls"]>,
     tools: { execute(name: string, args: unknown): Promise<string> },
-    runOptions: AgentRunOptions
+    runOptions: AgentRunOptions,
+    repeatedFailures: RepeatedToolFailureTracker
   ): Promise<number> {
     let webSearchCalls = 0;
     let index = 0;
@@ -530,13 +633,21 @@ export class Agent {
         }
         const batch = toolCalls.slice(start, index);
         const results = await this.runToolCallBatch(batch, tools, runOptions);
+        // Failure tracking happens here at append time, not inside the concurrent workers, so
+        // repeat counts and their inline notices always follow the original call order.
         for (let offset = 0; offset < batch.length; offset += 1) {
-          this.appendToolResult(batch[offset]!, results[offset]!);
+          const call = batch[offset]!;
+          const result = results[offset]!;
+          this.appendToolResult(call, noteRepeatedToolFailure(repeatedFailures, call.name, result));
+          // Append first: Desktop's event recorder persists the shared session while handling this
+          // event, so the matching transcript result must already be present on disk at that point.
+          await runOptions.onEvent?.({ type: "tool_result", toolCallId: call.id, name: call.name, result });
         }
       } else {
         const call = toolCalls[start]!;
         const result = await this.runSingleToolCall(call, tools, runOptions);
-        this.appendToolResult(call, result);
+        this.appendToolResult(call, noteRepeatedToolFailure(repeatedFailures, call.name, result));
+        await runOptions.onEvent?.({ type: "tool_result", toolCallId: call.id, name: call.name, result });
         if (call.name === WEB_SEARCH_TOOL) {
           webSearchCalls += 1;
         }
@@ -577,13 +688,17 @@ export class Agent {
     runOptions: AgentRunOptions
   ): Promise<string> {
     await runOptions.onEvent?.({ type: "tool_call", call });
-    const result = await tools.execute(call.name, call.arguments);
-    await runOptions.onEvent?.({ type: "tool_result", toolCallId: call.id, name: call.name, result });
-    return result;
+    return tools.execute(call.name, call.arguments);
   }
 
   private appendToolResult(call: ToolCall, result: string) {
-    this.session.messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: result });
+    this.session.messages.push({
+      role: "tool",
+      toolCallId: call.id,
+      name: call.name,
+      content: result,
+      createdAt: new Date().toISOString()
+    });
   }
 
   private async complete(request: ChatRequest, runOptions: AgentRunOptions): Promise<ChatResponse> {
@@ -671,7 +786,7 @@ function createSession(
   };
 }
 
-function systemPrompt(workspaceRoot: string) {
+function systemPrompt(workspaceRoot: string, customInstructions?: string) {
   return [
     "You are Arivu, a local CLI coding agent.",
     `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
@@ -710,7 +825,10 @@ function systemPrompt(workspaceRoot: string) {
     "For current browser, latest page, active tab, or user-changed browser questions, call browser_state first, then inspect the active or intended tab with browser_screenshot in the same turn before answering. Do not answer from older browser evidence.",
     "Do not use emojis in assistant replies.",
     `The active workspace root is ${workspaceRoot}.`,
-    `(Arivu system prompt v${SYSTEM_PROMPT_VERSION}.)`
+    `(Arivu system prompt v${SYSTEM_PROMPT_VERSION}.)`,
+    ...(customInstructions?.trim()
+      ? ["", "--- User-configured custom instructions (Settings > Custom system prompt) ---", customInstructions.trim()]
+      : [])
   ].join("\n");
 }
 
@@ -789,10 +907,6 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function taskRunIndexSnapshot(session: AgentSession) {
-  return new Map((session.taskRuns ?? []).map((run) => [run.id, run.userMessageIndex]));
-}
-
 function shiftTaskRunMessageIndexes(session: AgentSession, insertionIndex: number, amount: number) {
   for (const run of session.taskRuns ?? []) {
     if (run.userMessageIndex >= insertionIndex) {
@@ -801,13 +915,156 @@ function shiftTaskRunMessageIndexes(session: AgentSession, insertionIndex: numbe
   }
 }
 
-function restoreTaskRunMessageIndexes(session: AgentSession, indexes: Map<string, number>) {
-  for (const run of session.taskRuns ?? []) {
-    const index = indexes.get(run.id);
-    if (index !== undefined) {
-      run.userMessageIndex = index;
+/**
+ * Ensure the tail of the transcript is a valid tool protocol after a run failed mid-flight. When an
+ * error is thrown while an assistant turn's tool calls are still being executed, some tool-result
+ * messages may be missing — leaving an assistant message with `toolCalls` that the provider will
+ * reject on the next request ("tool_calls without matching tool results"). Append a synthetic error
+ * result for each unsatisfied call so the transcript stays sendable while still recording that the
+ * work happened. No-op when every tool call already has a result (the common provider-error case,
+ * where the failure was in the model request itself, between fully-formed turns).
+ */
+function removeTrailingEmptyAssistant(messages: ChatMessage[]) {
+  const tail = messages.at(-1);
+  if (tail?.role === "assistant" && !tail.toolCalls?.length && chatContentToText(tail.content).trim().length === 0) {
+    messages.pop();
+  }
+}
+
+function repairDanglingToolCalls(messages: ChatMessage[], error: unknown) {
+  let assistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "assistant" && message.toolCalls?.length) {
+      assistantIndex = index;
+      break;
+    }
+    // A user/system message after the last tool-calling assistant means that turn is already closed.
+    if (message?.role === "user" || message?.role === "assistant") {
+      return;
     }
   }
+  const assistant = assistantIndex >= 0 ? messages[assistantIndex] : undefined;
+  if (!assistant?.toolCalls?.length) {
+    return;
+  }
+  const satisfied = new Set(
+    messages
+      .slice(assistantIndex + 1)
+      .filter((message) => message.role === "tool" && message.toolCallId)
+      .map((message) => message.toolCallId)
+  );
+  const detail = compactRunErrorDetail(error);
+  for (const call of assistant.toolCalls) {
+    if (satisfied.has(call.id)) {
+      continue;
+    }
+    messages.push({
+      role: "tool",
+      toolCallId: call.id,
+      name: call.name,
+      content: `Tool "${call.name}" did not finish: the run was interrupted by an error before its result was recorded (${detail}).`
+    });
+  }
+}
+
+function appendRunRecoveryNote(messages: ChatMessage[], error: unknown, aborted: boolean, checklist: BrowserChecklistScope | undefined) {
+  const lines = [
+    `${RUN_RECOVERY_NOTE_PREFIX} The immediately preceding agent run ${aborted ? "was stopped by the user" : "failed before it finished"}.`,
+    aborted ? undefined : `Failure: ${compactRunErrorDetail(error)}`,
+    checklist ? `Original browser completion scope remains: ${checklist.ids.map((id) => `TODO ${id}`).join(", ")}.` : undefined,
+    checklist ? durableChecklistExcerpts(checklist) : undefined,
+    "All preceding assistant tool calls and tool results are durable partial-work evidence. On continuation, inspect those results and current external state, keep successful side effects, and resume only unfinished work. Never repeat a successful create/update merely because the prior run stopped."
+  ].filter((line): line is string => Boolean(line));
+  const content = lines.join("\n");
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message && isRunRecoveryNote(message)) {
+      // Keep one stable marker instead of accumulating an immortal system message per failure.
+      // Updating in place also leaves every task-run userMessageIndex untouched.
+      message.content = content;
+      return;
+    }
+  }
+  messages.push({ role: "system", content });
+}
+
+function isRunRecoveryNote(message: ChatMessage) {
+  return message.role === "system" && chatContentToText(message.content).startsWith(RUN_RECOVERY_NOTE_PREFIX);
+}
+
+function removeRunRecoveryNotes(session: AgentSession, notes: ChatMessage[]) {
+  const noteSet = new Set(notes);
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    if (!noteSet.has(session.messages[index]!)) {
+      continue;
+    }
+    session.messages.splice(index, 1);
+    for (const run of session.taskRuns ?? []) {
+      if (run.userMessageIndex > index) {
+        run.userMessageIndex -= 1;
+      }
+    }
+  }
+}
+
+function durableChecklistExcerpts(checklist: BrowserChecklistScope) {
+  const lines = ["Original browser checklist requirements (preserved for continuation):"];
+  let remaining = RUN_RECOVERY_CHECKLIST_LIMIT - lines[0]!.length;
+  for (const excerpt of checklist.excerpts) {
+    if (remaining <= 0) {
+      break;
+    }
+    const line = `- ${excerpt}`.slice(0, remaining);
+    lines.push(line);
+    remaining -= line.length + 1;
+  }
+  return lines.join("\n");
+}
+
+function compactRunErrorDetail(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw
+    .replace(/(authorization\s*[:=]\s*)(?:bearer\s+)?\S+/gi, "$1[redacted]")
+    .replace(/((?:api[_-]?key|password)\s*[:=]\s*)\S+/gi, "$1[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, RUN_RECOVERY_ERROR_LIMIT);
+}
+
+function isBrowserContinuationPrompt(prompt: string) {
+  const text = prompt.toLowerCase().replace(/\s+/g, " ").trim();
+  return /^(?:please\s+)?(?:continue|resume|proceed|keep going|go on)(?:\s+(?:the|this|from|with|where|working)\b.*)?[.!?]*$/.test(text);
+}
+
+function browserChecklistScopeForRun(
+  prompt: string,
+  messages: ChatMessage[],
+  browserContinuationRequested = isBrowserContinuationPrompt(prompt)
+): BrowserChecklistScope | undefined {
+  const direct = browserChecklistScope(prompt);
+  if (direct || !browserContinuationRequested) {
+    return direct;
+  }
+
+  // Prefer the most recent explicit user checklist. If compaction already folded that prompt, its
+  // model summary is the next-best durable source. Assistant completion prose is deliberately not
+  // searched because it may mention only the subset it happened to finish.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user" && message?.role !== "system") {
+      continue;
+    }
+    const text = chatContentToText(message.content);
+    if (message.role === "system" && !text.startsWith(MODEL_SUMMARY_PREFIX) && !text.startsWith(RUN_RECOVERY_NOTE_PREFIX)) {
+      continue;
+    }
+    const inherited = browserChecklistScope(text);
+    if (inherited) {
+      return inherited;
+    }
+  }
+  return undefined;
 }
 
 function shouldRefreshBrowserEvidence(prompt: ChatContent, mode: "prompt" | "continue", messages: ChatMessage[]) {
@@ -905,7 +1162,7 @@ async function executeSyntheticToolCall(
   messages: ChatMessage[],
   call: ToolCall
 ) {
-  messages.push({ role: "assistant", content: "", toolCalls: [call] });
+  messages.push({ role: "assistant", content: "", toolCalls: [call], createdAt: new Date().toISOString() });
   await runOptions.onEvent?.({ type: "tool_call", call });
   const result = await tools.execute(call.name, call.arguments);
   await runOptions.onEvent?.({
@@ -918,7 +1175,8 @@ async function executeSyntheticToolCall(
     role: "tool",
     toolCallId: call.id,
     name: call.name,
-    content: result
+    content: result,
+    createdAt: new Date().toISOString()
   });
   return result;
 }
@@ -1096,6 +1354,69 @@ function toolMimicryInstruction(mimicryRetries: number): ChatMessage | undefined
   };
 }
 
+type RepeatedToolFailure = {
+  name: string;
+  error: string;
+  count: number;
+  /** Monotonic recency marker so the instruction can list the newest offenders first. */
+  order: number;
+};
+
+type RepeatedToolFailureTracker = {
+  nextOrder: number;
+  failures: Map<string, RepeatedToolFailure>;
+};
+
+/**
+ * Track identical failing tool results across the run and, from the second identical failure on,
+ * append an inline corrective notice to the failing result itself — right where the model is
+ * reading. Counts are cumulative for the run, not consecutive: the pathological pattern this
+ * catches interleaves the same rejected call with otherwise productive steps.
+ */
+function noteRepeatedToolFailure(tracker: RepeatedToolFailureTracker, name: string, result: string): string {
+  if (!isToolErrorResult(result)) {
+    return result;
+  }
+  const error = result.replace(/\s+/g, " ").trim().slice(0, REPEATED_TOOL_FAILURE_ERROR_LIMIT);
+  const key = `${name}\n${error}`;
+  const entry = tracker.failures.get(key) ?? { name, error, count: 0, order: 0 };
+  entry.count += 1;
+  entry.order = tracker.nextOrder;
+  tracker.nextOrder += 1;
+  tracker.failures.set(key, entry);
+  if (entry.count < REPEATED_TOOL_FAILURE_THRESHOLD) {
+    return result;
+  }
+  return [
+    result,
+    `Repeated failure: ${name} has returned this exact error ${entry.count} times in this run. Repeating the call unchanged is expected to fail the same way every time. Follow the remediation in the error text above, or change the arguments, tool, or approach before calling again.`
+  ].join("\n\n");
+}
+
+/**
+ * Transient step instruction naming the run's repeated identical tool failures. The inline notice
+ * on a failing result eventually scrolls into compaction; this one is rebuilt for every later
+ * request and stays pinned with the leading system messages, the way the checklist and mimicry
+ * instructions do.
+ */
+function repeatedToolFailureInstruction(tracker: RepeatedToolFailureTracker): ChatMessage | undefined {
+  const repeated = Array.from(tracker.failures.values())
+    .filter((failure) => failure.count >= REPEATED_TOOL_FAILURE_THRESHOLD)
+    .sort((a, b) => b.order - a.order)
+    .slice(0, REPEATED_TOOL_FAILURE_REPORT_LIMIT);
+  if (repeated.length === 0) {
+    return undefined;
+  }
+  return {
+    role: "system",
+    content: [
+      "Repeated failing tool calls detected in this run:",
+      ...repeated.map((failure) => `- ${failure.name} failed ${failure.count} times with the identical error: ${failure.error}`),
+      "A tool call that already failed will fail the same way again if repeated unchanged. Never re-issue one of these calls as-is: apply the remediation the error describes, or use different arguments, another tool, or another approach."
+    ].join("\n")
+  };
+}
+
 type BrowserChecklistScope = {
   ids: string[];
   excerpts: string[];
@@ -1122,39 +1443,72 @@ function browserChecklistScope(prompt: string): BrowserChecklistScope | undefine
 function browserChecklistInstruction(
   checklist: BrowserChecklistScope | undefined,
   missingIds: string[],
-  includeExcerpts: boolean
+  includeExcerpts: boolean,
+  rejectedFutureIntent: boolean
 ): ChatMessage | undefined {
-  if (!checklist) {
+  if (!checklist && !rejectedFutureIntent) {
     return undefined;
   }
-  const lines = [
-    `Original browser completion gate: ${checklist.ids.map((id) => `TODO ${id}`).join(", ")}.`,
-    "A reply without a native tool call ends this entire run. Do not send a progress summary between TODOs.",
-    `Keep using tools until every original TODO is verified. The final must contain one line "TODO N: complete — <verification>" for each of: ${checklist.ids.join(", ")}.`
-  ];
-  if (missingIds.length > 0) {
+  const lines = ["A reply without a native tool call ends this entire run. Do not send a progress summary between browser actions."];
+  if (checklist) {
     lines.push(
-      `Your previous no-tool reply was rejected because these original checklist items were not explicitly complete: ${missingIds
-        .map((id) => `TODO ${id}`)
-        .join(", ")}. Resume from current browser state now.`
+      `Original browser completion gate: ${checklist.ids.map((id) => `TODO ${id}`).join(", ")}.`,
+      `Keep using tools until every original TODO is verified. The final must contain one line "TODO N: complete — <verification>" for each of: ${checklist.ids.join(", ")}.`
     );
+    if (missingIds.length > 0) {
+      lines.push(
+        `Your previous no-tool reply was rejected because these original checklist items were not explicitly complete: ${missingIds
+          .map((id) => `TODO ${id}`)
+          .join(", ")}. Resume from current browser state now.`
+      );
+    }
+    if (includeExcerpts) {
+      lines.push("Original checklist excerpts:", ...checklist.excerpts.map((excerpt) => `- ${excerpt}`));
+    }
   }
-  if (includeExcerpts) {
-    lines.push("Original checklist excerpts:", ...checklist.excerpts.map((excerpt) => `- ${excerpt}`));
+  if (rejectedFutureIntent) {
+    lines.push(
+      'Your previous no-tool reply only announced a future action (for example, "Let me create the remaining items"). That reply executed nothing and was rejected. Invoke the next native browser tool now, or report a concrete external blocker.'
+    );
   }
   return { role: "system", content: lines.join("\n") };
 }
 
 function outputMarksTodoComplete(output: string, id: string): boolean {
-  const line = new RegExp(`^\\s*(?:[-*|]\\s*)?TODO\\s*#?\\s*${escapeRegExp(id)}\\b[^\\n]*$`, "im").exec(output)?.[0] ?? "";
-  return (
-    /\b(?:complete|completed|done|verified|passed)\b/i.test(line) &&
-    !/\b(?:blocked|failed|incomplete|pending|unverified|not\s+complete)\b/i.test(line)
-  );
+  // Scan EVERY line that mentions this TODO id, not just the first. A model that writes
+  // "TODO 1: in progress" earlier and "TODO 1: complete — verified" later has completed it; keying
+  // off the first mention alone would reject that final and force a spurious completion retry.
+  const lines = output.matchAll(new RegExp(`^\\s*(?:[-*|]\\s*)?TODO\\s*#?\\s*${escapeRegExp(id)}\\b[^\\n]*$`, "gim"));
+  for (const match of lines) {
+    const line = match[0];
+    if (
+      /\b(?:complete|completed|done|verified|passed)\b/i.test(line) &&
+      !/\b(?:blocked|failed|incomplete|pending|unverified|not\s+complete)\b/i.test(line)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function outputReportsExternalBlocker(output: string): boolean {
   return /\b(?:captcha|requires?\s+your\s+(?:input|approval)|please\s+(?:unlock|confirm)|blocked\s+on\s+(?:external|user))\b/i.test(output);
+}
+
+function outputPromisesFurtherBrowserWork(output: string) {
+  const text = stripFencedCodeBlocks(output).replace(/\s+/g, " ").trim();
+  if (!text) {
+    return false;
+  }
+  const action =
+    "add|create|update|edit|delete|remove|fix|submit|save|verify|inspect|check|open|navigate|click|select|fill|enter|type|upload|download|continue|resume|proceed|retry|finish|complete";
+  return (
+    new RegExp(
+      `\\b(?:let me|i(?:'ll| will| need to| am going to|'m going to)|now i can|next[, ]+i(?:'ll| will))\\s+(?:now\\s+)?(?:${action})\\b`,
+      "i"
+    ).test(text) ||
+    /\b(?:switching|moving)\s+to\s+(?:another\s+)?(?:browser|browser_open|browser_task|tool|approach|page|tab)\b/i.test(text)
+  );
 }
 
 function webSearchInstruction(webSearchCalls: number): ChatMessage | undefined {
@@ -1224,12 +1578,4 @@ function allowedToolCalls(toolCalls: ChatMessage["toolCalls"], availableTools: C
   }
   const available = new Set(availableTools.map((tool) => tool.name));
   return toolCalls.filter((call) => available.has(call.name));
-}
-
-function cloneMessages(messages: ChatMessage[]): ChatMessage[] {
-  return messages.map((message) => ({
-    ...message,
-    content: typeof message.content === "string" ? message.content : structuredClone(message.content),
-    toolCalls: message.toolCalls?.map((call) => ({ ...call }))
-  }));
 }

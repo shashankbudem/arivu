@@ -123,6 +123,7 @@ function config(patch: Partial<AppConfig> = {}): AppConfig {
     model: "auto",
     toolCalling: "auto",
     imageInput: "auto",
+    chatModelRequestDelayMs: 10_000,
     activeProviderId: "nvidia",
     providers: [],
     trustMode: "ask",
@@ -131,6 +132,7 @@ function config(patch: Partial<AppConfig> = {}): AppConfig {
     disabledTools: [],
     toolProposals: [],
     ...patch,
+    webSearchProviders: patch.webSearchProviders ?? [],
     workspacePolicyProfiles: patch.workspacePolicyProfiles ?? {}
   };
 }

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { contextMessagesForSession } from "../src/agent/contextCompaction.js";
 import { SessionStore } from "../src/sessions/SessionStore.js";
 
 const execFileAsync = promisify(execFile);
@@ -159,14 +160,22 @@ describe("cli compact command", () => {
 
     const compacted = await store.load("long-session");
     expect(compacted.updatedAt).not.toBe("2026-01-01T00:00:00.000Z");
-    expect(compacted.messages).toHaveLength(3);
-    expect(compacted.messages[0]?.role).toBe("system");
-    expect(compacted.messages[0]?.content).toContain("Context compacted locally");
-    expect(compacted.messages[0]?.content).toContain("User: older question");
-    expect(compacted.messages.slice(1)).toEqual([
+    expect(compacted.messages).toMatchObject([
+      { role: "user", content: "older question" },
+      { role: "assistant", content: "older answer" },
       { role: "user", content: "recent question" },
       { role: "assistant", content: "recent answer" }
     ]);
+    const working = contextMessagesForSession(compacted);
+    expect(working).toHaveLength(3);
+    expect(working[0]?.role).toBe("system");
+    expect(working[0]?.content).toContain("Context compacted locally");
+    expect(working[0]?.content).toContain("User: older question");
+    expect(working.slice(1)).toMatchObject([
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ]);
+    expect(stdout).toContain("Full transcript messages preserved: 4");
   });
 
   it("supports dry-run compaction without saving", async () => {
@@ -224,7 +233,7 @@ describe("cli doctor command", () => {
     expect(stdout).toContain("arivu doctor");
     expect(stdout).toContain("[FAIL] API key: Missing");
     expect(stdout).toContain("[SKIP] Chat completions: Skipped because no API key is configured.");
-    expect(stdout).toContain("[SKIP] Tavily: No Tavily API key is configured.");
+    expect(stdout).toContain("[SKIP] Web search (Bing RSS): Bing RSS is keyless; no credential check is needed.");
     expect(stdout).toContain("Summary:");
   });
 

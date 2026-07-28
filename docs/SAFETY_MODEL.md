@@ -133,7 +133,7 @@ Do not commit:
 
 ## Web search safety
 
-`web_search` is an external network tool. Queries are sent to Tavily when configured, or to the fallback Bing/Bing News RSS endpoint when Tavily is unavailable. News-like fallback queries may be normalized to the current month/year before being sent. The tool description instructs the model to keep queries concise and avoid secrets, private code, and personal data.
+`web_search` is an external network tool. Queries are sent to the active Tavily, Brave Search, Exa, Serper, or Bing RSS profile. The approval request names that profile's endpoint, and the browser-task proxy receives the same resolved profile without exposing its API key to page JavaScript. News-like Bing queries may be normalized to the current month/year before being sent. The tool description instructs the model to keep queries concise and avoid secrets, private code, and personal data.
 
 Do not use web search queries for:
 
@@ -194,7 +194,7 @@ Workspace MCP server allowlists filter `mcp_list_tools` discovery to matching co
 Keep tests around:
 
 - config/env precedence
-- Tavily env/config precedence
+- legacy Tavily env/config migration into managed search profiles
 - path containment
 - destructive command detection
 - trust mode approvals

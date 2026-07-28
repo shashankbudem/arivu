@@ -107,6 +107,62 @@ describe("resolveBrowserTaskModel", () => {
     expect(resolved).toMatchObject({ maxSteps: 80, stepDelayMs: 12_000 });
   });
 
+  it("resolves LocateAnything as a dedicated visual-grounding model", () => {
+    const resolved = resolveBrowserTaskModel(
+      configWith({
+        browserTaskModel: { providerId: "browser-provider" },
+        browserVisualGrounding: {
+          providerId: "chat-provider",
+          model: "nvidia/LocateAnything-3B",
+          timeoutMs: 45_000
+        }
+      }),
+      FALLBACK
+    );
+
+    expect(resolved.visualGrounding).toEqual({
+      baseUrl: "https://chat.example/v1",
+      model: "nvidia/LocateAnything-3B",
+      apiKey: "chat-key",
+      providerId: "chat-provider",
+      providerName: "Chat provider",
+      timeoutMs: 45_000
+    });
+    expect(resolved.model).toBe("browser-model");
+  });
+
+  it("uses the visual-grounding provider's own secret", () => {
+    const resolved = resolveBrowserTaskModel(
+      configWith({
+        browserVisualGrounding: {
+          providerId: "browser-provider",
+          model: "nvidia/LocateAnything-3B"
+        }
+      }),
+      FALLBACK
+    );
+
+    expect(resolved.visualGrounding).toMatchObject({
+      baseUrl: "https://browser.example/v1",
+      apiKey: "browser-key",
+      providerId: "browser-provider"
+    });
+  });
+
+  it("rejects a stale visual-grounding provider reference", () => {
+    expect(() =>
+      resolveBrowserTaskModel(
+        configWith({
+          browserVisualGrounding: {
+            providerId: "deleted-provider",
+            model: "nvidia/LocateAnything-3B"
+          }
+        }),
+        FALLBACK
+      )
+    ).toThrow(/browserVisualGrounding references unknown provider/);
+  });
+
   it("does not inherit the resolved chat-model window when the browser model differs", () => {
     const config = configWith({ contextWindowTokens: 204_800 });
     expect(
@@ -152,6 +208,46 @@ describe("resolveBrowserTaskModel", () => {
         providerName: "Browser provider"
       }
     ]);
+  });
+
+  it("inherits the primary loop settings when a fallback does not override them", () => {
+    const resolved = resolveBrowserTaskModel(
+      configWith({
+        browserTaskModel: {
+          providerId: "browser-provider",
+          maxSteps: 80,
+          stepDelayMs: 1_000,
+          fallbackModels: [{ model: "fallback-model" }]
+        }
+      }),
+      FALLBACK
+    );
+
+    expect(resolved.fallbacks?.[0]).toMatchObject({
+      model: "fallback-model",
+      maxSteps: 80,
+      stepDelayMs: 1_000
+    });
+  });
+
+  it("allows a fallback to explicitly override inherited loop settings", () => {
+    const resolved = resolveBrowserTaskModel(
+      configWith({
+        browserTaskModel: {
+          providerId: "browser-provider",
+          maxSteps: 80,
+          stepDelayMs: 1_000,
+          fallbackModels: [{ model: "fallback-model", maxSteps: 20, stepDelayMs: 2_500 }]
+        }
+      }),
+      FALLBACK
+    );
+
+    expect(resolved.fallbacks?.[0]).toMatchObject({
+      model: "fallback-model",
+      maxSteps: 20,
+      stepDelayMs: 2_500
+    });
   });
 
   it("resolves a fallback that references its own provider independently of the primary", () => {

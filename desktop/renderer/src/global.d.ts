@@ -3,6 +3,7 @@
 type TrustMode = "ask" | "readonly" | "trusted";
 type ProviderToolCallingMode = "auto" | "enabled" | "disabled";
 type ProviderImageInputMode = "auto" | "enabled" | "disabled";
+type WebSearchProviderKind = "tavily" | "brave" | "exa" | "serper" | "bing";
 type BrowserMode = "visible" | "background";
 
 type McpServerConfig = {
@@ -26,6 +27,18 @@ type LlmProviderProfile = {
 };
 
 type LlmProviderPatch = Omit<LlmProviderProfile, "apiKeyPresent"> & {
+  apiKey?: string;
+};
+
+type WebSearchProviderProfile = {
+  id: string;
+  name: string;
+  kind: WebSearchProviderKind;
+  baseUrl: string;
+  apiKeyPresent: boolean;
+};
+
+type WebSearchProviderPatch = Omit<WebSearchProviderProfile, "apiKeyPresent"> & {
   apiKey?: string;
 };
 
@@ -60,9 +73,18 @@ type ChatContent = string | ChatContentPart[];
 type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: ChatContent;
+  createdAt?: string;
   name?: string;
   toolCallId?: string;
   toolCalls?: ToolCall[];
+};
+
+type QueuedPrompt = {
+  id: string;
+  content: ChatContent;
+  skillNames?: string[];
+  state: "queued" | "steering";
+  createdAt: string;
 };
 
 type AgentLoopStatus = "running" | "stopping" | "completed" | "stopped" | "blocked" | "failed" | "max_iterations";
@@ -579,6 +601,13 @@ type WorkspaceInfo = {
   packageName?: string;
 };
 
+type DesktopContextState = {
+  compacted: boolean;
+  compactedAt?: string;
+  messageCount: number;
+  estimatedTokens: number;
+};
+
 type DesktopState = {
   cwd: string;
   projectRoot: string | null;
@@ -589,12 +618,16 @@ type DesktopState = {
     model: string;
     toolCalling: ProviderToolCallingMode;
     imageInput: ProviderImageInputMode;
+    chatModelRequestDelayMs: number;
     activeProviderId?: string;
     providers: LlmProviderProfile[];
+    activeWebSearchProviderId?: string;
+    webSearchProviders: WebSearchProviderProfile[];
     browserTaskModel?: BrowserTaskModelSettings;
+    browserVisualGrounding?: BrowserVisualGroundingSettings;
     trustMode: TrustMode;
+    customSystemPrompt?: string;
     apiKeyPresent: boolean;
-    tavilyApiKeyPresent: boolean;
     mcpServers: McpServersConfig;
     workspacePolicies: WorkspaceCapabilityPolicies;
     workspacePolicyProfiles: WorkspacePolicyProfiles;
@@ -602,7 +635,9 @@ type DesktopState = {
     toolProposals: McpToolProposal[];
   };
   sessionId?: string;
+  context: DesktopContextState;
   messages: ChatMessage[];
+  queuedPrompts: QueuedPrompt[];
   runningSessionIds: string[];
   modelSelection?: PublicModelSelection;
   agentLoop?: AgentLoopState;
@@ -741,6 +776,8 @@ type SessionLifecycleEvent = {
   modelSelection?: PublicModelSelection;
   agentLoop?: AgentLoopState;
   taskRuns?: AgentTaskRun[];
+  context: DesktopContextState;
+  queuedPrompts: QueuedPrompt[];
   output?: string;
   error?: string;
 };
@@ -810,6 +847,14 @@ type BrowserTaskModelSettings = {
   fallbackModels?: BrowserTaskModelSettings[];
 };
 
+type BrowserVisualGroundingSettings = {
+  providerId?: string;
+  baseUrl?: string;
+  model: string;
+  timeoutMs?: number;
+  apiKeyPresent: boolean;
+};
+
 type McpToolProposal = {
   id: string;
   kind: "mcp_server";
@@ -824,14 +869,19 @@ type McpToolProposal = {
 
 type ConfigPatch = {
   apiKey?: string;
+  /** Legacy compatibility; Settings uses webSearchProviders. */
   tavilyApiKey?: string;
   baseUrl?: string;
   model?: string;
   toolCalling?: ProviderToolCallingMode;
   imageInput?: ProviderImageInputMode;
+  chatModelRequestDelayMs?: number;
   activeProviderId?: string;
   providers?: LlmProviderPatch[];
+  activeWebSearchProviderId?: string;
+  webSearchProviders?: WebSearchProviderPatch[];
   trustMode?: TrustMode;
+  customSystemPrompt?: string;
   mcpServers?: McpServersConfig;
   workspacePolicies?: WorkspaceCapabilityPolicies;
   workspacePolicyProfiles?: WorkspacePolicyProfiles;
@@ -841,6 +891,10 @@ type ConfigPatch = {
     maxSteps?: number;
     stepDelayMs?: number;
     fallbackModels?: Array<{ providerId?: string; model?: string }>;
+  } | null;
+  browserVisualGrounding?: {
+    providerId?: string;
+    model?: string;
   } | null;
   disabledTools?: string[];
   toolProposals?: McpToolProposal[];
@@ -1053,6 +1107,8 @@ type DesktopApi = {
   createSkill(input: SkillCreateInput): Promise<SkillCreateResult>;
   listTaskWorktrees(): Promise<TaskWorktreeInventoryResult>;
   sendPrompt(prompt: PromptPayload | string): Promise<AgentRunResult>;
+  queuePrompt(prompt: PromptPayload | string): Promise<DesktopState>;
+  steerQueuedPrompt(promptId: string): Promise<DesktopState>;
   stopAgentLoop(sessionId?: string): Promise<DesktopState>;
   stopAgentRun(sessionId?: string): Promise<DesktopState>;
   undoTaskRun(input: { sessionId?: string; taskRunId: string }): Promise<{ state: DesktopState; revertedCount: number }>;
@@ -1090,6 +1146,7 @@ type DesktopApi = {
   }): Promise<{ path: string; line?: number }>;
   getBrowserState(): Promise<BrowserState>;
   setBrowserPaneOpen(open: boolean): Promise<BrowserState>;
+  toggleBrowserPaneOpen(): Promise<BrowserState>;
   setBrowserDefaultMode(mode: BrowserMode): Promise<BrowserState>;
   openBrowserUrl(args: { url: string; mode?: BrowserMode; tabId?: string; newTab?: boolean }): Promise<Record<string, unknown>>;
   browserNewTab(args?: { url?: string }): Promise<BrowserState>;

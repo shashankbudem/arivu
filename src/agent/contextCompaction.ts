@@ -1,5 +1,5 @@
 import { chatContentToText, type ChatContent, type ChatContentPart } from "./content.js";
-import type { ChatMessage } from "./types.js";
+import type { AgentSession, ChatMessage } from "./types.js";
 
 export const COMPACT_RECENT_MESSAGE_COUNT = 8;
 export const AUTO_COMPACT_REQUEST_TOKEN_LIMIT = 48_000;
@@ -65,14 +65,79 @@ export type ContextCompactionResult = {
   estimatedTokensAfter?: number;
 };
 
+type ContextCompactionSession = Pick<AgentSession, "messages" | "contextCompaction">;
+
+/**
+ * Build the model's current working context without changing the canonical transcript.
+ *
+ * A checkpoint contains the summary and recent non-system tail that survived the last
+ * compaction. New canonical messages are appended after that checkpoint. Current system
+ * messages are always re-read from the canonical transcript so changed workspace instructions,
+ * loaded skills, and recovery notes cannot go stale inside a saved checkpoint.
+ */
+export function contextMessagesForSession(session: ContextCompactionSession): ChatMessage[] {
+  const checkpoint = session.contextCompaction;
+  if (!checkpoint) {
+    return session.messages;
+  }
+
+  const canonicalNonSystemMessages = session.messages.filter((message) => message.role !== "system");
+  if (checkpoint.sourceNonSystemMessageCount > canonicalNonSystemMessages.length) {
+    // The transcript was intentionally rewound (for example, retry-from-message). A checkpoint
+    // that covers messages no longer in that branch must never reintroduce them.
+    return session.messages;
+  }
+
+  const currentSystemMessages = session.messages.filter(
+    (message) => message.role === "system" && !isCompactionMessage(message) && !isModelSummaryMessage(message)
+  );
+  const checkpointSummaryMessages = checkpoint.messages.filter((message) => isCompactionMessage(message) || isModelSummaryMessage(message));
+  const checkpointNonSystemMessages = checkpoint.messages.filter((message) => message.role !== "system");
+  const newNonSystemMessages = canonicalNonSystemMessages.slice(checkpoint.sourceNonSystemMessageCount);
+
+  return [...currentSystemMessages, ...checkpointSummaryMessages, ...checkpointNonSystemMessages, ...newNonSystemMessages];
+}
+
+/**
+ * Save a reduced context as a derived checkpoint while leaving `session.messages` byte-for-byte
+ * intact. The checkpoint stores only its summary and reduced non-system tail; canonical system
+ * instructions are re-projected by `contextMessagesForSession` each time.
+ */
+export function applyContextCompactionCheckpoint(
+  session: ContextCompactionSession,
+  result: ContextCompactionResult,
+  source: "model" | "deterministic",
+  now = new Date()
+): void {
+  if (!result.compacted) {
+    return;
+  }
+  session.contextCompaction = {
+    version: 1,
+    source,
+    compactedAt: now.toISOString(),
+    compactedMessageCount: result.compactedMessageCount,
+    sourceNonSystemMessageCount: session.messages.filter((message) => message.role !== "system").length,
+    messages: result.messages.filter(
+      (message) => message.role !== "system" || isCompactionMessage(message) || isModelSummaryMessage(message)
+    )
+  };
+}
+
+export function clearContextCompactionCheckpoint(session: ContextCompactionSession): void {
+  delete session.contextCompaction;
+}
+
 export function compactSessionMessages(messages: ChatMessage[], options: CompactOptions = {}): ContextCompactionResult {
   const recentMessageCount = options.recentMessageCount ?? COMPACT_RECENT_MESSAGE_COUNT;
   const entryCharacterLimit = options.entryCharacterLimit ?? DEFAULT_ENTRY_LIMIT;
   const recentEntryCharacterLimit = options.recentEntryCharacterLimit;
   const preserveLatestUserMessage = options.preserveLatestUserMessage ?? false;
   const activeUserMessageCharacterLimit = options.activeUserMessageCharacterLimit ?? recentEntryCharacterLimit;
-  const systemMessages = messages.filter((message) => message.role === "system" && !isCompactionMessage(message));
-  const previousCompactions = messages.filter(isCompactionMessage);
+  const systemMessages = messages.filter(
+    (message) => message.role === "system" && !isCompactionMessage(message) && !isModelSummaryMessage(message)
+  );
+  const previousCompactions = messages.filter((message) => isCompactionMessage(message) || isModelSummaryMessage(message));
   const nonSystemMessages = messages.filter((message) => message.role !== "system");
 
   if (!options.force && nonSystemMessages.length <= recentMessageCount) {
@@ -165,9 +230,15 @@ export function estimateMessageTokens(messages: ChatMessage[]) {
  * the most recent `recentMessageCount` turns). Callers feed this to the model to produce a summary.
  */
 export function messagesToSummarize(messages: ChatMessage[], recentMessageCount = COMPACT_RECENT_MESSAGE_COUNT): ChatMessage[] {
+  // A prior summary (model-generated or deterministic) IS older context. If it is not fed back into
+  // the summarizer, the second summary forgets everything the first one covered: applyModelSummary
+  // rebuilds the kept set from base system messages + recent turns and drops the old summary, so
+  // whatever only lived inside that summary vanishes. Carrying prior summaries forward here is the
+  // model-path equivalent of compactSessionMessages folding previousCompactions into the new summary.
+  const priorSummaries = messages.filter((message) => isModelSummaryMessage(message) || isCompactionMessage(message));
   const nonSystemMessages = messages.filter((message) => message.role !== "system");
   const recentStart = Math.max(0, nonSystemMessages.length - recentMessageCount);
-  return nonSystemMessages.slice(0, recentStart);
+  return [...priorSummaries, ...nonSystemMessages.slice(0, recentStart)];
 }
 
 /**
@@ -223,11 +294,73 @@ export function applyModelSummary(
   };
 }
 
-function isModelSummaryMessage(message: ChatMessage) {
+/** Minimal shape of a session needed to re-anchor task-run message indexes after compaction. */
+export type RemappableTaskRunSession = {
+  messages: ChatMessage[];
+  taskRuns?: Array<{ userMessageIndex: number; promptPreview: string }>;
+};
+
+/**
+ * Re-anchor each task run's `userMessageIndex` after the transcript has been compacted or
+ * summarized, given the pre-compaction `previousMessages`. Without this, manual compact/summarize
+ * leave the indexes pointing at whatever now sits at the old slot — mis-anchoring run cards, making
+ * retry delete the wrong runs, and skewing the plan/completion scan range. The in-run auto-summary
+ * path already remaps by object identity; this is the shared equivalent for the paths that did not.
+ *
+ * Resolution order per run: (1) object identity — summary compaction keeps recent messages by
+ * reference; (2) prompt-preview content match — deterministic compaction rebuilds recent messages as
+ * new objects but keeps their text, so the anchor is still findable; (3) fall back to the
+ * summary/compaction system message for a run whose user turn was folded entirely into the summary,
+ * matching the auto-summary path so downstream retry (which re-validates role+content) rejects it
+ * cleanly instead of acting on an unrelated message.
+ */
+export function remapTaskRunUserMessageIndexes(session: RemappableTaskRunSession, previousMessages: readonly ChatMessage[]): void {
+  const runs = session.taskRuns;
+  if (!runs?.length) {
+    return;
+  }
+  const fallbackIndex = Math.max(
+    0,
+    session.messages.findIndex((message) => isModelSummaryMessage(message) || isCompactionMessage(message))
+  );
+  for (const run of runs) {
+    const previous = previousMessages[run.userMessageIndex];
+    let index = previous ? session.messages.indexOf(previous) : -1;
+    if (index < 0) {
+      index = session.messages.findIndex(
+        (message) => message.role === "user" && taskRunMatchesUserMessage(run.promptPreview, message.content)
+      );
+    }
+    run.userMessageIndex = index >= 0 ? index : fallbackIndex;
+  }
+}
+
+function normalizePromptPreview(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Mirror of SessionStore's task-run/message matcher: a preview ending in "..." matches a message
+ * whose normalized text starts with the (sufficiently long) prefix; otherwise it must match in full.
+ */
+function taskRunMatchesUserMessage(promptPreview: string, content: ChatMessage["content"]) {
+  const preview = normalizePromptPreview(promptPreview);
+  if (!preview) {
+    return false;
+  }
+  const messageText = normalizePromptPreview(chatContentToText(content));
+  if (preview.endsWith("...")) {
+    const prefix = preview.slice(0, -3).trimEnd();
+    return prefix.length >= 12 && messageText.startsWith(prefix);
+  }
+  return messageText === preview;
+}
+
+export function isModelSummaryMessage(message: ChatMessage) {
   return message.role === "system" && chatContentToText(message.content).startsWith(MODEL_SUMMARY_PREFIX);
 }
 
-function isCompactionMessage(message: ChatMessage) {
+export function isCompactionMessage(message: ChatMessage) {
   return message.role === "system" && chatContentToText(message.content).startsWith(COMPACTION_PREFIX);
 }
 
@@ -320,7 +453,7 @@ function toolResultOutcome(toolName: string | undefined, content: string): "succ
 }
 
 function messageLabel(message: ChatMessage) {
-  if (isCompactionMessage(message)) {
+  if (isCompactionMessage(message) || isModelSummaryMessage(message)) {
     return "Prior compacted context";
   }
   if (message.role === "assistant") {

@@ -21,7 +21,12 @@ export default defineConfig([
     // Bundle the runtime dependencies (tsup externalizes package.json dependencies by default)
     // so the packaged app runs from dist-desktop alone and electron-builder can drop
     // node_modules from the asar entirely. All five are pure JS with no native modules.
+    // execa's bundled cross-spawn dependency is CommonJS and still performs a runtime
+    // require("child_process"), so expose Node's ESM-safe require bridge to the bundle.
     noExternal: [/^execa(\/|$)/, /^zod(\/|$)/, /^chalk(\/|$)/, /^@inquirer\/prompts(\/|$)/, /^@modelcontextprotocol\/sdk(\/|$)/],
+    banner: {
+      js: 'import { createRequire as __arivuCreateRequire } from "node:module"; const require = __arivuCreateRequire(import.meta.url);'
+    },
     outDir: "dist-desktop/main",
     sourcemap: true,
     clean: true

@@ -40,9 +40,202 @@ export const ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS = [
   "- ServiceNow MRVS children: create them from the existing Variable Set record's Variables related-list New button. Their Type is the requested child type (for example Multi Line Text), not Multi Row Variable Set; the existing Variable Set is the parent.",
   '- Lines like "(N more plain text lines omitted)" mean long non-interactive text was shortened to save space. All interactive [index] elements are still listed.',
   "- ServiceNow forms: use the labeled fields in the deepest visible form rather than similarly named navigation items in the outer shell. After Submit/Update, wait for navigation and verify the saved record or related list before calling done.",
+  "- Prefer DOM actions from the CURRENT browser_state (click/type/select by current index). inspect_screenshot is a last-resort recovery tool for actual pixels — not routine verification.",
+  "- Call inspect_screenshot when: (1) the same click/type/select failed twice and browser_state does not explain why, (2) Arivu reports a prolonged no-progress loop / auto recovery capture, or (3) you are about to give up or report the task failed — call inspect_screenshot once first (unless you already captured this task), inspect the image on the NEXT observation, then either recover with current DOM indices or call done with a precise failure reason. Never spam screenshots of an unchanged page.",
+  "- If locate_and_click is available, use it only when the same current DOM action failed twice or the target is genuinely pixel-only (canvas, remote desktop, closed component surface). Describe exactly one visually unique target with nearby text/region. It captures fresh pixels, rejects ambiguous/stale coordinates, clicks once, and must be verified from the next browser_state. Never use it for payments, deletion, submission, or other sensitive confirmation.",
   "- If execute_javascript is among your available actions and you are stuck — the same click/input_text/select attempt has now failed twice in a row, or the goal has no obvious click/type/select equivalent (reading a value the DOM doesn't expose, a hidden control, a custom widget) — use it to read the exact state you need or drive the interaction directly, then verify the result in the next browser state before continuing. Do not reach for it before trying the direct action at least twice.",
   "- If you do not know what a specific field, control, or workflow on this site expects — not a DOM mechanics problem execute_javascript can solve, but not knowing the right answer at all — use search_web with a concise, specific query before guessing further. Read the result, then act on what you learned; do not search repeatedly for the same question."
 ].join("\n");
+
+/**
+ * Creates the in-page recovery controller used by inspect_screenshot.
+ *
+ * PageAgent 1.11's public message type is text-only, but its LLM config exposes
+ * transformRequestBody. The controller captures pixels through Arivu's authenticated
+ * loopback route and appends an opaque placeholder to the next model request as an
+ * OpenAI-compatible image_url content part. The trusted main-process proxy replaces the
+ * placeholder with pixels after the request leaves the page, so the website never receives
+ * its tab capture. After that turn the raw request is scrubbed from PageAgent history.
+ *
+ * Automatic recovery is deliberately conservative: the same exact action must repeat,
+ * or the same next goal must repeat with failure/uncertainty, for the configured wall-clock
+ * threshold. This avoids treating a merely long provider response or a normal multi-field
+ * form task as "stuck".
+ */
+export const CREATE_SCREENSHOT_RECOVERY_SNIPPET = String.raw`(function(options) {
+  options = options || {};
+  var endpoint = String(options.endpoint || "");
+  var token = String(options.token || "");
+  var thresholdMs = Math.max(0, Number(options.thresholdMs) || 90000);
+  var cooldownMs = Math.max(0, Number(options.cooldownMs) || 120000);
+  var minimumRepeats = Math.max(2, Number(options.minimumRepeats) || 3);
+  var now = typeof options.now === "function" ? options.now : function() { return Date.now(); };
+  var request = typeof options.fetch === "function" ? options.fetch : function(url, init) { return fetch(url, init); };
+  var pendingImage;
+  var imageAttached = false;
+  var lastCaptureAt = -Infinity;
+  var lastGoal = "";
+  var goalSince = 0;
+  var goalRepeats = 0;
+  var goalFailures = 0;
+  var lastAction = "";
+  var actionSince = 0;
+  var actionRepeats = 0;
+  var lastStepFailed = false;
+  // When the same DOM action fails twice, capture sooner than the full stuck threshold so the
+  // model can use vision before burning the remaining step budget.
+  var failedActionThresholdMs = Math.min(thresholdMs, 15_000);
+
+  var normalize = function(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase().slice(0, 600);
+  };
+  var actionSignature = function(step) {
+    if (!step || !step.action) return "";
+    var input = "";
+    try {
+      input = JSON.stringify(step.action.input || {});
+    } catch (err) {}
+    return normalize(String(step.action.name || "") + " " + input);
+  };
+  var failed = function(step) {
+    var reflection = step && step.reflection;
+    var text = normalize(
+      String(reflection && reflection.evaluation_previous_goal || "") + " " +
+      String(step && step.action && step.action.output || "")
+    );
+    return /\b(fail(?:ed|ure)?|error|uncertain|unable|stuck)\b|\bdid not\b|\bno change\b|\bnot found\b|\bdoes not\b/.test(text);
+  };
+  var updateRepeatState = function(step, timestamp) {
+    var goal = normalize(step && step.reflection && step.reflection.next_goal);
+    var action = actionSignature(step);
+    lastStepFailed = failed(step);
+    if (goal && goal === lastGoal) {
+      goalRepeats++;
+    } else {
+      lastGoal = goal;
+      goalRepeats = goal ? 1 : 0;
+      goalFailures = 0;
+      goalSince = timestamp;
+    }
+    if (goal && lastStepFailed) goalFailures++;
+    if (action && action === lastAction) {
+      actionRepeats++;
+    } else {
+      lastAction = action;
+      actionRepeats = action ? 1 : 0;
+      actionSince = timestamp;
+    }
+  };
+  var shouldAutoCapture = function(timestamp) {
+    if (pendingImage || timestamp - lastCaptureAt < cooldownMs) return false;
+    var repeatedActionIsStuck =
+      actionRepeats >= minimumRepeats && timestamp - actionSince >= thresholdMs;
+    var repeatedFailedGoalIsStuck =
+      goalRepeats >= minimumRepeats &&
+      goalFailures >= 2 &&
+      timestamp - goalSince >= thresholdMs;
+    // Same exact DOM action failed twice: trigger inspect_screenshot recovery without waiting
+    // the full no-progress wall-clock (still bounded by failedActionThresholdMs).
+    var failedActionTwice =
+      lastStepFailed &&
+      actionRepeats >= 2 &&
+      timestamp - actionSince >= failedActionThresholdMs;
+    return repeatedActionIsStuck || repeatedFailedGoalIsStuck || failedActionTwice;
+  };
+  var capture = async function(reason, signal) {
+    if (pendingImage) {
+      return "A recovery screenshot is already queued for your next observation.";
+    }
+    var response;
+    try {
+      response = await request(endpoint, {
+        method: "POST",
+        headers: { authorization: "Bearer " + token },
+        signal: signal
+      });
+    } catch (err) {
+      return "Screenshot capture failed: " + String(err && err.message ? err.message : err) + ". Continue with browser_state.";
+    }
+    if (!response || !response.ok) {
+      return "Screenshot capture failed" +
+        (response && typeof response.status === "number" ? " (HTTP " + response.status + ")" : "") +
+        ". Continue with browser_state.";
+    }
+    var data;
+    try {
+      data = await response.json();
+    } catch (err) {
+      return "Screenshot capture returned an invalid response. Continue with browser_state.";
+    }
+    if (!data || data.queued !== true) {
+      return "Screenshot capture was not queued. Continue with browser_state.";
+    }
+    pendingImage = "arivu-recovery-screenshot://pending";
+    imageAttached = false;
+    lastCaptureAt = now();
+    return "Recovery screenshot captured" +
+      (data.width && data.height ? " (" + data.width + "x" + data.height + ")" : "") +
+      ". Its pixels will be attached to your NEXT observation; analyze them before choosing another action. Reason: " +
+      normalize(reason || "visual inspection");
+  };
+  var transformRequestBody = function(body) {
+    if (!pendingImage || !body || !Array.isArray(body.messages)) return body;
+    for (var index = body.messages.length - 1; index >= 0; index--) {
+      var message = body.messages[index];
+      if (!message || message.role !== "user") continue;
+      var textContent = typeof message.content === "string"
+        ? [{ type: "text", text: message.content }]
+        : Array.isArray(message.content)
+          ? message.content.slice()
+          : [];
+      textContent.push({ type: "image_url", image_url: { url: pendingImage } });
+      message.content = textContent;
+      imageAttached = true;
+      break;
+    }
+    return body;
+  };
+  var scrubAttachedRequests = function(history) {
+    if (!Array.isArray(history)) return;
+    for (var index = history.length - 1; index >= 0; index--) {
+      var event = history[index];
+      if (!event || event.type !== "step") continue;
+      if (imageAttached && event.rawRequest) {
+        event.rawRequest = undefined;
+      }
+      break;
+    }
+  };
+  var afterStep = async function(agent, history) {
+    scrubAttachedRequests(history);
+    if (imageAttached) {
+      pendingImage = undefined;
+      imageAttached = false;
+    }
+    var steps = Array.isArray(history)
+      ? history.filter(function(event) { return event && event.type === "step"; })
+      : [];
+    var latest = steps[steps.length - 1];
+    if (!latest) return;
+    var timestamp = now();
+    updateRepeatState(latest, timestamp);
+    if (!shouldAutoCapture(timestamp)) return;
+    var result = await capture("the same goal or exact action has made no progress for " + Math.round(thresholdMs / 1000) + " seconds");
+    if (agent && typeof agent.pushObservation === "function") {
+      agent.pushObservation(
+        result.indexOf("Recovery screenshot captured") === 0
+          ? "Arivu detected a prolonged no-progress loop and automatically captured a recovery screenshot. Its pixels are attached to this observation. Inspect the image before the next action; do not repeat the unchanged action."
+          : result
+      );
+    }
+  };
+  return {
+    capture: capture,
+    transformRequestBody: transformRequestBody,
+    afterStep: afterStep,
+    hasPendingImage: function() { return !!pendingImage; }
+  };
+})`;
 
 /**
  * Runs before page-agent snapshots. ServiceNow Select2 controls keep the real
@@ -642,100 +835,408 @@ export const INSTALL_AGENT_VISUAL_THEME_SNIPPET = String.raw`(function() {
 })`;
 
 /**
- * A minimal, ephemeral "Arivu is working here" indicator, upserted directly into a
- * tab's top frame by the main-process supervisor (never injected as part of the
- * per-frame agent script). Unlike the old page-agent Panel -- which lived in
- * whichever frame the agent happened to run in and could leave a second, stale
- * instance behind when a later browser_task call targeted a different frame (see
- * selectBrowserTaskExecutionTarget) -- this chip has exactly one possible home per
- * tab, so there is nothing left for a later call to duplicate. Built with
- * createElement/textContent only, never innerHTML -- pages enforcing Trusted Types
- * (e.g. ServiceNow's polaris shell) reject raw innerHTML outright.
+ * Interactive page-agent activity panel, upserted directly into a tab's top frame
+ * by the main-process supervisor (never injected as part of the per-frame agent
+ * script). Unlike the old page-agent Panel -- which lived in whichever frame the
+ * agent happened to run in and could leave a second, stale instance behind when a
+ * later browser_task call targeted a different frame -- this panel has exactly one
+ * possible home per tab.
  *
- * Shows the ordered list of browser_task calls made so far on this tab (tracked
- * per-WebContents in browserTaskSupervisor.ts, capped to the most recent few):
- * finished ones collapse to a checkmark/cross + their instruction, the in-progress
- * one expands underneath with its live step detail. This is deliberately a rolling
- * window, not the full history -- Arivu's own chrome-side Activity sidebar is the
- * authoritative, unbounded record; this chip stays glanceable on the page itself.
+ * It renders the tab's complete browser_task history in a bounded scrolling region.
+ * The active task stays expanded with Pause/Resume and Stop controls. Terminal tasks
+ * collapse automatically but retain their full action timeline and can be expanded
+ * by the user. Built with createElement/textContent only, never innerHTML -- pages
+ * enforcing Trusted Types (e.g. ServiceNow's polaris shell) reject raw innerHTML.
  */
 export const PRESENCE_CHIP_ID = "arivu-agent-presence-chip";
 
 export const UPDATE_PRESENCE_CHIP_SNIPPET = String.raw`(function(tasks) {
   var CHIP_ID = ${JSON.stringify(PRESENCE_CHIP_ID)};
   var STYLE_ID = CHIP_ID + "-theme";
+  var STYLE_VERSION = "2";
+  var style = document.getElementById(STYLE_ID);
+  if (!style || style.getAttribute("data-arivu-version") !== STYLE_VERSION) {
+    if (style) style.remove();
+    style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.setAttribute("data-page-agent-ignore", "true");
+    style.setAttribute("data-arivu-version", STYLE_VERSION);
+    style.textContent =
+      "#" + CHIP_ID + "{position:fixed;right:14px;bottom:14px;z-index:2147483646;" +
+        "width:min(380px,calc(100vw - 28px));max-height:min(470px,calc(100vh - 28px));" +
+        "display:flex;flex-direction:column;overflow:hidden;border-radius:13px;" +
+        "background:rgba(3,25,34,.97);border:1px solid rgba(0,196,154,.5);" +
+        "box-shadow:0 0 0 1px rgba(40,111,190,.14),0 16px 44px rgba(0,15,22,.48);" +
+        "font:12px/1.42 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
+        "color:#e7f3ef;pointer-events:auto;isolation:isolate;text-align:left}" +
+      "#" + CHIP_ID + ",#" + CHIP_ID + " *{box-sizing:border-box}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-head{display:flex;align-items:center;gap:7px;flex:none;" +
+        "min-height:42px;padding:9px 11px;border-bottom:1px solid rgba(129,181,161,.18);" +
+        "background:linear-gradient(110deg,rgba(3,45,66,.94),rgba(5,70,70,.9))}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-dot{width:7px;height:7px;border-radius:50%;flex:none;" +
+        "background:#62d84e;box-shadow:0 0 0 rgba(98,216,78,.58);animation:" + CHIP_ID + "-pulse 1.8s ease-out infinite}" +
+      "#" + CHIP_ID + "." + CHIP_ID + "-paused ." + CHIP_ID + "-dot{background:#f4c95d;animation:none}" +
+      "#" + CHIP_ID + "." + CHIP_ID + "-stopping ." + CHIP_ID + "-dot{background:#ee9b5f;animation:none}" +
+      "#" + CHIP_ID + "." + CHIP_ID + "-idle ." + CHIP_ID + "-dot{background:#6fae98;animation:none}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-title{font-weight:700;letter-spacing:.01em;color:#a4f1db}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-state{min-width:0;overflow:hidden;text-overflow:ellipsis;" +
+        "white-space:nowrap;color:#9aafa8}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-count{margin-left:auto;flex:none;padding:2px 7px;border-radius:999px;" +
+        "background:rgba(0,196,154,.1);color:#85cbb8;font-size:11px}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-list{min-height:0;overflow-y:auto;overscroll-behavior:contain;" +
+        "scrollbar-width:thin;scrollbar-color:rgba(129,181,161,.45) transparent;padding:6px}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task{border:1px solid rgba(129,181,161,.14);" +
+        "border-radius:9px;background:rgba(255,255,255,.025);overflow:hidden;margin-bottom:5px}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task:last-child{margin-bottom:0}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task.current,#" + CHIP_ID + " ." + CHIP_ID + "-task.paused,#" + CHIP_ID + " ." + CHIP_ID + "-task.stopping{" +
+        "border-color:rgba(0,196,154,.36);background:rgba(0,196,154,.045)}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-summary{appearance:none;width:100%;border:0;margin:0;padding:7px 8px;" +
+        "display:flex;align-items:flex-start;gap:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task:not(.terminal) ." + CHIP_ID + "-summary{cursor:default}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task-icon{flex:none;width:14px;padding-top:1px;text-align:center;color:#6fae98;font-weight:700}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task.failed ." + CHIP_ID + "-task-icon{color:#ef8d79}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task.stopped ." + CHIP_ID + "-task-icon{color:#eeae72}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task.current ." + CHIP_ID + "-task-icon{color:#62d84e}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task.paused ." + CHIP_ID + "-task-icon{color:#f4c95d}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task-label{min-width:0;flex:1;white-space:nowrap;overflow:hidden;" +
+        "text-overflow:ellipsis;color:#a9b8b2}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task.open ." + CHIP_ID + "-task-label{white-space:normal;overflow:visible;color:#e7f3ef}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task.current ." + CHIP_ID + "-task-label,#" + CHIP_ID + " ." + CHIP_ID + "-task.paused ." + CHIP_ID + "-task-label{" +
+        "color:#f1fbf8;font-weight:600}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-action-count{flex:none;color:#76958b;font-size:11px;white-space:nowrap}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-chevron{flex:none;width:12px;text-align:center;color:#729086;transition:transform .15s ease}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-task.open ." + CHIP_ID + "-chevron{transform:rotate(90deg)}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-body{padding:0 8px 8px 29px}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-controls{display:flex;gap:6px;margin:1px 0 7px}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-control{appearance:none;border:1px solid rgba(129,181,161,.35);" +
+        "border-radius:7px;background:rgba(40,111,190,.15);color:#b8dfff;padding:4px 9px;font:600 11px/1.4 inherit;cursor:pointer}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-control:hover{background:rgba(40,111,190,.26);border-color:rgba(129,181,161,.62)}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-control.stop{margin-left:auto;background:rgba(194,70,58,.12);border-color:rgba(239,141,121,.32);color:#ffb2a2}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-control:disabled{opacity:.55;cursor:wait}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-phase{margin:1px 0 7px;color:#8fa39d;font-size:11px}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-timeline{display:grid;gap:5px}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-action{border-left:2px solid rgba(0,196,154,.34);padding:3px 0 3px 8px;min-width:0}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-action-head{display:flex;gap:5px;align-items:baseline;color:#9cd9c8;font-size:11px;font-weight:700}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-action-name{min-width:0;overflow-wrap:anywhere;color:#d6e9e3}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-field{display:grid;grid-template-columns:53px minmax(0,1fr);gap:5px;margin-top:2px;" +
+        "color:#91a19c;font-size:11px}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-field-label{color:#668a7f}" +
+      "#" + CHIP_ID + " ." + CHIP_ID + "-field-value{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;color:#9fafa9}" +
+      "@keyframes " + CHIP_ID + "-pulse{0%{box-shadow:0 0 0 0 rgba(98,216,78,.55)}70%{box-shadow:0 0 0 6px rgba(98,216,78,0)}100%{box-shadow:0 0 0 0 rgba(98,216,78,0)}}" +
+      "@media(prefers-reduced-motion:reduce){#" + CHIP_ID + " ." + CHIP_ID + "-dot{animation:none}#" + CHIP_ID + " ." + CHIP_ID + "-chevron{transition:none}}";
+    (document.head || document.documentElement).appendChild(style);
+  }
   var chip = document.getElementById(CHIP_ID);
   if (!chip) {
-    if (!document.getElementById(STYLE_ID)) {
-      var style = document.createElement("style");
-      style.id = STYLE_ID;
-      style.setAttribute("data-page-agent-ignore", "true");
-      style.textContent =
-        "#" + CHIP_ID + "{position:fixed;right:16px;bottom:16px;z-index:2147483000;" +
-          "width:min(320px,calc(100vw - 32px));padding:8px 12px;border-radius:9px;" +
-          "background:rgba(3,45,66,.94);border:1px solid rgba(129,181,161,.72);" +
-          "box-shadow:0 0 0 1px rgba(0,196,154,.18),0 10px 28px rgba(3,45,66,.34);" +
-          "font:12px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
-          "color:#e7f3ef;pointer-events:none;isolation:isolate}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-head{display:flex;align-items:center;gap:6px;" +
-          "font-weight:600;letter-spacing:.01em;color:#8fe3cd;margin-bottom:4px}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-dot{width:6px;height:6px;border-radius:50%;flex:none;" +
-          "background:#62d84e;box-shadow:0 0 0 rgba(98,216,78,.6);animation:" + CHIP_ID + "-pulse 1.8s ease-out infinite}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-task{display:flex;align-items:flex-start;gap:6px;padding:2px 0}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-task-icon{flex:none;width:13px;text-align:center;color:#6fae98}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-task.failed ." + CHIP_ID + "-task-icon{color:#e08a6f}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-task.current ." + CHIP_ID + "-task-icon{color:#62d84e}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-task-label{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#a9b8b2}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-task.current ." + CHIP_ID + "-task-label{color:#e7f3ef;font-weight:600}" +
-        "#" + CHIP_ID + " ." + CHIP_ID + "-detail{padding:2px 0 2px 19px;color:#8b9994;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
-        "@keyframes " + CHIP_ID + "-pulse{0%{box-shadow:0 0 0 0 rgba(98,216,78,.55)}70%{box-shadow:0 0 0 6px rgba(98,216,78,0)}100%{box-shadow:0 0 0 0 rgba(98,216,78,0)}}" +
-        "@media(prefers-reduced-motion:reduce){#" + CHIP_ID + " ." + CHIP_ID + "-dot{animation:none}}";
-      (document.head || document.documentElement).appendChild(style);
-    }
     chip = document.createElement("div");
     chip.id = CHIP_ID;
     chip.setAttribute("data-page-agent-ignore", "true");
-    chip.setAttribute("role", "status");
-    chip.setAttribute("aria-live", "polite");
-    var head = document.createElement("div");
-    head.className = CHIP_ID + "-head";
-    var dot = document.createElement("span");
-    dot.className = CHIP_ID + "-dot";
-    var label = document.createElement("span");
-    label.textContent = "Arivu";
-    head.appendChild(dot);
-    head.appendChild(label);
-    chip.appendChild(head);
-    (document.body || document.documentElement).appendChild(chip);
+    chip.setAttribute("role", "region");
+    chip.setAttribute("aria-label", "Arivu agent activity");
   }
-  var existingRows = chip.querySelectorAll("." + CHIP_ID + "-task, ." + CHIP_ID + "-detail");
-  for (var i = 0; i < existingRows.length; i++) {
-    existingRows[i].remove();
+  var previousListElement = chip.querySelector("." + CHIP_ID + "-list");
+  var preservedScrollTop = previousListElement ? previousListElement.scrollTop : 0;
+  var preservedScrollLeft = previousListElement ? previousListElement.scrollLeft : 0;
+  var expandedTaskIds = chip.__arivuExpandedTaskIds || {};
+  chip.__arivuExpandedTaskIds = expandedTaskIds;
+  while (chip.firstChild) {
+    chip.removeChild(chip.firstChild);
   }
   var list = Array.isArray(tasks) ? tasks : [];
-  for (var j = 0; j < list.length; j++) {
-    var task = list[j] || {};
-    var status = task.status === "done" || task.status === "failed" ? task.status : "current";
+  var activeTask = null;
+  for (var i = list.length - 1; i >= 0; i--) {
+    if (list[i] && (list[i].status === "current" || list[i].status === "paused" || list[i].status === "stopping")) {
+      activeTask = list[i];
+      break;
+    }
+  }
+  var panelState = activeTask ? activeTask.status : "idle";
+  chip.className = CHIP_ID + "-" + panelState;
+
+  var head = document.createElement("div");
+  head.className = CHIP_ID + "-head";
+  head.setAttribute("aria-live", "polite");
+  var dot = document.createElement("span");
+  dot.className = CHIP_ID + "-dot";
+  var title = document.createElement("span");
+  title.className = CHIP_ID + "-title";
+  title.textContent = "Arivu agent";
+  var state = document.createElement("span");
+  state.className = CHIP_ID + "-state";
+  state.textContent =
+    panelState === "paused"
+      ? "Paused"
+      : panelState === "stopping"
+        ? "Stopping"
+        : panelState === "current"
+          ? "Working"
+          : "Activity";
+  var count = document.createElement("span");
+  count.className = CHIP_ID + "-count";
+  count.textContent = list.length + (list.length === 1 ? " task" : " tasks");
+  head.appendChild(dot);
+  head.appendChild(title);
+  head.appendChild(state);
+  head.appendChild(count);
+  chip.appendChild(head);
+
+  var listElement = document.createElement("div");
+  listElement.className = CHIP_ID + "-list";
+  var issueCommand = function(type, taskId, button, pendingLabel) {
+    window.__arivuPageAgentPresenceCommand = {
+      type: type,
+      taskId: taskId,
+      nonce: String(Date.now()) + "-" + String(Math.random())
+    };
+    if (button) {
+      var priorLabel = button.textContent;
+      button.disabled = true;
+      button.textContent = pendingLabel;
+      setTimeout(function() {
+        if (button.isConnected) {
+          button.disabled = false;
+          button.textContent = priorLabel;
+        }
+      }, 2500);
+    }
+  };
+  var appendField = function(card, fieldLabel, value) {
+    if (!value) return;
+    var field = document.createElement("div");
+    field.className = CHIP_ID + "-field";
+    var labelElement = document.createElement("span");
+    labelElement.className = CHIP_ID + "-field-label";
+    labelElement.textContent = fieldLabel;
+    var valueElement = document.createElement("span");
+    valueElement.className = CHIP_ID + "-field-value";
+    valueElement.textContent = String(value);
+    field.appendChild(labelElement);
+    field.appendChild(valueElement);
+    card.appendChild(field);
+  };
+  var renderTask = function(rawTask) {
+    var task = rawTask || {};
+    var allowedStatuses = { current: true, paused: true, stopping: true, done: true, failed: true, stopped: true };
+    var status = allowedStatuses[task.status] ? task.status : "current";
+    var terminal = status === "done" || status === "failed" || status === "stopped";
+    var taskId = String(task.id || "");
+    var open = !terminal || !!expandedTaskIds[taskId];
+    var actions = Array.isArray(task.actions) ? task.actions : [];
     var row = document.createElement("div");
-    row.className = CHIP_ID + "-task " + status;
+    row.className = CHIP_ID + "-task " + status + (terminal ? " terminal" : "") + (open ? " open" : "");
+    var summary = document.createElement("button");
+    summary.type = "button";
+    summary.className = CHIP_ID + "-summary";
+    summary.setAttribute("aria-expanded", open ? "true" : "false");
     var icon = document.createElement("span");
     icon.className = CHIP_ID + "-task-icon";
-    icon.textContent = status === "done" ? "✓" : status === "failed" ? "✕" : "▶";
+    icon.textContent =
+      status === "done"
+        ? "✓"
+        : status === "failed"
+          ? "✕"
+          : status === "stopped"
+            ? "■"
+            : status === "paused"
+              ? "Ⅱ"
+              : status === "stopping"
+                ? "…"
+                : "▶";
     var text = document.createElement("span");
     text.className = CHIP_ID + "-task-label";
     text.textContent = String(task.instruction || "");
-    row.appendChild(icon);
-    row.appendChild(text);
-    chip.appendChild(row);
-    if (status === "current" && Array.isArray(task.detail)) {
-      for (var k = 0; k < task.detail.length; k++) {
-        var detailEl = document.createElement("div");
-        detailEl.className = CHIP_ID + "-detail";
-        detailEl.textContent = String(task.detail[k]);
-        chip.appendChild(detailEl);
-      }
+    var actionCount = document.createElement("span");
+    actionCount.className = CHIP_ID + "-action-count";
+    actionCount.textContent = actions.length + (actions.length === 1 ? " action" : " actions");
+    var chevron = document.createElement("span");
+    chevron.className = CHIP_ID + "-chevron";
+    chevron.textContent = terminal ? "›" : "";
+    summary.appendChild(icon);
+    summary.appendChild(text);
+    summary.appendChild(actionCount);
+    summary.appendChild(chevron);
+    row.appendChild(summary);
+
+    var body = document.createElement("div");
+    body.className = CHIP_ID + "-body";
+    body.hidden = !open;
+    if (!terminal) {
+      var controls = document.createElement("div");
+      controls.className = CHIP_ID + "-controls";
+      var pause = document.createElement("button");
+      pause.type = "button";
+      pause.className = CHIP_ID + "-control pause";
+      pause.textContent = status === "paused" ? "Resume" : status === "stopping" ? "Stopping…" : "Pause";
+      pause.disabled = status === "stopping";
+      pause.setAttribute("aria-label", status === "paused" ? "Resume this agent task" : "Pause this agent task");
+      pause.addEventListener("click", function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        issueCommand(status === "paused" ? "resume" : "pause", taskId, pause, status === "paused" ? "Resuming…" : "Pausing…");
+      });
+      var stop = document.createElement("button");
+      stop.type = "button";
+      stop.className = CHIP_ID + "-control stop";
+      stop.textContent = status === "stopping" ? "Stopping…" : "Stop";
+      stop.disabled = status === "stopping";
+      stop.setAttribute("aria-label", "Stop this agent task");
+      stop.addEventListener("click", function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        issueCommand("stop", taskId, stop, "Stopping…");
+      });
+      controls.appendChild(pause);
+      controls.appendChild(stop);
+      body.appendChild(controls);
+      var phase = document.createElement("div");
+      phase.className = CHIP_ID + "-phase";
+      phase.textContent =
+        status === "paused"
+          ? "Paused before the next page action."
+          : status === "stopping"
+            ? "Stopping the active page agent…"
+            : task.phase
+              ? String(task.phase)
+              : actions.length
+                ? "Preparing the next action…"
+                : "Preparing the first action…";
+      body.appendChild(phase);
     }
+    // Build the (potentially large) action timeline lazily. Only the active task and any task the
+    // user has expanded materialize their cards; a collapsed terminal task defers until its first
+    // expand. This keeps each ~1s panel refresh from rebuilding every historical task's full
+    // timeline on a long-lived tab, while still retaining and revealing every action on demand.
+    var timelineBuilt = false;
+    var fillTimeline = function() {
+      if (timelineBuilt) return;
+      timelineBuilt = true;
+      var timeline = document.createElement("div");
+      timeline.className = CHIP_ID + "-timeline";
+      for (var actionIndex = 0; actionIndex < actions.length; actionIndex++) {
+        var action = actions[actionIndex] || {};
+        var card = document.createElement("div");
+        card.className = CHIP_ID + "-action";
+        var actionHead = document.createElement("div");
+        actionHead.className = CHIP_ID + "-action-head";
+        var step = document.createElement("span");
+        var stepNumber = Number(action.stepIndex) || actionIndex + 1;
+        step.textContent = "Step " + (stepNumber < 10 ? "0" + stepNumber : String(stepNumber)) + " ·";
+        var actionName = document.createElement("span");
+        actionName.className = CHIP_ID + "-action-name";
+        actionName.textContent = String(action.name || "unknown_action");
+        actionHead.appendChild(step);
+        actionHead.appendChild(actionName);
+        card.appendChild(actionHead);
+        appendField(card, "Input", action.input);
+        appendField(card, "Result", action.output);
+        appendField(card, "Evaluation", action.evaluation);
+        appendField(card, "Memory", action.memory);
+        appendField(card, "Next", action.goal);
+        timeline.appendChild(card);
+      }
+      if (actions.length === 0 && terminal) {
+        var empty = document.createElement("div");
+        empty.className = CHIP_ID + "-phase";
+        empty.textContent = "No page actions were recorded.";
+        timeline.appendChild(empty);
+      }
+      body.appendChild(timeline);
+    };
+    if (open) {
+      fillTimeline();
+    }
+    row.appendChild(body);
+    if (terminal) {
+      summary.addEventListener("click", function() {
+        open = !open;
+        expandedTaskIds[taskId] = open || undefined;
+        row.classList.toggle("open", open);
+        summary.setAttribute("aria-expanded", open ? "true" : "false");
+        if (open) {
+          fillTimeline();
+        }
+        body.hidden = !open;
+      });
+    }
+    listElement.appendChild(row);
+  };
+  for (var taskIndex = 0; taskIndex < list.length; taskIndex++) {
+    renderTask(list[taskIndex]);
   }
+  chip.appendChild(listElement);
+  var parent = document.body || document.documentElement;
+  // Unconditionally (re-)append whether the chip is new or already a child; see below for why.
+  parent.appendChild(chip);
+  // Re-appending the panel keeps it above late page-owned overlays in DOM order, but Chromium
+  // resets a descendant scroller during that move. Restore only after the move and final layout
+  // attachment so live action updates cannot pull the user back to the top mid-read.
+  if (previousListElement) {
+    // Reading these dimensions forces Chromium to finish the flex/max-height layout before the
+    // scroll write. Without that flush, the new list can still report a zero scroll range and
+    // clamp the restored value back to the top until the next frame.
+    var maximumScrollTop = Math.max(0, listElement.scrollHeight - listElement.clientHeight);
+    listElement.scrollTop = Math.min(preservedScrollTop, maximumScrollTop);
+    listElement.scrollLeft = preservedScrollLeft;
+  }
+})`;
+
+/**
+ * Builds a structured action timeline for the on-page activity panel. Every step
+ * is retained (up to PageAgent's outer 200-step ceiling); each field is separately
+ * bounded before it leaves the renderer, then validated again in the main process.
+ * `startStep` lets polling return only newly completed steps instead of resending a
+ * growing history once per second.
+ */
+export const BUILD_ACTIONS_SNIPPET = String.raw`(function(history, stepOffset, startStep) {
+  var MAX_NAME_CHARS = 80;
+  var MAX_FIELD_CHARS = 500;
+  var offset = typeof stepOffset === "number" && stepOffset > 0 ? Math.trunc(stepOffset) : 0;
+  var skip = typeof startStep === "number" && startStep > 0 ? Math.trunc(startStep) : 0;
+  var actions = [];
+  var stepOrdinal = 0;
+  var clean = function(value, maxChars) {
+    if (value === undefined || value === null) return "";
+    var text = String(value).replace(/\s+/g, " ").trim();
+    return text.length > maxChars ? text.slice(0, maxChars) + "… (truncated)" : text;
+  };
+  var stringify = function(value) {
+    if (value === undefined) return "";
+    try {
+      return JSON.stringify(value);
+    } catch (err) {
+      return String(value);
+    }
+  };
+  var list = history || [];
+  for (var i = 0; i < list.length; i++) {
+    var event = list[i];
+    if (!event || event.type !== "step") continue;
+    var currentOrdinal = stepOrdinal;
+    stepOrdinal++;
+    if (currentOrdinal < skip) continue;
+    var eventIndex =
+      typeof event.stepIndex === "number" && isFinite(event.stepIndex) && event.stepIndex >= 0
+        ? Math.trunc(event.stepIndex)
+        : currentOrdinal;
+    var reflection = event.reflection || {};
+    var action = event.action || {};
+    var item = {
+      stepIndex: offset + eventIndex + 1,
+      name: clean(action.name || "unknown_action", MAX_NAME_CHARS)
+    };
+    var input = clean(stringify(action.input), MAX_FIELD_CHARS);
+    var output = clean(action.output, MAX_FIELD_CHARS);
+    var evaluation = clean(reflection.evaluation_previous_goal, MAX_FIELD_CHARS);
+    var memory = clean(reflection.memory, MAX_FIELD_CHARS);
+    var goal = clean(reflection.next_goal, MAX_FIELD_CHARS);
+    if (input && input !== "undefined") item.input = input;
+    if (output) item.output = output;
+    if (evaluation && evaluation !== "(not recorded)") item.evaluation = evaluation;
+    if (memory && memory !== "(not recorded)") item.memory = memory;
+    if (goal && goal !== "(not recorded)") item.goal = goal;
+    actions.push(item);
+  }
+  return actions;
 })`;
 
 /**

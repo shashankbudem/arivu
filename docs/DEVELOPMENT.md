@@ -73,7 +73,7 @@ arivu config set toolCalling disabled
 arivu config set imageInput disabled
 ```
 
-The doctor command checks API key presence, `GET /models`, selected model membership, chat completions, streaming, tool calling, and Tavily. Without an API key it reports skipped network checks, which is useful for offline setup validation. When `toolCalling` is `disabled`, doctor skips the tool-calling probe because the active provider is intentionally configured for plain chat. In desktop Settings, an unsupported tool-calling probe saves Tool calling as Disabled for auto-mode saved providers.
+The doctor command checks API key presence, `GET /models`, selected model membership, chat completions, streaming, tool calling, and the active web-search provider. Without a model API key it reports skipped model checks, which is useful for offline setup validation. Keyless Bing RSS skips its credential check. When `toolCalling` is `disabled`, doctor skips the tool-calling probe because the active provider is intentionally configured for plain chat. In desktop Settings, an unsupported tool-calling probe saves Tool calling as Disabled for auto-mode saved providers.
 
 Basic one-shot model check:
 
@@ -259,11 +259,11 @@ Desktop workflows to check manually after UI changes:
 - `New workspace` creates a directory and switches into it.
 - The Workspaces sidebar section shows recent workspaces from saved project chats. Click the folder/name area to reopen that workspace and use the chevron to expand chats beneath it.
 - The top-level Chats section shows saved chats that are not associated with any project.
-- `History` lists saved sessions, can reopen them, rename them, pin/unpin them, and delete them. Pinned chats should remain above normal recency order after reload. Session updates are serialized per chat and use fsync-backed atomic replacement; each update preserves the previous validated JSON as an unlisted `.bak` file. If the primary JSON is truncated or invalid, history falls back to that previous copy and opening the chat repairs the primary. Deleting a chat removes both copies.
-- Typing `/` in the desktop composer opens slash commands. Verify `/session` shows chat id plus estimated context used/remaining and latest task-run status, `/tools` opens the tools list, `/skills` opens the skills selector, `/files` attaches workspace text/code files to the next prompt, `/browser` opens or focuses the separate browser window, `/plan` toggles one-shot read-only plan approval, `/worktree` toggles one-shot task worktree mode for git projects, `/compact` runs the existing compact-context flow when enough messages exist, and unknown slash commands are not sent as model prompts.
+- `History` lists saved sessions, can reopen them, rename them, pin/unpin them, and delete them. Pinned chats should remain above normal recency order after reload. Session updates are serialized per chat and use fsync-backed atomic replacement; each update preserves the previous validated JSON as an unlisted `.bak` file. If the primary JSON is truncated or invalid, history falls back to that previous copy and opening the chat repairs the primary. Oversized valid sessions and oversized recovery copies remain listed with message bodies omitted from list-only memory. Deleting a chat removes both copies.
+- Typing `/` in the desktop composer opens slash commands. Verify `/session` shows chat id, working-context used/remaining, working-message count, full saved-history count, and latest task-run status; `/tools` opens the tools list, `/skills` opens the skills selector, `/files` attaches workspace text/code files to the next prompt, `/browser` opens or focuses the separate browser window, `/plan` toggles one-shot read-only plan approval, `/worktree` toggles one-shot task worktree mode for git projects, `/compact` runs the compact-context flow when enough working messages exist, and unknown slash commands are not sent as model prompts.
 - Skills in the prompt `+` menu show the installed global skills list. Load queues a skill for the next prompt, the composer shows a queued chip, and after the prompt succeeds the chat shows the skill as loaded context. The Add skill action opens Settings where a new skill can be saved as `<name>/SKILL.md`.
 - Model selection opens a dialog with search, loads options from the selected provider's `GET /models`, and keeps manual model id entry available when the provider has no list or no match.
-- Settings can save multiple OpenAI-compatible LLM providers, a Tavily key, and MCP server JSON. Confirm the model picker searches only the selected provider's models and does not combine lists across providers. Confirm each provider's Tool calling mode saves as Auto fallback, Enabled, or Disabled, and Disabled makes doctor skip the tool-calling probe. Confirm Settings doctor saves Tool calling as Disabled for auto-mode saved providers when the probe says tools are unsupported. Confirm each provider's Image input mode saves as Auto, Enabled, or Disabled, and Disabled blocks image prompts before a provider request. For auto-mode providers, rejected tool schemas or image parts should persist the matching capability as Disabled.
+- Settings can save multiple OpenAI-compatible LLM providers, multiple web-search profiles, and MCP server JSON. Under Integrations, add Tavily, Brave Search, Exa, Serper, and Bing RSS profiles; switch the active row; change a provider type; replace its key; remove a row; save; and reopen Settings. Confirm keys remain masked and provider-specific, Bing is marked keyless, and the active selection persists. Confirm the model picker searches only the selected LLM provider's models and does not combine lists across providers. Confirm each LLM provider's Tool calling mode saves as Auto fallback, Enabled, or Disabled, and Disabled makes doctor skip the tool-calling probe. Confirm Settings doctor saves Tool calling as Disabled for auto-mode saved providers when the probe says tools are unsupported. Confirm each provider's Image input mode saves as Auto, Enabled, or Disabled, and Disabled blocks image prompts before a provider request. For auto-mode providers, rejected tool schemas or image parts should persist the matching capability as Disabled.
 - Header actions are icon-only and expose hover/focus tooltips.
 - The Browser header action opens or hides the separate maximized browser window. Verify explicit visible URL opens in that window, default agent browser tools remain hidden/background, and the main workspace layout does not gain an embedded browser column.
 - In the visible browser window, verify the tab strip can create a new tab, select between tabs, close a tab, keep each tab's URL/title/history separate, navigate with the address bar/back/forward/reload controls, and convert non-URL address text into a Google search.
@@ -276,16 +276,18 @@ Desktop workflows to check manually after UI changes:
 - Verify browser opens, clicks, coordinate clicks, and typing do not show approval dialogs by default, while the Activity rail still records browser-control activity. Then set the current workspace browser-control policy override to `Require approval` or `Block` in Settings and confirm the override is honored.
 - `Refresh state` reloads workspace, config, and active session state.
 - Recent workspace rows mark missing folders and expose a forget action that moves those saved chats to standalone history instead of deleting them.
-- `Compact context` summarizes older saved messages locally, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
+- `Compact context` summarizes what future model requests read, saves a derived checkpoint, and keeps the complete chat transcript visible and persisted. Reopen the chat and confirm every pre-compaction user/assistant/tool row is still present while `/session` reports the smaller working-message/token counts.
 - The `Tools` item in the prompt `+` menu opens an inline drawer listing available tools, parameters, and status.
 - Confirm the Tools drawer lists `arivu_runtime_status`, `arivu_set_tool_state`, `arivu_select_browser_model`, and `arivu_propose_mcp_server`; control-boundary tools must remain enabled even when other tools are runtime-disabled.
 - Browser tools appear in the Tools drawer in desktop mode. Verify `browser_state`, `browser_select_tab`, `browser_open`, `browser_snapshot`, `browser_console`, `browser_screenshot`, `browser_click`, `browser_type`, and `browser_execute_javascript` are listed with hidden-browser status.
 - Ask the agent to run `browser_execute_javascript` with a script that returns a plain value (confirm it comes back as the actual result, not a stringified duplicate) and with one that throws (confirm a clean `ok:false` error, not a raw tool failure). Try a script with a blocking `while(true){}` loop: confirm the tool call itself returns a timeout message within ~15s and that the tab still recovers after a reload.
-- Run a `browser_task` on a page with an unfamiliar control and confirm the in-page agent's activity trace shows it calling `search_web` when stuck rather than repeating the same failed interaction indefinitely. Confirm the search still succeeds with no Tavily key configured (Bing RSS fallback) and that revoking/expiring the task's proxy token also cuts off search, not just the LLM calls.
+- Run a `browser_task` on a page with an unfamiliar control and confirm the in-page agent's activity trace shows it calling `search_web` when stuck rather than repeating the same failed interaction indefinitely. Switch the active search profile and confirm both main-agent `web_search` and in-page `search_web` use that provider; confirm Bing RSS still succeeds without a key and that revoking/expiring the task's proxy token also cuts off search, not just the LLM calls.
 - In Settings, choose a Browser task LLM provider and open the Browser task model picker. Confirm it loads models from that provider, excludes the chat-only `Auto` choice, supports search and manual model IDs, and the reset icon returns to the provider's default model.
 - Add, reorder, and remove Browser task fallbacks. Confirm each row can use a different configured provider, model search stays provider-specific, manual model ids work, and no more than five fallbacks can be saved.
 - Open prompt options and select Browser LLM; confirm the same picker opens above the composer. Verify `/browsermodel` opens it and `/browsermodel <model-id>` pins the exact model without sending a chat prompt.
 - Set browser task max loops and loop delay in Settings, save, reopen Settings, and confirm both values persist. Blank values should restore the 100-loop and 35000-ms defaults; delay values above 120000 ms must be rejected by the input/schema boundary.
+- Add a saved provider that serves `nvidia/LocateAnything-3B` through an OpenAI-compatible endpoint, select it under Browser agent > Visual grounding, and open the LocateAnything model picker. Confirm its searchable results come from that visual provider (not the chat/browser-task provider), manual model IDs still work, and selecting a result updates the field. Then run a task against a canvas/pixel-only control and confirm Page Agent tries current DOM indices first, `locate_and_click` sends one viewport image with the `Point to:` prompt, and the resulting click is blocked if the page scrolls, navigates, resizes, or swaps frames before inference returns.
+- On Apple silicon, repeat that check against the community GGUF/Metal runtime with both its Q4 model and BF16 vision projector. Confirm the server was started with `--special`; without it, the coordinate tokens are stripped and Arivu must reject the response rather than click.
 - Exercise a browser-task provider that returns a temporary 429/503 and confirm bounded backoff occurs inside the proxy. On a terminal failure, confirm Activity preserves the model/provider, trace, stop reason, and endpoint diagnostics and that an immediate retry is stopped by the model-specific circuit.
 - Start a browser task and inspect the injected page-agent configuration. Confirm the default loop cap is 100, the delay between loops is 35 seconds, and cancelling the chat run stops the browser task without waiting for the full 70-minute wall-clock budget.
 - The `Images` item in the prompt `+` menu opens a native image picker, attaches PNG/JPEG/WebP/GIF files, renders removable thumbnails, and sends those images with the next prompt.
@@ -312,7 +314,7 @@ Inside the TUI:
 - `/help` shows commands.
 - `/status` shows workspace/model state.
 - `/diff` shows staged, unstaged, and untracked git changes without sending anything to the model.
-- `/compact [n]` compacts the active saved session locally, keeping the most recent non-system messages.
+- `/compact [n]` compacts the active session's model context locally while preserving the complete saved transcript.
 - `/sessions [n] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]` lists and filters recent saved sessions, and opens a selectable picker when `--pick` is present.
 - `/resume <session-id>` switches the live TUI into that session.
 - `/clear` clears visible conversation.
@@ -327,8 +329,8 @@ The TUI is in `src/tui/TuiApp.ts`. Keep these behaviors intact:
 
 - Default `arivu` opens the TUI.
 - One-shot mode stays non-interactive.
-- `sessions` prints recent saved sessions newest first, supports `--search`, `--workspace`, `--pinned`, `--unpinned`, `--project`, and `--standalone`; `resume <session-id>` opens the TUI with session history; and `compact <session-id>` compacts a saved transcript with `--recent`, `--entry-limit`, and `--dry-run` controls.
-- Inside the TUI, `/compact [n]` compacts the active saved session, `/sessions [n]` lists recent saved sessions, accepts the same filter flags, `/sessions --pick` opens a keyboard-selectable resume picker, `/resume <session-id>` switches the live TUI into that session, `/diff` shows a local git change summary, and pane scrolling shortcuts keep long conversation/activity logs reachable without mouse support.
+- `sessions` prints recent saved sessions newest first, supports `--search`, `--workspace`, `--pinned`, `--unpinned`, `--project`, and `--standalone`; `resume <session-id>` opens the TUI with full session history; and `compact <session-id>` derives a smaller model context with `--recent`, `--entry-limit`, and `--dry-run` controls without deleting transcript messages.
+- Inside the TUI, `/compact [n]` compacts only the active model context, `/sessions [n]` lists recent saved sessions, accepts the same filter flags, `/sessions --pick` opens a keyboard-selectable resume picker, `/resume <session-id>` switches the live TUI into that session, `/diff` shows a local git change summary, and pane scrolling shortcuts keep long conversation/activity logs reachable without mouse support.
 - Narrow terminals remain usable.
 - Approval prompts still resolve the same permission promise.
 
@@ -336,16 +338,27 @@ The TUI is in `src/tui/TuiApp.ts`. Keep these behaviors intact:
 
 Desktop files live under `desktop/`.
 
-- `desktop/main/main.ts` owns Electron, IPC, workspace selection, and agent execution.
-- `desktop/main/main.ts` also owns workspace creation, session history loading, model listing, and config/session persistence.
+- `desktop/main/main.ts` is the Electron composition root and should stay limited to lifecycle and dependency wiring.
+- `desktop/main/desktopController.ts` coordinates workspace, session, model, tool, task-run, and agent execution state.
+- `desktop/main/desktopIpc.ts` owns trusted renderer IPC registration; keep channel payload parsing at this boundary.
+- Focused main-process modules own config bridging, session runtime helpers, attachments, interaction prompts, workspace scaffolding/policy files, task evidence, desktop QA, and benchmark execution.
+- `desktop/main/browserController.ts` coordinates browser windows and tabs. Generated pages, in-page scripts, capture helpers, state conversion, shared types, and persistence belong in their dedicated `browser*` modules.
 - `desktop/main/preload.ts` exposes a small `window.arivu` API.
-- `desktop/renderer/src/App.tsx` owns the React UI.
+- `desktop/renderer/src/App.tsx` composes the React UI and owns cross-feature state and IPC/event wiring.
+- `desktop/renderer/src/features/` owns cohesive feature UI and presentation/model logic.
+- `desktop/renderer/src/shared/` contains dependency-light pure utilities reused by renderer features.
 - `desktop/renderer/src/styles.css` owns the desktop styling.
 
 Keep these boundaries intact:
 
 - Renderer code must not access Node APIs directly.
 - Main process owns filesystem, model calls, shell execution, workspace creation, and config/session IO.
+- Keep `main.ts` free of feature logic. Construct services there and put behavior in an owned module.
+- Keep Electron IPC validation centralized in `desktopIpc.ts`; feature services should not register their own untrusted channels.
+- Browser helpers must not reach into controller-private state. Pass explicit records or callbacks so the controller remains the single state coordinator.
+- New renderer behavior belongs in the nearest feature directory. Keep `App.tsx` focused on orchestration, and do not import it from a feature.
+- Put a helper in `shared/` only when it is pure, dependency-light, and genuinely useful across feature boundaries.
+- Prefer dependencies that flow from `App.tsx` to features to shared/domain modules; avoid feature-to-feature imports unless one feature explicitly owns the shared contract.
 - Approvals flow from main process to renderer by IPC and resolve back to `ApprovalManager`.
 - Desktop changes must not break `arivu` TUI mode or one-shot CLI mode.
 
@@ -371,7 +384,7 @@ When adding or changing a tool:
 - Treat web tools as external data transmission; do not send secrets, private source, or personal data in search queries.
 - Treat browser tools as rendered-page access. Keep page content untrusted, use hidden isolated browser sessions by default, and prefer Chrome DevTools MCP for visual screenshots or deeper debugging when it is configured.
 - `browser_task` accepts integer-looking strings for `maxSteps` and `timeoutMs` because some OpenAI-compatible models serialize numeric tool arguments as strings. Nonnumeric strings, out-of-range values, and sensitive boolean arguments remain strictly validated.
-- Keep `web_search` useful for current-information prompts: Tavily is preferred, while the no-key fallback uses Bing RSS and routes news-like queries to Bing News RSS.
+- Keep `web_search` useful for current-information prompts: verify the active managed provider is honored, and verify the no-key Bing RSS profile routes news-like queries to Bing News RSS.
 - Add tests for safety-sensitive behavior.
 
 ## Release/local linking

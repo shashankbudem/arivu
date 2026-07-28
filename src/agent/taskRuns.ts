@@ -275,6 +275,15 @@ export function recordTaskRunEvent(
     run.artifacts.push(artifact);
     tool.artifactIds = [...(tool.artifactIds ?? []), artifact.id];
   }
+  // Failed browser_task results may embed a failure-path screenshotPath. Materialize a normal
+  // browser_screenshot artifact so the UI and recovery evidence treat it like an explicit shot.
+  if (event.name === "browser_task") {
+    const failureShot = screenshotArtifactFromEmbeddedPath(event.toolCallId, event.result, now);
+    if (failureShot && !run.artifacts.some((candidate) => candidate.id === failureShot.id)) {
+      run.artifacts.push(failureShot);
+      tool.artifactIds = [...(tool.artifactIds ?? []), failureShot.id];
+    }
+  }
 
   run.updatedAt = now;
   return true;
@@ -852,6 +861,8 @@ function browserTaskArtifactFromToolResult(toolCallId: string, result: string, n
   const stopReason = stringValue(parsed.stopReason);
   const durationMs = numberValue(parsed.durationMs);
   const data = typeof parsed.data === "string" ? parsed.data : "";
+  const screenshotPath = stringValue(parsed.screenshotPath);
+  const size = isRecord(parsed.size) ? parsed.size : undefined;
   const trace = Array.isArray(parsed.trace) ? parsed.trace.filter((entry): entry is string => typeof entry === "string") : [];
   const model = isRecord(parsed.browserTaskModel) ? parsed.browserTaskModel : undefined;
   const proxyDiagnostics = Array.isArray(parsed.proxyDiagnostics)
@@ -860,6 +871,9 @@ function browserTaskArtifactFromToolResult(toolCallId: string, result: string, n
   const contentSections = [
     model ? `Configuration:\n${JSON.stringify(model, null, 2)}` : undefined,
     proxyDiagnostics.length > 0 ? `Model endpoint diagnostics:\n${JSON.stringify(proxyDiagnostics, null, 2)}` : undefined,
+    screenshotPath
+      ? `Failure screenshot:\n${screenshotPath}${parsed.failureScreenshot === true ? " (auto-captured on task failure)" : ""}`
+      : undefined,
     trace.length > 0 ? `Trace (${trace.length} entries):\n${trace.map((entry, index) => `${index + 1}. ${entry}`).join("\n")}` : undefined,
     "Result:\n" + (data || "(no result text)")
   ].filter((section): section is string => Boolean(section));
@@ -868,6 +882,7 @@ function browserTaskArtifactFromToolResult(toolCallId: string, result: string, n
     success ? "Completed" : "Did not complete",
     `${stepCount} step${stepCount === 1 ? "" : "s"}`,
     stopped && stopReason ? `stopped: ${stopReason}` : undefined,
+    screenshotPath ? "failure screenshot" : undefined,
     durationMs === undefined ? undefined : formatDuration(durationMs)
   ].filter((part): part is string => Boolean(part));
   return {
@@ -877,6 +892,9 @@ function browserTaskArtifactFromToolResult(toolCallId: string, result: string, n
     summary: summaryParts.join(", "),
     content: boundedContent.text,
     contentTruncated: boundedContent.truncated || undefined,
+    path: screenshotPath,
+    width: numberValue(size?.width),
+    height: numberValue(size?.height),
     browserTask: {
       success,
       model: stringValue(model?.model),
@@ -892,6 +910,34 @@ function browserTaskArtifactFromToolResult(toolCallId: string, result: string, n
       tokensUsed: numberValue(parsed.tokensUsed),
       proxyDiagnostics: proxyDiagnostics.length > 0 ? proxyDiagnostics : undefined
     },
+    toolCallId,
+    createdAt: now
+  };
+}
+
+/** Screenshot artifact for failure-path captures embedded on browser_task results. */
+function screenshotArtifactFromEmbeddedPath(
+  toolCallId: string,
+  result: string,
+  now: string
+): AgentTaskRunArtifact | undefined {
+  const parsed = parseJsonObject(result);
+  if (!parsed) {
+    return undefined;
+  }
+  const screenshotPath = stringValue(parsed.screenshotPath);
+  if (!screenshotPath) {
+    return undefined;
+  }
+  const size = isRecord(parsed.size) ? parsed.size : undefined;
+  return {
+    id: `${toolCallId}:browser_screenshot:${screenshotPath}`,
+    kind: "browser_screenshot",
+    title: parsed.failureScreenshot === true ? "Browser task failure screenshot" : "Browser screenshot",
+    summary: stringValue(parsed.title) ?? stringValue(parsed.url) ?? "browser_task",
+    path: screenshotPath,
+    width: numberValue(size?.width),
+    height: numberValue(size?.height),
     toolCallId,
     createdAt: now
   };
@@ -1841,7 +1887,10 @@ function parseSarifReport(reportPath: string, content: string): AgentTaskRunTest
   return {
     kind: "sarif",
     path: reportPath,
-    status: findings > 0 ? "failed" : "passed",
+    // Only error-level results fail verification. A static-analysis report that surfaces only
+    // warnings or notes (style lint, advisory findings) is a clean pass — treating any finding at
+    // all as a failure made every advisory-only SARIF report sink the whole run's verification.
+    status: errorFindings > 0 ? "failed" : "passed",
     summary: summaryParts.join(", "),
     findings,
     errorFindings,
