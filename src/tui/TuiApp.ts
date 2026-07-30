@@ -27,24 +27,29 @@ import {
   type SessionListFilters
 } from "../sessions/sessionList.js";
 import { detectWorkspace, type WorkspaceInfo } from "../workspace.js";
+import {
+  TUI_PALETTE_COMMANDS,
+  TUI_SHORTCUT_HELP,
+  escapeBlessedTags,
+  editTuiPrompt,
+  filterTuiPaletteCommands,
+  formatTuiActivityDrawer,
+  formatTuiAlignedLine,
+  formatTuiContextUsage,
+  formatTuiPaletteItems,
+  formatTuiPromptDraft,
+  formatTuiTokenCount,
+  formatTuiTranscript,
+  resolveTuiActivityDrawerWidth,
+  type TuiActivityLine,
+  type TuiLogLine,
+  type TuiPaletteCommand
+} from "./presentation.js";
 
 type TuiAppOptions = {
   config: AppConfig;
   cwd: string;
   session?: AgentSession;
-};
-
-type LogLine = {
-  kind: "user" | "assistant" | "system" | "error";
-  text: string;
-  time: Date;
-};
-
-type ActivityLine = {
-  kind: "call" | "result" | "system" | "error";
-  title: string;
-  detail?: string;
-  time: Date;
 };
 
 type FocusTarget = "input" | "conversation" | "activity";
@@ -55,7 +60,7 @@ export type TuiPaneScrollShortcut = {
   action: TuiPaneScrollAction;
 };
 export type TuiSlashCommand =
-  | { kind: "clear" | "continue" | "diff" | "exit" | "help" | "status" | "summarize" }
+  | { kind: "activity" | "clear" | "continue" | "diff" | "exit" | "help" | "status" | "summarize" }
   | { kind: "compact"; recentMessageCount?: number }
   | { kind: "sessions"; limit: number; filters?: SessionListFilters; pick?: boolean }
   | { kind: "resume"; sessionId: string }
@@ -72,7 +77,7 @@ export type TuiGitDiffSummary = {
   untrackedFiles: string[];
 };
 
-const SPINNER = ["-", "\\", "|", "/"];
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DEFAULT_TUI_SESSION_LIST_LIMIT = 10;
 const MAX_TUI_SESSION_LIST_LIMIT = 50;
 const TUI_PANE_SCROLL_KEY_BINDINGS: Array<{ keys: string[]; shortcut: TuiPaneScrollShortcut }> = [
@@ -91,7 +96,11 @@ export class TuiApp {
   private header!: blessed.Widgets.BoxElement;
   private conversation!: blessed.Widgets.BoxElement;
   private activity!: blessed.Widgets.BoxElement;
-  private input!: blessed.Widgets.TextboxElement;
+  private turnStatus!: blessed.Widgets.BoxElement;
+  private composer!: blessed.Widgets.BoxElement;
+  private promptPrefix!: blessed.Widgets.BoxElement;
+  private promptInfo!: blessed.Widgets.BoxElement;
+  private input!: blessed.Widgets.BoxElement;
   private commandBar!: blessed.Widgets.BoxElement;
   private agent!: Agent;
   private workspace!: WorkspaceInfo;
@@ -102,11 +111,14 @@ export class TuiApp {
   private readonly catalogStore = new ModelCatalogStore();
   /** Loaded once in run(); createAgent() has six sync callers, so it reads this snapshot. */
   private modelCatalog: ModelCatalog = emptyCatalog();
-  private readonly log: LogLine[] = [];
-  private readonly activityLog: ActivityLine[] = [];
+  private readonly log: TuiLogLine[] = [];
+  private readonly activityLog: TuiActivityLine[] = [];
+  private entrySequence = 0;
   private busy = false;
   private runAbortController: AbortController | undefined;
   private lastRunUsage: { promptTokens: number; completionTokens: number; totalTokens: number; requestCount: number } | undefined;
+  private currentContextTokens: number | undefined;
+  private runStartedAt: number | undefined;
   private status = "Ready";
   private focusTarget: FocusTarget = "input";
   private spinnerFrame = 0;
@@ -115,7 +127,15 @@ export class TuiApp {
   private streamingAssistantIndex: number | undefined;
   private liveActivity = false;
   private modalOpen = false;
+  private activityOpen = false;
+  private forceConversationTail = true;
+  private forceActivityTail = true;
+  private quitArmedUntil = 0;
+  private readonly promptQueue: string[] = [];
   private readonly streamingToolRows = new Map<string, number>();
+  private promptDraft = "";
+  private promptCursor = 0;
+  private closing = false;
 
   constructor(private readonly options: TuiAppOptions) {}
 
@@ -146,30 +166,28 @@ export class TuiApp {
       smartCSR: true,
       title: "Arivu",
       fullUnicode: true,
-      dockBorders: true
+      dockBorders: true,
+      sendFocus: true
     });
 
     this.header = blessed.box({
       top: 0,
       left: 0,
       width: "100%",
-      height: 4,
+      height: 2,
       tags: true,
-      padding: { left: 1, right: 1 },
-      border: "line",
+      padding: { left: 2, right: 2 },
       style: {
-        fg: "white",
-        bg: "black",
-        border: { fg: "cyan" }
+        fg: "gray",
+        bg: "black"
       }
     });
 
     this.conversation = blessed.box({
-      top: 4,
+      top: 2,
       left: 0,
-      width: "68%",
+      width: "100%",
       bottom: 6,
-      label: " conversation ",
       tags: true,
       wrap: true,
       scrollable: true,
@@ -177,27 +195,25 @@ export class TuiApp {
       keys: true,
       vi: true,
       mouse: true,
-      border: "line",
-      padding: { left: 1, right: 1 },
+      padding: { left: 2, right: 3 },
       scrollbar: {
         ch: " ",
         track: { bg: "black" },
-        style: { bg: "cyan" }
+        style: { bg: "gray" }
       },
       style: {
         fg: "white",
         bg: "black",
-        border: { fg: "cyan" },
-        focus: { border: { fg: "green" } }
+        scrollbar: { bg: "gray" }
       }
     });
 
     this.activity = blessed.box({
-      top: 4,
+      top: 2,
       right: 0,
-      width: "32%",
+      width: "38%",
       bottom: 6,
-      label: " activity ",
+      label: " activity · Ctrl+G close ",
       tags: true,
       scrollable: true,
       alwaysScroll: true,
@@ -209,33 +225,83 @@ export class TuiApp {
       scrollbar: {
         ch: " ",
         track: { bg: "black" },
-        style: { bg: "yellow" }
+        style: { bg: "gray" }
       },
+      style: {
+        fg: "white",
+        bg: "#111111",
+        border: { fg: "gray" },
+        focus: { border: { fg: "cyan" } }
+      }
+    });
+
+    this.turnStatus = blessed.box({
+      bottom: 5,
+      left: 0,
+      width: "100%",
+      height: 1,
+      tags: true,
+      mouse: true,
+      padding: { left: 2, right: 2 },
+      style: {
+        fg: "gray",
+        bg: "black",
+        hover: { fg: "white" }
+      }
+    });
+
+    this.composer = blessed.box({
+      bottom: 1,
+      left: 0,
+      width: "100%",
+      height: 4,
+      border: "line",
+      mouse: true,
       style: {
         fg: "white",
         bg: "black",
         border: { fg: "gray" },
-        focus: { border: { fg: "green" } }
+        hover: { border: { fg: "cyan" } }
       }
     });
 
-    this.input = blessed.textbox({
-      bottom: 1,
-      left: 0,
-      width: "100%",
-      height: 5,
-      label: " prompt ",
-      border: "line",
-      inputOnFocus: true,
+    this.promptPrefix = blessed.box({
+      parent: this.composer,
+      top: 0,
+      left: 1,
+      width: 2,
+      height: 1,
+      tags: true,
+      content: "{bold}{cyan-fg}❯{/cyan-fg}{/bold}",
+      mouse: true,
+      style: { fg: "cyan", bg: "black" }
+    });
+
+    this.input = blessed.box({
+      parent: this.composer,
+      top: 0,
+      left: 3,
+      right: 1,
+      height: 1,
       keys: true,
       mouse: true,
-      padding: { left: 1, right: 1 },
+      tags: true,
       style: {
         fg: "white",
         bg: "black",
-        border: { fg: "green" },
-        focus: { border: { fg: "green" } }
+        focus: { fg: "white", bg: "black" }
       }
+    });
+
+    this.promptInfo = blessed.box({
+      parent: this.composer,
+      bottom: 0,
+      left: 2,
+      right: 1,
+      height: 1,
+      align: "right",
+      tags: true,
+      style: { fg: "gray", bg: "black" }
     });
 
     this.commandBar = blessed.box({
@@ -244,6 +310,7 @@ export class TuiApp {
       width: "100%",
       height: 1,
       tags: true,
+      padding: { left: 1, right: 1 },
       style: {
         fg: "gray",
         bg: "black"
@@ -253,39 +320,72 @@ export class TuiApp {
     this.screen.append(this.header);
     this.screen.append(this.conversation);
     this.screen.append(this.activity);
-    this.screen.append(this.input);
+    this.screen.append(this.turnStatus);
+    this.screen.append(this.composer);
     this.screen.append(this.commandBar);
+    this.activity.hide();
 
-    this.screen.key(["C-c"], () => this.exit());
-    this.screen.key(["escape"], () => {
+    const bindMainKey = (keys: string | string[], handler: () => void) => {
+      const run = () => {
+        if (!this.modalOpen) {
+          handler();
+        }
+      };
+      this.screen.key(keys, () => {
+        if (this.screen.focused !== this.input) {
+          run();
+        }
+      });
+      this.input.key(keys, run);
+    };
+    bindMainKey(["C-c"], () => this.handleCtrlC());
+    bindMainKey(["C-q"], () => this.requestExit());
+    bindMainKey(["escape"], () => {
       if (this.modalOpen) {
         return;
       }
       if (this.busy) {
-        // Esc during a run cancels it instead of exiting the app.
-        if (this.runAbortController && !this.runAbortController.signal.aborted) {
-          this.runAbortController.abort(new AgentRunAbortedError());
-          this.setStatus("Stopping run");
-          this.render();
-        }
+        this.stopRun();
         return;
       }
-      this.exit();
+      if (this.activityOpen) {
+        this.toggleActivity(false);
+        return;
+      }
+      this.focusInput();
+      this.render();
     });
-    this.screen.key(["tab"], () => this.focusNext());
-    this.screen.key(["S-tab"], () => this.focusPrevious());
-    this.screen.key(["C-l"], () => this.clearConversation());
-    this.screen.key(["C-r"], () => this.render());
+    bindMainKey(["tab"], () => this.focusNext());
+    bindMainKey(["S-tab"], () => this.focusPrevious());
+    bindMainKey(["C-p"], () => this.openCommandPalette());
+    bindMainKey(["C-x"], () => this.showHelp());
+    bindMainKey(["C-g"], () => this.toggleActivity());
+    bindMainKey(["C-s"], () => {
+      if (this.busy) {
+        this.setStatus("Stop the active turn before switching sessions");
+        return;
+      }
+      void this.pickSession(DEFAULT_TUI_SESSION_LIST_LIMIT);
+    });
+    bindMainKey(["C-l"], () => this.clearConversation());
+    bindMainKey(["C-r"], () => this.render());
     for (const binding of TUI_PANE_SCROLL_KEY_BINDINGS) {
-      this.screen.key(binding.keys, () => {
-        if (!this.modalOpen) {
-          this.scrollPane(binding.shortcut);
-        }
-      });
+      bindMainKey(binding.keys, () => this.scrollPane(binding.shortcut));
     }
 
-    this.input.key(["C-c"], () => this.exit());
-    this.input.on("submit", (value) => void this.submit(String(value ?? "")));
+    this.input.on("keypress", (character, key) => this.handlePromptKeypress(character, key));
+    this.conversation.key(["?"], () => this.openCommandPalette());
+    this.conversation.on("click", () => this.focusConversation());
+    this.activity.on("click", () => this.focusActivity());
+    this.turnStatus.on("click", () => {
+      if (this.busy) {
+        this.stopRun();
+      }
+    });
+    this.turnStatus.setHover("Click to stop the active turn");
+    this.composer.on("click", () => this.focusInput());
+    this.promptPrefix.on("click", () => this.focusInput());
+    this.input.on("click", () => this.focusInput());
     this.screen.on("resize", () => {
       this.applyResponsiveLayout();
       this.render();
@@ -325,47 +425,51 @@ export class TuiApp {
     });
   }
 
+  private appendLog(kind: TuiLogLine["kind"], text: string, time = new Date()) {
+    const index = this.log.length;
+    this.log.push({ kind, text, time, sequence: ++this.entrySequence });
+    return index;
+  }
+
+  private appendActivityLine(kind: TuiActivityLine["kind"], title: string, detail?: string, time = new Date()) {
+    const index = this.activityLog.length;
+    this.activityLog.push({ kind, title, detail, time, sequence: ++this.entrySequence });
+    return index;
+  }
+
   private seedFromSession(session?: AgentSession) {
     const messages = session?.messages ?? [];
     for (const message of messages) {
+      const time = parseTuiDate(message.createdAt);
       if (message.role === "user") {
-        this.log.push({ kind: "user", text: chatContentToText(message.content), time: new Date() });
+        this.appendLog("user", chatContentToText(message.content), time);
       }
       if (message.role === "assistant" && chatContentToText(message.content).trim()) {
-        this.log.push({ kind: "assistant", text: chatContentToText(message.content), time: new Date() });
+        this.appendLog("assistant", chatContentToText(message.content), time);
+      }
+      if (message.role === "assistant" && message.toolCalls?.length) {
+        for (const call of message.toolCalls) {
+          this.appendActivityLine("call", call.name, prettyJson(call.arguments), time);
+        }
       }
       if (message.role === "tool") {
-        this.activityLog.push({
-          kind: "result",
-          title: message.name ?? "tool",
-          detail: chatContentToText(message.content),
-          time: new Date()
-        });
+        this.appendActivityLine("result", message.name ?? "tool", chatContentToText(message.content), time);
       }
     }
 
     if (this.log.length === 0) {
-      this.log.push({
-        kind: "system",
-        text: ["Welcome to Arivu.", "Ask a coding task, or type /help for commands."].join("\n"),
-        time: new Date()
-      });
+      this.appendLog("system", "Welcome to Arivu. Describe what you want to build, or press Ctrl+P for commands.");
     }
 
-    this.activityLog.push({
-      kind: "system",
-      title: "workspace",
-      detail: `${this.workspace.root}\n${this.workspace.dirty ? "git: dirty" : "git: clean"}`,
-      time: new Date()
-    });
+    this.appendActivityLine("system", "workspace", `${this.workspace.root}\n${this.workspace.dirty ? "git: dirty" : "git: clean"}`);
   }
 
   private async submit(rawValue: string) {
     const value = rawValue.trim();
-    this.input.clearValue();
-    this.input.focus();
+    this.clearPromptDraft();
+    this.focusInput();
 
-    if (!value || this.busy) {
+    if (!value) {
       this.render();
       return;
     }
@@ -375,7 +479,19 @@ export class TuiApp {
       return;
     }
 
-    this.log.push({ kind: "user", text: value, time: new Date() });
+    if (this.busy) {
+      this.promptQueue.push(value);
+      this.appendActivityLine("system", "Queued prompt", value);
+      this.setStatus(`${this.promptQueue.length} prompt${this.promptQueue.length === 1 ? "" : "s"} queued`);
+      return;
+    }
+
+    await this.runPrompt(value);
+  }
+
+  private async runPrompt(value: string) {
+    this.appendLog("user", value);
+    this.forceConversationTail = true;
     await this.executeAgentTurn((signal) =>
       this.agent.run(value, {
         onEvent: (event) => this.handleAgentEvent(event),
@@ -405,6 +521,9 @@ export class TuiApp {
 
   private recordRunUsage(usage: ChatUsage) {
     const previous = this.lastRunUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, requestCount: 0 };
+    if (usage.promptTokens !== undefined) {
+      this.currentContextTokens = usage.promptTokens;
+    }
     this.lastRunUsage = {
       promptTokens: previous.promptTokens + (usage.promptTokens ?? 0),
       completionTokens: previous.completionTokens + (usage.completionTokens ?? 0),
@@ -416,13 +535,15 @@ export class TuiApp {
   private async executeAgentTurn(runner: (signal: AbortSignal) => Promise<{ output: string; session: AgentSession }>): Promise<void> {
     this.busy = true;
     this.runAbortController = new AbortController();
+    this.runStartedAt = Date.now();
     this.lastRunUsage = undefined;
     this.streamingAssistantIndex = undefined;
     this.liveActivity = false;
     this.streamingToolRows.clear();
+    this.forceConversationTail = true;
+    this.forceActivityTail = true;
     this.startSpinner();
-    this.setStatus("Running agent (Esc to stop)");
-    this.render();
+    this.setStatus("Responding");
 
     try {
       const before = this.lastMessageCount;
@@ -435,31 +556,35 @@ export class TuiApp {
       }
       this.lastMessageCount = result.session.messages.length;
       if (this.streamingAssistantIndex === undefined) {
-        this.log.push({ kind: "assistant", text: result.output || "(no response)", time: new Date() });
+        this.appendLog("assistant", result.output || "(no response)");
       } else if (!this.log[this.streamingAssistantIndex]?.text.trim() && result.output) {
         this.log[this.streamingAssistantIndex].text = result.output;
       }
-      this.setStatus(`Saved session ${result.session.id}`);
+      this.setStatus(`Saved ${result.session.id.slice(0, 8)}`);
     } catch (error) {
       if (error instanceof AgentRunAbortedError || this.runAbortController?.signal.aborted) {
-        this.log.push({ kind: "assistant", text: "Run stopped.", time: new Date() });
+        this.appendLog("system", "Run stopped.");
         this.setStatus("Run stopped");
       } else {
-        this.log.push({ kind: "error", text: error instanceof Error ? error.message : String(error), time: new Date() });
-        this.activityLog.push({
-          kind: "error",
-          title: "agent error",
-          detail: error instanceof Error ? error.message : String(error),
-          time: new Date()
-        });
+        const message = error instanceof Error ? error.message : String(error);
+        this.appendLog("error", message);
+        this.appendActivityLine("error", "agent error", message);
         this.setStatus("Error");
       }
     } finally {
       this.busy = false;
       this.runAbortController = undefined;
+      this.runStartedAt = undefined;
       this.stopSpinner();
-      this.focusInput();
-      this.render();
+      if (!this.closing) {
+        this.focusInput();
+        this.render();
+        const nextPrompt = this.promptQueue.shift();
+        if (nextPrompt) {
+          this.setStatus(`Starting queued prompt${this.promptQueue.length > 0 ? ` · ${this.promptQueue.length} remaining` : ""}`);
+          setImmediate(() => void this.runPrompt(nextPrompt));
+        }
+      }
     }
   }
 
@@ -469,6 +594,11 @@ export class TuiApp {
       return false;
     }
 
+    if (this.busy && commandChangesRunState(command)) {
+      this.setStatus("Stop the active turn before changing sessions or context");
+      return true;
+    }
+
     if (command.kind === "exit") {
       this.exit();
       return true;
@@ -476,6 +606,11 @@ export class TuiApp {
 
     if (command.kind === "help") {
       this.showHelp();
+      return true;
+    }
+
+    if (command.kind === "activity") {
+      this.toggleActivity();
       return true;
     }
 
@@ -524,7 +659,7 @@ export class TuiApp {
     }
 
     if (command.kind === "error") {
-      this.log.push({ kind: "error", text: command.message, time: new Date() });
+      this.appendLog("error", command.message);
       this.setStatus("Command error");
     }
     return true;
@@ -534,21 +669,11 @@ export class TuiApp {
     for (const message of messages) {
       if (message.role === "assistant" && message.toolCalls?.length) {
         for (const call of message.toolCalls) {
-          this.activityLog.push({
-            kind: "call",
-            title: call.name,
-            detail: prettyJson(call.arguments),
-            time: new Date()
-          });
+          this.appendActivityLine("call", call.name, prettyJson(call.arguments), parseTuiDate(message.createdAt));
         }
       }
       if (message.role === "tool") {
-        this.activityLog.push({
-          kind: "result",
-          title: message.name ?? "tool",
-          detail: chatContentToText(message.content),
-          time: new Date()
-        });
+        this.appendActivityLine("result", message.name ?? "tool", chatContentToText(message.content), parseTuiDate(message.createdAt));
       }
     }
   }
@@ -612,15 +737,23 @@ export class TuiApp {
       return;
     }
 
-    this.liveActivity = true;
-    this.streamingAssistantIndex = undefined;
-    this.activityLog.push({
-      kind: "result",
-      title: event.name,
-      detail: event.result,
-      time: new Date()
-    });
-    this.render();
+    if (event.type === "tool_result") {
+      this.liveActivity = true;
+      this.streamingAssistantIndex = undefined;
+      const existing = this.streamingToolRows.get(event.toolCallId);
+      if (existing !== undefined && this.activityLog[existing]) {
+        this.activityLog[existing] = {
+          ...this.activityLog[existing],
+          kind: "result",
+          title: event.name,
+          detail: event.result,
+          time: new Date()
+        };
+      } else {
+        this.appendActivityLine("result", event.name, event.result);
+      }
+      this.render();
+    }
   }
 
   private ensureStreamingAssistant() {
@@ -628,8 +761,7 @@ export class TuiApp {
       return this.streamingAssistantIndex;
     }
 
-    this.log.push({ kind: "assistant", text: "", time: new Date() });
-    this.streamingAssistantIndex = this.log.length - 1;
+    this.streamingAssistantIndex = this.appendLog("assistant", "");
     return this.streamingAssistantIndex;
   }
 
@@ -639,51 +771,221 @@ export class TuiApp {
       return existing;
     }
 
-    this.activityLog.push({
-      kind: "call",
-      title,
-      detail: "(waiting for arguments)",
-      time: new Date()
-    });
-    const index = this.activityLog.length - 1;
+    const index = this.appendActivityLine("call", title, "(waiting for arguments)");
     this.streamingToolRows.set(key, index);
     return index;
   }
 
-  private showHelp() {
-    this.log.push({
-      kind: "system",
-      text: [
-        "Commands:",
-        "/help          Show this help",
-        "/clear         Clear the visible conversation",
-        "/continue      Resume the current session without a new prompt",
-        "/status        Show workspace and model status",
-        "/diff          Show staged, unstaged, and untracked git changes",
-        "/compact [n]   Compact the saved chat, keeping n recent messages",
-        "/summarize     Compact by asking the model to summarize older context",
-        "/sessions [n] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]",
-        "/resume <id>   Resume a saved session in this TUI",
-        "/exit          Quit",
-        "",
-        "Keys:",
-        "Tab / Shift-Tab changes focus",
-        "PageUp / PageDown scrolls the focused pane",
-        "Shift-PageUp / Shift-PageDown scrolls Activity",
-        "Ctrl-Home / Ctrl-End jumps the focused pane",
-        "Ctrl-Shift-Home / Ctrl-Shift-End jumps Activity",
-        "Ctrl-L clears the visible conversation",
-        "Ctrl-C exits"
-      ].join("\n"),
-      time: new Date()
+  private openCommandPalette() {
+    if (this.modalOpen) {
+      return;
+    }
+
+    const modal = blessed.box({
+      top: "center",
+      left: "center",
+      width: "82%",
+      height: Math.min(Math.max(TUI_PALETTE_COMMANDS.length + 8, 14), Math.max(Number(this.screen.height) - 2, 14)),
+      label: " commands ",
+      tags: true,
+      border: "line",
+      padding: { left: 1, right: 1 },
+      style: {
+        fg: "white",
+        bg: "#111111",
+        border: { fg: "cyan" }
+      }
     });
-    this.setStatus("Help");
+    let query = "";
+    const search = blessed.box({
+      parent: modal,
+      top: 0,
+      left: 0,
+      right: 0,
+      height: 3,
+      label: " search ",
+      border: "line",
+      keys: true,
+      mouse: true,
+      tags: true,
+      padding: { left: 1 },
+      style: {
+        fg: "white",
+        bg: "#111111",
+        border: { fg: "gray" },
+        focus: { border: { fg: "cyan" } }
+      }
+    });
+    const list = blessed.list({
+      parent: modal,
+      top: 3,
+      left: 0,
+      right: 0,
+      bottom: 3,
+      tags: true,
+      keys: true,
+      mouse: true,
+      vi: true,
+      items: formatTuiPaletteItems(TUI_PALETTE_COMMANDS),
+      style: {
+        selected: { bg: "#263238", fg: "white", bold: true },
+        item: { fg: "white", bg: "#111111" }
+      }
+    });
+    const description = blessed.box({
+      parent: modal,
+      left: 0,
+      right: 0,
+      bottom: 1,
+      height: 2,
+      tags: true,
+      style: { fg: "gray", bg: "#111111" }
+    });
+    blessed.box({
+      parent: modal,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      height: 1,
+      tags: true,
+      content: "{gray-fg}Type to filter  ↑/↓ move  Enter run  Esc close{/gray-fg}",
+      style: { bg: "#111111" }
+    });
+
+    let matches: TuiPaletteCommand[] = TUI_PALETTE_COMMANDS;
+    let selectedIndex = 0;
+    let closed = false;
+    const updateDescription = () => {
+      const entry = matches[selectedIndex];
+      description.setContent(entry ? `{gray-fg}${escapeBlessedTags(entry.description)}{/gray-fg}` : "");
+    };
+    const refresh = () => {
+      matches = filterTuiPaletteCommands(query);
+      selectedIndex = Math.min(selectedIndex, Math.max(matches.length - 1, 0));
+      search.setContent(
+        query ? `{cyan-fg}❯{/cyan-fg} ${escapeBlessedTags(query)}` : "{cyan-fg}❯{/cyan-fg} {gray-fg}Filter commands…{/gray-fg}"
+      );
+      list.setItems(matches.length > 0 ? formatTuiPaletteItems(matches) : ["{gray-fg}No matching commands{/gray-fg}"]);
+      list.select(selectedIndex);
+      updateDescription();
+      this.screen.render();
+    };
+    const close = () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      this.modalOpen = false;
+      modal.destroy();
+      this.focusInput();
+      this.render();
+    };
+    const choose = (index = selectedIndex) => {
+      const entry = matches[index];
+      if (!entry) {
+        return;
+      }
+      close();
+      void this.handleSlashCommand(entry.command).then(() => this.render());
+    };
+
+    search.on("keypress", (character, key) => {
+      if (key.name === "escape") {
+        close();
+        return;
+      }
+      if (key.name === "enter") {
+        choose();
+        return;
+      }
+      if (key.name === "up") {
+        selectedIndex = Math.max(0, selectedIndex - 1);
+        list.select(selectedIndex);
+        updateDescription();
+        this.screen.render();
+        return;
+      }
+      if (key.name === "down") {
+        selectedIndex = Math.min(Math.max(matches.length - 1, 0), selectedIndex + 1);
+        list.select(selectedIndex);
+        updateDescription();
+        this.screen.render();
+        return;
+      }
+      if (key.name === "backspace") {
+        query = query.slice(0, -1);
+        refresh();
+        return;
+      }
+      const codePoint = character?.codePointAt(0);
+      if (character && !key.ctrl && !key.meta && codePoint !== undefined && codePoint >= 32 && codePoint !== 127) {
+        query += character;
+        refresh();
+      }
+    });
+    list.on("select", (_item, index) => choose(index));
+    list.key(["escape"], close);
+    modal.key(["escape"], close);
+
+    refresh();
+    this.screen.append(modal);
+    this.modalOpen = true;
+    search.focus();
+    this.screen.render();
+  }
+
+  private showHelp() {
+    this.openTextModal(" keyboard shortcuts ", TUI_SHORTCUT_HELP);
+  }
+
+  private openTextModal(label: string, content: string) {
+    if (this.modalOpen) {
+      return;
+    }
+    const modal = blessed.box({
+      top: "center",
+      left: "center",
+      width: "78%",
+      height: "80%",
+      label,
+      content,
+      tags: true,
+      wrap: true,
+      scrollable: true,
+      alwaysScroll: false,
+      keys: true,
+      vi: true,
+      mouse: true,
+      border: "line",
+      padding: { left: 2, right: 2, top: 1, bottom: 1 },
+      scrollbar: {
+        ch: " ",
+        track: { bg: "#111111" },
+        style: { bg: "gray" }
+      },
+      style: {
+        fg: "white",
+        bg: "#111111",
+        border: { fg: "cyan" }
+      }
+    });
+    const close = () => {
+      this.modalOpen = false;
+      modal.destroy();
+      this.focusInput();
+      this.render();
+    };
+    modal.key(["escape", "q", "C-x"], close);
+    this.screen.append(modal);
+    this.modalOpen = true;
+    modal.focus();
+    this.screen.render();
   }
 
   private showStatus() {
-    this.log.push({
-      kind: "system",
-      text: [
+    this.appendLog(
+      "system",
+      [
         `Session: ${this.currentSession?.id ?? "new"}`,
         `Workspace: ${this.workspace.root}`,
         `Project: ${this.workspace.packageName ?? path.basename(this.workspace.root)}`,
@@ -694,38 +996,25 @@ export class TuiApp {
         this.lastRunUsage
           ? `Last run tokens: ${this.lastRunUsage.totalTokens} total (${this.lastRunUsage.promptTokens} prompt / ${this.lastRunUsage.completionTokens} completion) over ${this.lastRunUsage.requestCount} request${this.lastRunUsage.requestCount === 1 ? "" : "s"}`
           : "Last run tokens: not reported"
-      ].join("\n"),
-      time: new Date()
-    });
+      ].join("\n")
+    );
     this.setStatus("Status");
   }
 
   private async showGitDiff() {
     try {
       const summary = await loadTuiGitDiffSummary(this.workspace.root);
-      this.log.push({
-        kind: "system",
-        text: formatTuiGitDiffSummary(summary),
-        time: new Date()
-      });
+      this.appendLog("system", formatTuiGitDiffSummary(summary));
       this.setStatus("Diff");
     } catch (error) {
-      this.log.push({
-        kind: "error",
-        text: `Unable to summarize git diff: ${error instanceof Error ? error.message : String(error)}`,
-        time: new Date()
-      });
+      this.appendLog("error", `Unable to summarize git diff: ${error instanceof Error ? error.message : String(error)}`);
       this.setStatus("Diff failed");
     }
   }
 
   private async compactCurrentSession(recentMessageCount = COMPACT_RECENT_MESSAGE_COUNT) {
     if (!this.currentSession) {
-      this.log.push({
-        kind: "system",
-        text: "No saved session to compact yet. Send a prompt first, then run /compact.",
-        time: new Date()
-      });
+      this.appendLog("system", "No saved session to compact yet. Send a prompt first, then run /compact.");
       this.setStatus("No session");
       return;
     }
@@ -738,11 +1027,11 @@ export class TuiApp {
       });
 
       if (!result.compacted) {
-        this.log.push({
-          kind: "system",
-          text: `Session ${this.currentSession.id} is already compact enough. Non-system messages: ${result.remainingMessageCount}; recent window: ${recentMessageCount}.`,
-          time: now
-        });
+        this.appendLog(
+          "system",
+          `Session ${this.currentSession.id} is already compact enough. Non-system messages: ${result.remainingMessageCount}; recent window: ${recentMessageCount}.`,
+          now
+        );
         this.setStatus("Already compact");
         return;
       }
@@ -763,35 +1052,29 @@ export class TuiApp {
       this.log.splice(0, this.log.length);
       this.activityLog.splice(0, this.activityLog.length);
       this.seedFromSession(compactedSession);
-      this.log.push({
-        kind: "system",
-        text: [
+      this.appendLog(
+        "system",
+        [
           `Compacted session ${compactedSession.id}.`,
           `Compacted messages: ${result.compactedMessageCount}`,
           `Kept recent messages: ${result.remainingMessageCount}`,
           `Working context messages: ${result.messages.length}`,
           `Full transcript messages preserved: ${compactedSession.messages.length}`
         ].join("\n"),
-        time: now
-      });
+        now
+      );
+      this.forceConversationTail = true;
+      this.forceActivityTail = true;
       this.setStatus("Compacted");
     } catch (error) {
-      this.log.push({
-        kind: "error",
-        text: `Unable to compact session: ${error instanceof Error ? error.message : String(error)}`,
-        time: new Date()
-      });
+      this.appendLog("error", `Unable to compact session: ${error instanceof Error ? error.message : String(error)}`);
       this.setStatus("Compaction failed");
     }
   }
 
   private async summarizeCurrentSession() {
     if (!this.currentSession) {
-      this.log.push({
-        kind: "system",
-        text: "No saved session to summarize yet. Send a prompt first, then run /summarize.",
-        time: new Date()
-      });
+      this.appendLog("system", "No saved session to summarize yet. Send a prompt first, then run /summarize.");
       this.setStatus("No session");
       return;
     }
@@ -801,14 +1084,14 @@ export class TuiApp {
 
     this.busy = true;
     this.runAbortController = new AbortController();
+    this.runStartedAt = Date.now();
     this.startSpinner();
-    this.setStatus("Summarizing context (Esc to stop)");
-    this.render();
+    this.setStatus("Summarizing context");
     try {
       const agent = this.createAgent(this.currentSession);
       const result = await agent.summarizeContext({ signal: this.runAbortController.signal });
       if (!result.compacted) {
-        this.log.push({ kind: "system", text: "Session is already compact enough to skip summarizing.", time: new Date() });
+        this.appendLog("system", "Session is already compact enough to skip summarizing.");
         this.setStatus("Already compact");
         return;
       }
@@ -824,52 +1107,45 @@ export class TuiApp {
       this.log.splice(0, this.log.length);
       this.activityLog.splice(0, this.activityLog.length);
       this.seedFromSession(summarizedSession);
-      this.log.push({
-        kind: "system",
-        text: [
+      this.appendLog(
+        "system",
+        [
           `Summarized session ${summarizedSession.id} (${result.source}).`,
           `Summarized messages: ${result.compactedMessageCount}`,
           `Working context messages: ${result.remainingMessageCount}`,
           `Full transcript messages preserved: ${summarizedSession.messages.length}`
         ].join("\n"),
-        time: now
-      });
+        now
+      );
+      this.forceConversationTail = true;
+      this.forceActivityTail = true;
       this.setStatus("Summarized");
     } catch (error) {
       if (error instanceof AgentRunAbortedError || this.runAbortController?.signal.aborted) {
         this.setStatus("Summary stopped");
       } else {
-        this.log.push({
-          kind: "error",
-          text: `Unable to summarize session: ${error instanceof Error ? error.message : String(error)}`,
-          time: new Date()
-        });
+        this.appendLog("error", `Unable to summarize session: ${error instanceof Error ? error.message : String(error)}`);
         this.setStatus("Summary failed");
       }
     } finally {
       this.busy = false;
       this.runAbortController = undefined;
+      this.runStartedAt = undefined;
       this.stopSpinner();
-      this.focusInput();
-      this.render();
+      if (!this.closing) {
+        this.focusInput();
+        this.render();
+      }
     }
   }
 
   private async showSessions(limit: number, filters?: SessionListFilters) {
     try {
       const sessions = await this.store.list();
-      this.log.push({
-        kind: "system",
-        text: formatTuiSessionList(sessions, limit, filters),
-        time: new Date()
-      });
+      this.appendLog("system", formatTuiSessionList(sessions, limit, filters));
       this.setStatus("Sessions");
     } catch (error) {
-      this.log.push({
-        kind: "error",
-        text: `Unable to list sessions: ${error instanceof Error ? error.message : String(error)}`,
-        time: new Date()
-      });
+      this.appendLog("error", `Unable to list sessions: ${error instanceof Error ? error.message : String(error)}`);
       this.setStatus("Session list failed");
     }
   }
@@ -879,21 +1155,13 @@ export class TuiApp {
       const sessions = filterSessions(await this.store.list(), filters).slice(0, clampSessionLimit(limit));
       if (sessions.length === 0) {
         const filterDescription = describeSessionListFilters(filters);
-        this.log.push({
-          kind: "system",
-          text: filterDescription ? `No saved sessions match filters: ${filterDescription}.` : "No saved sessions.",
-          time: new Date()
-        });
+        this.appendLog("system", filterDescription ? `No saved sessions match filters: ${filterDescription}.` : "No saved sessions.");
         this.setStatus("Sessions");
         return;
       }
       await this.openSessionPicker(sessions, filters);
     } catch (error) {
-      this.log.push({
-        kind: "error",
-        text: `Unable to open session picker: ${error instanceof Error ? error.message : String(error)}`,
-        time: new Date()
-      });
+      this.appendLog("error", `Unable to open session picker: ${error instanceof Error ? error.message : String(error)}`);
       this.setStatus("Session picker failed");
     }
   }
@@ -1005,14 +1273,13 @@ export class TuiApp {
       this.log.splice(0, this.log.length);
       this.activityLog.splice(0, this.activityLog.length);
       this.seedFromSession(session);
+      this.currentContextTokens = undefined;
+      this.forceConversationTail = true;
+      this.forceActivityTail = true;
       this.focusInput();
       this.setStatus(`Resumed session ${session.id}`);
     } catch (error) {
-      this.log.push({
-        kind: "error",
-        text: `Unable to resume session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-        time: new Date()
-      });
+      this.appendLog("error", `Unable to resume session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
       this.setStatus("Resume failed");
     }
   }
@@ -1031,7 +1298,7 @@ export class TuiApp {
         content: [
           "{yellow-fg}Action needs approval{/yellow-fg}",
           "",
-          truncate(message, 900),
+          escapeBlessedTags(truncate(message, 900)),
           "",
           "{green-fg}y{/green-fg} approve    {red-fg}n{/red-fg} deny    {gray-fg}esc{/gray-fg} deny"
         ].join("\n"),
@@ -1043,12 +1310,8 @@ export class TuiApp {
       });
 
       const finish = (approved: boolean) => {
-        this.activityLog.push({
-          kind: approved ? "system" : "error",
-          title: approved ? "approval granted" : "approval denied",
-          detail: message,
-          time: new Date()
-        });
+        this.appendActivityLine(approved ? "system" : "error", approved ? "approval granted" : "approval denied", message);
+        this.modalOpen = false;
         modal.destroy();
         this.focusInput();
         this.render();
@@ -1058,79 +1321,158 @@ export class TuiApp {
       modal.key(["y", "Y"], () => finish(true));
       modal.key(["n", "N", "escape"], () => finish(false));
       this.screen.append(modal);
+      this.modalOpen = true;
       modal.focus();
       this.screen.render();
     });
   }
 
   private render() {
+    if (this.closing) {
+      return;
+    }
+    const conversationScroll = this.conversation.getScroll();
+    const conversationAtTail = this.forceConversationTail || this.conversation.getScrollPerc() >= 98;
+    const activityScroll = this.activity.getScroll();
+    const activityAtTail = this.forceActivityTail || this.activity.getScrollPerc() >= 98;
+
     this.header.setContent(this.formatHeader());
     this.conversation.setContent(this.formatConversation());
     this.activity.setContent(this.formatActivity());
+    this.turnStatus.setContent(this.formatTurnStatus());
+    this.promptInfo.setContent(this.formatPromptInfo());
     this.commandBar.setContent(this.formatCommandBar());
-    this.conversation.setScrollPerc(100);
-    this.activity.setScrollPerc(100);
+    this.input.setContent(
+      formatTuiPromptDraft(
+        { value: this.promptDraft, cursor: this.promptCursor },
+        Math.max(8, Number(this.screen.width) - 8),
+        this.focusTarget === "input" && !this.modalOpen
+      )
+    );
+    this.promptPrefix.setContent(
+      this.busy ? `{bold}{yellow-fg}${SPINNER[this.spinnerFrame]}{/yellow-fg}{/bold}` : "{bold}{cyan-fg}❯{/cyan-fg}{/bold}"
+    );
+
+    if (conversationAtTail) {
+      this.conversation.setScrollPerc(100);
+    } else {
+      this.conversation.setScroll(conversationScroll);
+    }
+    if (activityAtTail) {
+      this.activity.setScrollPerc(100);
+    } else {
+      this.activity.setScroll(activityScroll);
+    }
+    this.forceConversationTail = false;
+    this.forceActivityTail = false;
     this.screen.render();
   }
 
   private formatHeader() {
-    const project = this.workspace.packageName ?? path.basename(this.workspace.root);
-    const git = this.workspace.gitBranch ? `${this.workspace.gitBranch}${this.workspace.dirty ? "*" : ""}` : "no-git";
-    const state = this.busy ? `${SPINNER[this.spinnerFrame]} ${this.status}` : this.status;
-    return [
-      `{bold}{cyan-fg}Arivu{/cyan-fg}{/bold}  ${project}`,
-      `{gray-fg}${shortenPath(this.workspace.root, 70)}{/gray-fg}`,
-      `model {green-fg}${this.options.config.model}{/green-fg}  trust {yellow-fg}${this.options.config.trustMode}{/yellow-fg}  git {magenta-fg}${git}{/magenta-fg}  status {white-fg}${state}{/white-fg}`
-    ].join("\n");
+    const width = Math.max(24, Number(this.screen.width) - 4);
+    const git = this.workspace.gitBranch ? `${this.workspace.gitBranch}${this.workspace.dirty ? "*" : ""}` : "no git";
+    const totalTokens = resolveContextWindowTokens(
+      this.config,
+      { model: this.config.model, baseUrl: this.config.baseUrl },
+      this.modelCatalog
+    );
+    const context = formatTuiContextUsage(this.estimatedContextTokens(), totalTokens);
+    const leftBudget = Math.max(18, width - context.length - git.length - 8);
+    const left = `{gray-fg} ${escapeBlessedTags(git)}  ${escapeBlessedTags(shortenPath(this.workspace.root, leftBudget))}{/gray-fg}`;
+    const right = `{white-fg}${context}{/white-fg}`;
+    return formatTuiAlignedLine(left, right, width);
   }
 
   private formatConversation() {
-    return this.log
-      .slice(-80)
-      .map((line) => {
-        const meta = `{gray-fg}${formatTime(line.time)}{/gray-fg}`;
-        if (line.kind === "user") {
-          return `{green-fg}YOU{/green-fg} ${meta}\n${indent(line.text)}`;
-        }
-        if (line.kind === "assistant") {
-          return `{cyan-fg}AGENT{/cyan-fg} ${meta}\n${indent(line.text)}`;
-        }
-        if (line.kind === "error") {
-          return `{red-fg}ERROR{/red-fg} ${meta}\n${indent(line.text)}`;
-        }
-        return `{gray-fg}SYSTEM{/gray-fg} ${meta}\n${indent(line.text)}`;
-      })
-      .join("\n\n{gray-fg}" + "-".repeat(48) + "{/gray-fg}\n\n");
+    return formatTuiTranscript(this.log, this.activityLog, Math.max(24, Number(this.screen.width) - 5));
   }
 
   private formatActivity() {
-    if (this.activityLog.length === 0) {
-      return "{gray-fg}No tool activity yet.{/gray-fg}";
-    }
+    return formatTuiActivityDrawer(this.activityLog);
+  }
 
-    return this.activityLog
-      .slice(-80)
-      .map((line) => {
-        const color = line.kind === "call" ? "yellow" : line.kind === "result" ? "green" : line.kind === "error" ? "red" : "gray";
-        const detail = line.detail ? `\n{gray-fg}${truncate(line.detail, 900)}{/gray-fg}` : "";
-        return `{${color}-fg}${line.kind.toUpperCase()}{/${color}-fg} {bold}${line.title}{/bold} {gray-fg}${formatTime(line.time)}{/gray-fg}${detail}`;
-      })
-      .join("\n\n");
+  private formatTurnStatus() {
+    const width = Math.max(24, Number(this.screen.width) - 4);
+    if (this.busy) {
+      const elapsedSeconds = Math.max(0, Math.floor((Date.now() - (this.runStartedAt ?? Date.now())) / 1_000));
+      const queued = this.promptQueue.length > 0 ? ` · ${this.promptQueue.length} queued` : "";
+      const left = `{cyan-fg}${SPINNER[this.spinnerFrame]}{/cyan-fg} ${escapeBlessedTags(this.status)}{gray-fg}${queued}{/gray-fg}`;
+      const used = this.lastRunUsage?.totalTokens;
+      const tokens = used ? ` · ${formatTuiTokenCount(used)}` : "";
+      const right = `{gray-fg}${elapsedSeconds}s${tokens}{/gray-fg}  {red-fg}[stop]{/red-fg}`;
+      return formatTuiAlignedLine(left, right, width);
+    }
+    if (this.promptQueue.length > 0) {
+      return `{yellow-fg}◇{/yellow-fg} ${this.promptQueue.length} queued prompt${this.promptQueue.length === 1 ? "" : "s"}`;
+    }
+    return `{gray-fg}${escapeBlessedTags(this.status)}{/gray-fg}`;
+  }
+
+  private formatPromptInfo() {
+    const model = shortenPath(this.config.model, Math.max(18, Math.floor(Number(this.screen.width) / 2)));
+    return `{gray-fg}${escapeBlessedTags(model)} · ${escapeBlessedTags(this.config.trustMode)}{/gray-fg}`;
   }
 
   private formatCommandBar() {
-    const focus = this.focusTarget === "input" ? "prompt" : this.focusTarget;
-    return [
-      ` ${this.busy ? "Running" : "Ready"}`,
-      `focus: ${focus}`,
-      "Enter Submit",
-      "PgUp/PgDn Scroll",
-      "Shift-Pg Activity",
-      "Tab Cycle Focus",
-      "Ctrl-L Clear",
-      "Esc Close",
-      "Ctrl-C Exit"
-    ].join("  |  ");
+    const width = Number(this.screen.width);
+    const join = (items: string[]) => items.join("  {gray-fg}│{/gray-fg}  ");
+    if (this.busy) {
+      const items = [
+        "{bold}Enter{/bold}:queue",
+        "{bold}Esc{/bold}:stop",
+        "{bold}Ctrl+G{/bold}:activity",
+        "{bold}Ctrl+P{/bold}:commands",
+        "{bold}Ctrl+X{/bold}:shortcuts"
+      ];
+      return join(width < 92 ? items.slice(0, 4) : items);
+    }
+    if (this.focusTarget === "conversation") {
+      const items = [
+        "{bold}PgUp/PgDn{/bold}:scroll",
+        "{bold}Tab{/bold}:prompt",
+        "{bold}Ctrl+G{/bold}:activity",
+        "{bold}Ctrl+P{/bold}:commands",
+        "{bold}Ctrl+Q{/bold}:quit"
+      ];
+      return join(width < 92 ? [items[0], items[1], items[3], items[4]] : items);
+    }
+    if (this.focusTarget === "activity") {
+      return join([
+        "{bold}PgUp/PgDn{/bold}:scroll",
+        "{bold}Ctrl+G{/bold}:close",
+        "{bold}Tab{/bold}:prompt",
+        "{bold}Ctrl+P{/bold}:commands"
+      ]);
+    }
+    const items = [
+      "{bold}Enter{/bold}:send",
+      "{bold}Tab{/bold}:scrollback",
+      "{bold}Ctrl+P{/bold}:commands",
+      "{bold}Ctrl+S{/bold}:sessions",
+      "{bold}Ctrl+G{/bold}:activity",
+      "{bold}Ctrl+Q{/bold}:quit"
+    ];
+    if (width < 92) {
+      return join([items[0], items[2], items[4], items[5]]);
+    }
+    if (width < 126) {
+      return join([items[0], items[1], items[2], items[4], items[5]]);
+    }
+    return join(items);
+  }
+
+  private estimatedContextTokens() {
+    if (this.currentContextTokens !== undefined) {
+      return this.currentContextTokens;
+    }
+    if (!this.currentSession) {
+      return 0;
+    }
+    const characters = contextMessagesForSession(this.currentSession).reduce(
+      (total, message) => total + chatContentToText(message.content).length,
+      0
+    );
+    return Math.ceil(characters / 4);
   }
 
   private setStatus(message: string) {
@@ -1143,7 +1485,7 @@ export class TuiApp {
     this.spinner = setInterval(() => {
       this.spinnerFrame = (this.spinnerFrame + 1) % SPINNER.length;
       this.render();
-    }, 140);
+    }, 160);
   }
 
   private stopSpinner() {
@@ -1157,7 +1499,7 @@ export class TuiApp {
   private focusNext() {
     if (this.focusTarget === "input") {
       this.focusConversation();
-    } else if (this.focusTarget === "conversation") {
+    } else if (this.focusTarget === "conversation" && this.activityOpen) {
       this.focusActivity();
     } else {
       this.focusInput();
@@ -1166,7 +1508,7 @@ export class TuiApp {
   }
 
   private focusPrevious() {
-    if (this.focusTarget === "input") {
+    if (this.focusTarget === "input" && this.activityOpen) {
       this.focusActivity();
     } else if (this.focusTarget === "activity") {
       this.focusConversation();
@@ -1181,17 +1523,45 @@ export class TuiApp {
     this.input.focus();
   }
 
+  private handlePromptKeypress(character: string | undefined, key: blessed.Widgets.Events.IKeyEventArg) {
+    if (this.modalOpen || this.screen.focused !== this.input) {
+      return;
+    }
+    const result = editTuiPrompt({ value: this.promptDraft, cursor: this.promptCursor }, character, key);
+    if (!result.handled) {
+      return;
+    }
+    this.promptDraft = result.value;
+    this.promptCursor = result.cursor;
+    if (result.submitted !== undefined) {
+      void this.submit(result.submitted);
+      return;
+    }
+    this.render();
+  }
+
+  private clearPromptDraft() {
+    this.promptDraft = "";
+    this.promptCursor = 0;
+  }
+
   private focusConversation() {
     this.focusTarget = "conversation";
     this.conversation.focus();
   }
 
   private focusActivity() {
+    if (!this.activityOpen) {
+      this.toggleActivity(true);
+    }
     this.focusTarget = "activity";
     this.activity.focus();
   }
 
   private scrollPane(shortcut: TuiPaneScrollShortcut) {
+    if (shortcut.target === "activity" && !this.activityOpen) {
+      this.toggleActivity(true);
+    }
     const pane = shortcut.target === "activity" ? this.activity : this.focusTarget === "activity" ? this.activity : this.conversation;
     if (shortcut.action === "top") {
       pane.setScrollPerc(0);
@@ -1205,35 +1575,99 @@ export class TuiApp {
   }
 
   private clearConversation() {
-    this.log.splice(0, this.log.length, {
-      kind: "system",
-      text: "Visible conversation cleared. Session history is still preserved.",
-      time: new Date()
-    });
+    this.log.splice(0, this.log.length);
+    this.activityLog.splice(0, this.activityLog.length);
+    this.streamingAssistantIndex = undefined;
+    this.streamingToolRows.clear();
+    this.appendLog("system", "Visible transcript cleared. Saved session history is still preserved.");
+    this.forceConversationTail = true;
+    this.forceActivityTail = true;
     this.setStatus("Cleared");
   }
 
   private applyResponsiveLayout() {
     const width = Number(this.screen.width);
-    if (!Number.isFinite(width) || width < 100) {
-      // Narrow terminals: give the conversation the full width and hide the side activity pane.
-      this.conversation.width = "100%";
-      this.activity.hide();
-    } else if (width < 140) {
-      // Medium terminals: keep the activity pane but give the conversation more room so wrapped
-      // lines stay readable.
-      this.conversation.width = "62%";
+    this.conversation.width = "100%";
+    this.activity.width = resolveTuiActivityDrawerWidth(Number.isFinite(width) ? width : 80);
+    if (this.activityOpen) {
       this.activity.show();
+      this.activity.setFront();
     } else {
-      this.conversation.width = "68%";
-      this.activity.show();
+      this.activity.hide();
     }
   }
 
+  private toggleActivity(force?: boolean) {
+    this.activityOpen = force ?? !this.activityOpen;
+    this.forceActivityTail = this.activityOpen;
+    if (!this.activityOpen && this.focusTarget === "activity") {
+      this.focusInput();
+    }
+    this.applyResponsiveLayout();
+    if (this.activityOpen) {
+      this.focusTarget = "activity";
+      this.activity.focus();
+    }
+    this.render();
+  }
+
+  private stopRun() {
+    if (this.runAbortController && !this.runAbortController.signal.aborted) {
+      this.runAbortController.abort(new AgentRunAbortedError());
+      this.setStatus("Stopping");
+    }
+  }
+
+  private handleCtrlC() {
+    if (this.modalOpen) {
+      return;
+    }
+    if (this.promptDraft) {
+      this.clearPromptDraft();
+      this.setStatus("Draft cleared");
+      return;
+    }
+    if (this.busy) {
+      this.stopRun();
+      return;
+    }
+    this.requestExit("Ctrl+C");
+  }
+
+  private requestExit(shortcut = "Ctrl+Q") {
+    if (this.modalOpen) {
+      return;
+    }
+    const now = Date.now();
+    if (now <= this.quitArmedUntil) {
+      this.exit();
+      return;
+    }
+    this.quitArmedUntil = now + 2_000;
+    this.setStatus(`Press ${shortcut} again to quit`);
+  }
+
   private exit() {
+    if (this.closing) {
+      return;
+    }
+    this.closing = true;
     this.stopSpinner();
+    if (this.runAbortController && !this.runAbortController.signal.aborted) {
+      this.runAbortController.abort(new AgentRunAbortedError());
+    }
     this.screen.destroy();
   }
+}
+
+function commandChangesRunState(command: TuiSlashCommand) {
+  return (
+    command.kind === "compact" ||
+    command.kind === "continue" ||
+    command.kind === "resume" ||
+    command.kind === "summarize" ||
+    (command.kind === "sessions" && Boolean(command.pick))
+  );
 }
 
 function prettyJson(value: unknown) {
@@ -1248,15 +1682,12 @@ function truncate(value: string, max: number) {
   return value.length <= max ? value : `${value.slice(0, max)}\n[truncated]`;
 }
 
-function formatTime(date: Date) {
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function indent(value: string) {
-  return value
-    .split("\n")
-    .map((line) => `  ${line}`)
-    .join("\n");
+function parseTuiDate(value: string | undefined) {
+  if (!value) {
+    return new Date();
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
 export function resolveTuiPaneScrollShortcut(keyName: string): TuiPaneScrollShortcut | null {
@@ -1303,6 +1734,9 @@ export function parseTuiSlashCommand(value: string): TuiSlashCommand | undefined
       return { kind: "exit" };
     case "/help":
       return { kind: "help" };
+    case "/activity":
+    case "/tools":
+      return { kind: "activity" };
     case "/clear":
       return { kind: "clear" };
     case "/continue":
@@ -1426,11 +1860,11 @@ export function formatTuiSessionPickerItems(sessions: AgentSession[]) {
   return sessions.map((session, index) =>
     [
       `${index + 1}.`,
-      session.id,
-      formatSessionUpdatedAt(session.updatedAt),
-      sessionWorkspaceName(session),
+      escapeBlessedTags(session.id),
+      escapeBlessedTags(formatSessionUpdatedAt(session.updatedAt)),
+      escapeBlessedTags(sessionWorkspaceName(session)),
       session.pinnedAt ? "{yellow-fg}pinned{/yellow-fg}" : "{gray-fg}unpinned{/gray-fg}",
-      sessionDisplayTitle(session)
+      escapeBlessedTags(sessionDisplayTitle(session))
     ].join("  ")
   );
 }

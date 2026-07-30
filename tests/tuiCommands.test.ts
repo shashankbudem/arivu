@@ -53,6 +53,8 @@ describe("TUI slash commands", () => {
       }
     });
     expect(parseTuiSlashCommand("/resume abc123")).toEqual({ kind: "resume", sessionId: "abc123" });
+    expect(parseTuiSlashCommand("/activity")).toEqual({ kind: "activity" });
+    expect(parseTuiSlashCommand("/tools")).toEqual({ kind: "activity" });
     expect(parseTuiSlashCommand("/diff")).toEqual({ kind: "diff" });
     expect(parseTuiSlashCommand("/compact")).toEqual({ kind: "compact" });
     expect(parseTuiSlashCommand("/compact 4")).toEqual({ kind: "compact", recentMessageCount: 4 });
@@ -219,6 +221,23 @@ describe("TUI slash commands", () => {
 
     expect(items[0]).toBe("1.  pinned  2026-01-02T00:00:00Z  arivu  {yellow-fg}pinned{/yellow-fg}  Pinned work");
     expect(items[1]).toBe("2.  loose  2026-01-01T00:00:00Z  notes  {gray-fg}unpinned{/gray-fg}  loose work");
+  });
+
+  it("escapes session titles before rendering picker tags", () => {
+    const [item] = formatTuiSessionPickerItems([
+      {
+        id: "unsafe",
+        title: "{red-fg}Injected{/red-fg}",
+        cwd: "/tmp/arivu",
+        trustMode: "ask",
+        messages: [],
+        createdAt: "2026-01-02T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z"
+      }
+    ]);
+
+    expect(item).toContain("{open}red-fg{close}Injected{open}/red-fg{close}");
+    expect(item).not.toContain("{red-fg}Injected");
   });
 
   it("formats a filtered empty session list", () => {

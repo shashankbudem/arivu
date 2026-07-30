@@ -317,20 +317,25 @@ Inside the TUI:
 - `/compact [n]` compacts the active session's model context locally while preserving the complete saved transcript.
 - `/sessions [n] [--pick] [--search text] [--workspace text] [--pinned|--unpinned] [--project|--standalone]` lists and filters recent saved sessions, and opens a selectable picker when `--pick` is present.
 - `/resume <session-id>` switches the live TUI into that session.
+- `/activity` toggles the complete tool-activity drawer.
 - `/clear` clears visible conversation.
 - `/exit` exits.
 - `PageUp`/`PageDown`, `Shift+PageUp`/`Shift+PageDown`, and the `Ctrl+Home`/`Ctrl+End` variants scroll or jump the conversation and activity panes.
+- `Ctrl+P`, `Ctrl+G`, `Ctrl+S`, and `Ctrl+X` open the command palette, Activity drawer, saved-session picker, and shortcut reference.
 
-Use a terminal wider than about 100 columns to see the activity pane.
+The transcript remains full-width at every terminal size. Activity opens as a responsive overlay drawer so narrow terminals retain usable conversation space.
 
 ## Working on the TUI
 
-The TUI is in `src/tui/TuiApp.ts`. Keep these behaviors intact:
+The TUI controller is in `src/tui/TuiApp.ts`; pure formatting, prompt editing, and responsive presentation helpers are in `src/tui/presentation.ts`. Keep these behaviors intact:
 
 - Default `arivu` opens the TUI.
 - One-shot mode stays non-interactive.
 - `sessions` prints recent saved sessions newest first, supports `--search`, `--workspace`, `--pinned`, `--unpinned`, `--project`, and `--standalone`; `resume <session-id>` opens the TUI with full session history; and `compact <session-id>` derives a smaller model context with `--recent`, `--entry-limit`, and `--dry-run` controls without deleting transcript messages.
-- Inside the TUI, `/compact [n]` compacts only the active model context, `/sessions [n]` lists recent saved sessions, accepts the same filter flags, `/sessions --pick` opens a keyboard-selectable resume picker, `/resume <session-id>` switches the live TUI into that session, `/diff` shows a local git change summary, and pane scrolling shortcuts keep long conversation/activity logs reachable without mouse support.
+- Inside the TUI, `/compact [n]` compacts only the active model context, `/sessions [n]` lists recent saved sessions, accepts the same filter flags, `/sessions --pick` opens a keyboard-selectable resume picker, `/resume <session-id>` switches the live TUI into that session, `/diff` shows a local git change summary, `/activity` toggles complete tool details, and pane scrolling shortcuts keep long conversation/activity logs reachable without mouse support.
+- Command-palette or modal keystrokes must never leak into the main prompt or start a model turn.
+- New transcript entries preserve a reader's scroll position unless that pane was already following the tail.
+- A prompt submitted during an active turn is queued and starts after the current turn settles.
 - Narrow terminals remain usable.
 - Approval prompts still resolve the same permission promise.
 

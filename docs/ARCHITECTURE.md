@@ -44,7 +44,8 @@ arivu "task"
 ## Main modules
 
 - `src/cli.ts`: command parsing, config resolution, TUI vs one-shot dispatch.
-- `src/tui/TuiApp.ts`: blessed-based terminal UI, slash commands, approval modal, status rendering.
+- `src/tui/TuiApp.ts`: blessed-based terminal UI controller, slash commands, modal lifecycle, run state, and keyboard routing.
+- `src/tui/presentation.ts`: pure TUI transcript/activity formatting, responsive sizing, command-palette data, and prompt-editor behavior.
 - `desktop/main/main.ts`: Electron composition root. It creates the main window and long-lived services, wires lifecycle events, and delegates IPC, navigation, smoke, and benchmark behavior.
 - `desktop/main/desktopController.ts`: stateful desktop-agent orchestration for workspaces, sessions, task runs, models, tools, policies, and queued prompts.
 - `desktop/main/desktopIpc.ts`: trusted renderer IPC registration and payload routing.
