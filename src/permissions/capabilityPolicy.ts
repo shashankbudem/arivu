@@ -97,9 +97,11 @@ const CAPABILITY_DETAILS: Record<AgentTaskRunCapability, CapabilityDetails> = {
   },
   computer_control: {
     label: "Computer control",
-    description: "Capture the machine's screen outside the workspace.",
-    examples: ["computer_screenshot"],
-    risk: "A capture shows every visible app, not only Arivu, and the image is sent to the configured model.",
+    description: "Read the machine's screen and drive its mouse and keyboard, outside the workspace.",
+    examples: ["computer_screenshot", "computer_click", "computer_type", "computer_key"],
+    risk:
+      "A capture shows every visible app, not only Arivu, and the image is sent to the configured model. " +
+      "Clicks and keystrokes are injected into whatever holds focus, which may be any application.",
     defaultPosture: "Approval-gated in every trust mode, including trusted."
   },
   mcp_call: {
@@ -155,7 +157,7 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     computer_control: {
       base: "prompt",
       label: "Requires approval",
-      reason: "screen captures show apps outside the workspace and require approval"
+      reason: "reading the screen or driving input reaches apps outside the workspace and requires approval"
     },
     write_workspace: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
     run_command: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
@@ -173,7 +175,7 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     computer_control: {
       base: "prompt",
       label: "Requires approval",
-      reason: "screen captures show apps outside the workspace and require approval"
+      reason: "reading the screen or driving input reaches apps outside the workspace and requires approval"
     },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },
     unknown: { base: "prompt", label: "Requires approval", reason: "unknown capabilities require approval" }
@@ -189,7 +191,7 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     computer_control: {
       base: "prompt",
       label: "Requires approval",
-      reason: "screen captures show apps outside the workspace and require approval"
+      reason: "reading the screen or driving input reaches apps outside the workspace and requires approval"
     },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },
     unknown: { base: "prompt", label: "Requires approval", reason: "unknown capabilities require approval" }

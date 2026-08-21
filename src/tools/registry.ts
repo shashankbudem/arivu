@@ -1788,7 +1788,10 @@ export function createToolRegistry(context: ToolContext) {
           type: "screen",
           action,
           target,
-          destructive: analysis.destructive
+          destructive: analysis.destructive,
+          risk: analysis.risk,
+          analysisSummary: analysis.summary,
+          analysisReasons: analysis.reasons
         });
 
         let result;

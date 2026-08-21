@@ -247,14 +247,29 @@ function formatBrowserApproval(action: Extract<ApprovalAction, { type: "browser"
 }
 
 /**
- * Names the capture target rather than the argv. The user is authorizing "what of my screen gets
- * read", not "which flags screencapture receives", and the two are not obviously the same thing.
+ * Names the target rather than the argv or the generated script. The user is authorizing "what of
+ * my screen gets read" or "what gets typed where", not "which flags screencapture receives".
+ *
+ * Reading and injecting need different copy: telling someone their screen is being captured when
+ * their keyboard is being driven is worse than saying nothing. The analysis reasons are rendered
+ * because they are the whole point of screening typed text and key combinations -- "contains
+ * something shaped like an API token" has to reach the person deciding, not just the audit record.
  */
 function formatScreenApproval(action: Extract<ApprovalAction, { type: "screen" }>) {
+  const heading =
+    action.action === "capture"
+      ? [`Screen capture: ${action.target}`, "Everything visible on that target is captured, including apps unrelated to this workspace."]
+      : [
+          `Computer input: ${action.action}`,
+          `Target: ${action.target}`,
+          "This is injected into whatever currently holds focus, which may be any application on the machine."
+        ];
   return [
-    `Screen capture: ${action.action}`,
-    `Target: ${action.target}`,
-    "Everything visible on that target is captured, including apps unrelated to this workspace.",
+    ...heading,
+    action.risk ? `Risk: ${action.risk}` : "",
+    // The summary already ends with the flagged reasons, so listing them again just pads a prompt
+    // the user has to read before deciding.
+    action.analysisSummary ? `Analysis: ${action.analysisSummary}` : "",
     action.output ? `Saves to: ${action.output}` : ""
   ]
     .filter(Boolean)

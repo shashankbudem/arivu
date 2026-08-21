@@ -231,6 +231,59 @@ describe("analyzeComputerInput", () => {
   });
 });
 
+describe("the analysis reaches the person approving", () => {
+  /** Captures the prompt label an approval would show, and always denies. */
+  const capturingManager = () => {
+    const labels: string[] = [];
+    const manager = new ApprovalManager("ask", async (label) => {
+      labels.push(label);
+      return false;
+    });
+    return { manager, labels };
+  };
+
+  it("puts the flagged reason in front of the user, not only in the audit record", async () => {
+    // The analyzer knowing a string looks like a token is worth nothing if the prompt does not
+    // say so. This is the seam between analysis and consent.
+    const { manager, labels } = capturingManager();
+    const analysis = analyzeComputerInput("type", { text: "sk-abcdefghijklmnop" });
+    await expect(
+      manager.require({
+        type: "screen",
+        action: "type",
+        target: "type 19 characters into the focused application",
+        destructive: analysis.destructive,
+        risk: analysis.risk,
+        analysisSummary: analysis.summary,
+        analysisReasons: analysis.reasons
+      })
+    ).rejects.toThrow(/denied/);
+    expect(labels).toHaveLength(1);
+    expect(labels[0]).toMatch(/API token/);
+    expect(labels[0]).toMatch(/Risk: high/);
+  });
+
+  it("does not tell the user their screen is being captured when input is being injected", async () => {
+    const { manager, labels } = capturingManager();
+    await manager
+      .require({ type: "screen", action: "click", target: "left click x1 at 10,20 (points)", destructive: true })
+      .catch(() => undefined);
+    expect(labels[0]).toMatch(/Computer input: click/);
+    expect(labels[0]).toMatch(/injected into whatever currently holds focus/);
+    expect(labels[0]).not.toMatch(/Screen capture/);
+  });
+
+  it("still describes a capture as a capture", async () => {
+    const { manager, labels } = capturingManager();
+    await manager
+      .require({ type: "screen", action: "capture", target: "entire display 1", output: "/data/screen-1.png", destructive: true })
+      .catch(() => undefined);
+    expect(labels[0]).toMatch(/Screen capture: entire display 1/);
+    expect(labels[0]).toMatch(/Saves to: \/data\/screen-1\.png/);
+    expect(labels[0]).not.toMatch(/Computer input/);
+  });
+});
+
 describe("input tool registration", () => {
   const registry = () => createToolRegistry({ workspaceRoot: process.cwd(), approvals: new ApprovalManager("trusted") });
 
