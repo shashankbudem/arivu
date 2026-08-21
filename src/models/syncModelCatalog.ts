@@ -21,7 +21,7 @@ import { listProviderModels, probeContextViaMaxTokens, probeStatus, type FetchLi
 export type SyncOptions = {
   fetcher?: FetchLike;
   now?: Date;
-  /** Requests per minute. Kept under the provider's observed ~40 RPM ceiling. */
+  /** Requests per minute. Defaults to just under the provider's observed 40 RPM ceiling. */
   rpm?: number;
   /** Include the active model even when it isn't Monday. */
   forceActive?: boolean;
@@ -51,7 +51,10 @@ export type SyncSummary = {
   dryRun: boolean;
 };
 
-const DEFAULT_RPM = 30;
+// Just under the provider's observed 40 RPM ceiling. The margin is deliberate: this sync records a
+// 429 as the model's `rate_limited` status rather than retrying it, so pacing right at the ceiling
+// lets provider-side jitter write false verdicts into the catalog.
+const DEFAULT_RPM = 37;
 const MAX_CONTEXT_PROBE_ATTEMPTS = 3;
 const DEFAULT_MAX_PROBES = 150;
 
@@ -304,7 +307,7 @@ function emptyStatusCounts(): Record<ModelStatus, number> {
   return { available: 0, not_entitled: 0, busy: 0, rate_limited: 0, unknown: 0, error: 0 };
 }
 
-/** Simple spacing throttle: keeps the run under the provider's request-rate ceiling. */
+/** Simple spacing throttle: holds the run at the configured request rate. */
 function createThrottle(rpm: number) {
   const spacingMs = Math.ceil(60_000 / rpm);
   let last = 0;

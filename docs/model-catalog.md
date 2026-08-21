@@ -132,7 +132,9 @@ limit in its rejection, and `onContextWindowObserved` latches it into the catalo
   windows beyond that (the Nemotron-3 line is 1M) need `--approx-tokens 1200000` or larger, since an
   input the model can fit is silently accepted and resolves nothing.
 
-Paced at 30 req/min by default, under the provider's observed ~40 RPM ceiling.
+Paced at 37 req/min by default, just under the provider's observed 40 RPM ceiling. A 429 is recorded
+as the model's `rate_limited` status rather than retried, so the margin keeps provider jitter from
+writing false verdicts into the catalog. Override with `--rpm`.
 
 ## Scheduling (macOS)
 
