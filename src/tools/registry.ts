@@ -57,6 +57,23 @@ import {
   screenCaptureUnsupportedReason,
   screenshotFileName
 } from "./computerControl.js";
+import {
+  ACCESSIBILITY_PERMISSION_HINT,
+  ACCESSIBILITY_SENTINEL,
+  analyzeComputerInput,
+  buildClickScript,
+  buildKeyScript,
+  buildScrollScript,
+  buildTypeScript,
+  COMPUTER_INPUT_DEFAULT_TIMEOUT_MS,
+  KEY_CODES,
+  MAX_CLICK_COUNT,
+  MAX_SCROLL_LINES,
+  MAX_TYPE_TEXT_CHARS,
+  MODIFIERS,
+  type ComputerInputAction,
+  type Modifier
+} from "./computerInput.js";
 import { assertRealPathInsideWorkspace, resolveSafeWorkspacePath } from "./pathSafety.js";
 import {
   elicitationRequestSchema,
@@ -1745,6 +1762,186 @@ export function createToolRegistry(context: ToolContext) {
         .join("\n");
     }
   });
+
+  /**
+   * The four input tools share everything except their script and their schema: the same platform
+   * gate, the same approval shape, the same osascript invocation, and the same Accessibility
+   * translation. Registering them through one helper keeps that contract in a single place rather
+   * than repeated four times where it could drift apart.
+   */
+  const registerComputerInput = <T>(
+    action: ComputerInputAction,
+    schema: ToolSchema,
+    parse: (args: unknown) => T,
+    plan: (parsed: T) => { script: string; target: string; analyzed: { text?: string; key?: string; modifiers?: Modifier[] } }
+  ) => {
+    register({
+      schema,
+      async execute(args) {
+        const parsed = parse(args);
+        if (process.platform !== "darwin") {
+          throw new Error(`Input injection requires macOS; osascript is not available on ${process.platform}.`);
+        }
+        const { script, target, analyzed } = plan(parsed);
+        const analysis = analyzeComputerInput(action, analyzed);
+        await context.approvals.require({
+          type: "screen",
+          action,
+          target,
+          destructive: analysis.destructive
+        });
+
+        let result;
+        try {
+          result = await execa("osascript", ["-l", "JavaScript", "-e", script], {
+            cwd: context.workspaceRoot,
+            shell: false,
+            reject: false,
+            timeout: COMPUTER_INPUT_DEFAULT_TIMEOUT_MS,
+            cancelSignal: context.signal,
+            stdin: "ignore"
+          });
+        } catch (error) {
+          if (looksLikeMissingBinary(error)) {
+            throw new Error("osascript is not installed or not on PATH. It ships with macOS; this tool requires macOS.");
+          }
+          throw error;
+        }
+
+        const stderr = String(result.stderr ?? "");
+        if (stderr.includes(ACCESSIBILITY_SENTINEL)) {
+          throw new Error(ACCESSIBILITY_PERMISSION_HINT);
+        }
+        if (result.timedOut) {
+          throw new Error(`Input action timed out after ${COMPUTER_INPUT_DEFAULT_TIMEOUT_MS}ms.`);
+        }
+        if (result.exitCode !== 0) {
+          throw new Error(`Input action failed (exit ${result.exitCode}). ${truncateToolOutput(stderr, MAX_RUN_OUTPUT_CHARS)}`);
+        }
+
+        return [`action: ${action}`, `target: ${target}`, `risk: ${analysis.risk}`, `summary: ${analysis.summary}`, "status: posted"].join(
+          "\n"
+        );
+      }
+    });
+  };
+
+  registerComputerInput(
+    "click",
+    {
+      name: "computer_click",
+      description:
+        "Click at a screen position, outside Arivu and outside the workspace. Coordinates are screen points: a pixel " +
+        "read off a computer_screenshot image must be divided by that capture's reported scale first, since a Retina " +
+        "capture is not 1:1. Use browser_click for anything inside Arivu's own browser. This cannot see what is under " +
+        "the pointer, so take a computer_screenshot first and confirm the target. macOS only, and needs Accessibility " +
+        "permission (a different permission from the Screen Recording one computer_screenshot needs).",
+      parameters: objectSchema({
+        x: { type: "number", description: "X position in screen points." },
+        y: { type: "number", description: "Y position in screen points." },
+        button: { type: "string", enum: ["left", "right"], description: "Mouse button. Defaults to left." },
+        clickCount: { type: "number", description: `1 for a single click, 2 for a double click, up to ${MAX_CLICK_COUNT}. Defaults to 1.` }
+      })
+    },
+    (args) =>
+      z
+        .object({
+          x: z.number().int(),
+          y: z.number().int(),
+          button: z.enum(["left", "right"]).optional(),
+          clickCount: z.number().int().min(1).max(MAX_CLICK_COUNT).optional()
+        })
+        .parse(args),
+    (click) => ({
+      script: buildClickScript(click),
+      target: `${click.button ?? "left"} click x${click.clickCount ?? 1} at ${click.x},${click.y} (points)`,
+      analyzed: {}
+    })
+  );
+
+  registerComputerInput(
+    "type",
+    {
+      name: "computer_type",
+      description:
+        "Type text into whatever currently holds keyboard focus, which may be any application on the machine. Focus " +
+        "is not set by this tool: click the field first. Never use this for passwords, card numbers, or API tokens - " +
+        "ask the user to enter those themselves. macOS only, and needs Accessibility permission.",
+      parameters: objectSchema({
+        text: { type: "string", description: `Text to type, up to ${MAX_TYPE_TEXT_CHARS} characters.` }
+      })
+    },
+    (args) => z.object({ text: z.string().min(1).max(MAX_TYPE_TEXT_CHARS) }).parse(args),
+    (typed) => ({
+      script: buildTypeScript(typed),
+      target: `type ${typed.text.length} characters into the focused application`,
+      analyzed: { text: typed.text }
+    })
+  );
+
+  registerComputerInput(
+    "key",
+    {
+      name: "computer_key",
+      description:
+        `Press a named key, optionally with modifiers, in whatever holds keyboard focus. Named keys only (${Object.keys(KEY_CODES).join(", ")}); ` +
+        "letter shortcuts such as Cmd+A are not offered because letter key codes are keyboard-layout dependent and " +
+        "would press the wrong key on a non-US layout. macOS only, and needs Accessibility permission.",
+      parameters: objectSchema({
+        key: { type: "string", enum: Object.keys(KEY_CODES), description: "Named key to press." },
+        modifiers: {
+          type: "array",
+          items: { type: "string", enum: [...MODIFIERS] },
+          description: "Modifier keys held while pressing."
+        }
+      })
+    },
+    (args) =>
+      z
+        .object({
+          key: z.string().trim().min(1),
+          modifiers: z.array(z.enum([...MODIFIERS] as [Modifier, ...Modifier[]])).optional()
+        })
+        .parse(args),
+    (pressed) => ({
+      script: buildKeyScript(pressed),
+      target: [...(pressed.modifiers ?? []), pressed.key].join("+"),
+      analyzed: { key: pressed.key, modifiers: pressed.modifiers }
+    })
+  );
+
+  registerComputerInput(
+    "scroll",
+    {
+      name: "computer_scroll",
+      description:
+        "Scroll the content under the pointer by whole wheel lines. Positive deltaY scrolls up, negative scrolls down. " +
+        "Pass x and y together to move the pointer first; omit both to scroll wherever it already is. macOS only, and " +
+        "needs Accessibility permission.",
+      parameters: objectSchema({
+        deltaY: { type: "number", description: `Vertical lines, -${MAX_SCROLL_LINES} to ${MAX_SCROLL_LINES}. Positive scrolls up.` },
+        deltaX: { type: "number", description: `Horizontal lines, -${MAX_SCROLL_LINES} to ${MAX_SCROLL_LINES}. Defaults to 0.` },
+        x: { type: "number", description: "Optional X position in screen points to scroll at. Requires y." },
+        y: { type: "number", description: "Optional Y position in screen points to scroll at. Requires x." }
+      })
+    },
+    (args) =>
+      z
+        .object({
+          deltaY: z.number().int().min(-MAX_SCROLL_LINES).max(MAX_SCROLL_LINES),
+          deltaX: z.number().int().min(-MAX_SCROLL_LINES).max(MAX_SCROLL_LINES).optional(),
+          x: z.number().int().optional(),
+          y: z.number().int().optional()
+        })
+        .parse(args),
+    (scroll) => ({
+      script: buildScrollScript(scroll),
+      target: `scroll ${scroll.deltaY} lines vertically, ${scroll.deltaX ?? 0} horizontally, ${
+        scroll.x === undefined ? "under the current pointer" : `at ${scroll.x},${scroll.y} (points)`
+      }`,
+      analyzed: {}
+    })
+  );
 
   register({
     schema: {
