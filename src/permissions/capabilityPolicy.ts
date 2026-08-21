@@ -95,6 +95,13 @@ const CAPABILITY_DETAILS: Record<AgentTaskRunCapability, CapabilityDetails> = {
     risk: "Web pages are untrusted and can observe navigation, clicks, and typed data.",
     defaultPosture: "Allowed by default for the isolated Arivu browser; workspace policy can prompt or block."
   },
+  computer_control: {
+    label: "Computer control",
+    description: "Capture the machine's screen outside the workspace.",
+    examples: ["computer_screenshot"],
+    risk: "A capture shows every visible app, not only Arivu, and the image is sent to the configured model.",
+    defaultPosture: "Approval-gated in every trust mode, including trusted."
+  },
   mcp_call: {
     label: "MCP tools",
     description: "List or call configured MCP server tools.",
@@ -133,6 +140,7 @@ const CAPABILITY_DISPLAY_ORDER: AgentTaskRunCapability[] = [
   "run_command",
   "network_fetch",
   "browser_control",
+  "computer_control",
   "mcp_call",
   "unknown"
 ];
@@ -144,6 +152,11 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     skill_context: { base: "allow", label: "Skill context", reason: "local skill reads are allowed" },
     network_fetch: { base: "prompt", label: "Network approval", reason: "network reads require approval" },
     browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
+    computer_control: {
+      base: "prompt",
+      label: "Requires approval",
+      reason: "screen captures show apps outside the workspace and require approval"
+    },
     write_workspace: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
     run_command: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
     mcp_call: { base: "deny", label: "Blocked in readonly", reason: "readonly trust mode is active" },
@@ -157,6 +170,11 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     run_command: { base: "prompt", label: "Requires approval", reason: "commands require approval" },
     network_fetch: { base: "prompt", label: "Network approval", reason: "network reads require approval" },
     browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
+    computer_control: {
+      base: "prompt",
+      label: "Requires approval",
+      reason: "screen captures show apps outside the workspace and require approval"
+    },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },
     unknown: { base: "prompt", label: "Requires approval", reason: "unknown capabilities require approval" }
   },
@@ -168,6 +186,11 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     run_command: { base: "prompt", label: "Requires approval", reason: "commands require approval" },
     network_fetch: { base: "prompt", label: "Network approval", reason: "network reads require approval" },
     browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
+    computer_control: {
+      base: "prompt",
+      label: "Requires approval",
+      reason: "screen captures show apps outside the workspace and require approval"
+    },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },
     unknown: { base: "prompt", label: "Requires approval", reason: "unknown capabilities require approval" }
   }
@@ -185,6 +208,8 @@ export function capabilityForApprovalAction(action: ApprovalAction): AgentTaskRu
       return "network_fetch";
     case "browser":
       return "browser_control";
+    case "screen":
+      return "computer_control";
     case "mcp":
       return "mcp_call";
   }

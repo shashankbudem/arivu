@@ -163,6 +163,7 @@ export type AgentTaskRunCapability =
   | "run_command"
   | "network_fetch"
   | "browser_control"
+  | "computer_control"
   | "mcp_call"
   | "skill_context"
   | "local_context"
@@ -187,7 +188,7 @@ export type AgentTaskRunToolCall = {
 export type AgentTaskRunApprovalStatus = "allowed" | "requested" | "approved" | "denied" | "blocked";
 export type AgentTaskRunApprovalEffect = "allow" | "prompt" | "deny";
 export type AgentTaskRunApprovalOverride = "prompt" | "deny";
-export type AgentTaskRunApprovalScopeKind = "path" | "query" | "command" | "network" | "browser" | "mcp" | "unknown";
+export type AgentTaskRunApprovalScopeKind = "path" | "query" | "command" | "network" | "browser" | "screen" | "mcp" | "unknown";
 export type AgentTaskRunApprovalScope = {
   kind: AgentTaskRunApprovalScopeKind;
   label: string;
@@ -216,7 +217,7 @@ export type AgentTaskRunApprovalChangePreview = {
 
 export type AgentTaskRunApproval = {
   id: string;
-  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
+  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser" | "screen";
   capability: AgentTaskRunCapability;
   status: AgentTaskRunApprovalStatus;
   trustMode: TrustMode;

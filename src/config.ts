@@ -18,6 +18,7 @@ const WorkspacePolicyCapabilitySchema = z.enum([
   "run_command",
   "network_fetch",
   "browser_control",
+  "computer_control",
   "mcp_call",
   "unknown"
 ]);

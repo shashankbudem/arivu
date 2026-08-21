@@ -16,6 +16,9 @@ export function capabilityForToolName(name: string): AgentTaskRunCapability {
   if (name.startsWith("browser_")) {
     return "browser_control";
   }
+  if (name.startsWith("computer_")) {
+    return "computer_control";
+  }
   if (name.startsWith("mcp_")) {
     return "mcp_call";
   }

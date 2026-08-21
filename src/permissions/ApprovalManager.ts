@@ -97,9 +97,11 @@ export class ApprovalManager {
             ? formatNetworkApproval(action, destructive)
             : action.type === "browser"
               ? formatBrowserApproval(action, destructive)
-              : action.type === "read"
-                ? formatReadApproval(action)
-                : formatWriteApproval(action, destructive);
+              : action.type === "screen"
+                ? formatScreenApproval(action)
+                : action.type === "read"
+                  ? formatReadApproval(action)
+                  : formatWriteApproval(action, destructive);
 
     await this.emitAudit({
       ...baseAuditEvent,
@@ -244,6 +246,21 @@ function formatBrowserApproval(action: Extract<ApprovalAction, { type: "browser"
     .join("\n");
 }
 
+/**
+ * Names the capture target rather than the argv. The user is authorizing "what of my screen gets
+ * read", not "which flags screencapture receives", and the two are not obviously the same thing.
+ */
+function formatScreenApproval(action: Extract<ApprovalAction, { type: "screen" }>) {
+  return [
+    `Screen capture: ${action.action}`,
+    `Target: ${action.target}`,
+    "Everything visible on that target is captured, including apps unrelated to this workspace.",
+    action.output ? `Saves to: ${action.output}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function summarizeApprovalAction(action: ApprovalAction) {
   switch (action.type) {
     case "read":
@@ -257,6 +274,8 @@ function summarizeApprovalAction(action: ApprovalAction) {
     case "network":
       return [action.summary, action.destination, action.query].filter(Boolean).join(" - ");
     case "browser":
+      return `${action.action}: ${action.target}`;
+    case "screen":
       return `${action.action}: ${action.target}`;
   }
 }

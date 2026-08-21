@@ -82,6 +82,7 @@ const AgentTaskRunToolSchema = z.object({
     "run_command",
     "network_fetch",
     "browser_control",
+    "computer_control",
     "mcp_call",
     "skill_context",
     "local_context",
@@ -123,7 +124,7 @@ const AgentTaskRunApprovalChangePreviewSchema = z.object({
 
 const AgentTaskRunApprovalSchema = z.object({
   id: z.string(),
-  actionType: z.enum(["read", "write", "shell", "mcp", "network", "browser"]),
+  actionType: z.enum(["read", "write", "shell", "mcp", "network", "browser", "screen"]),
   capability: AgentTaskRunToolSchema.shape.capability,
   status: z.enum(["allowed", "requested", "approved", "denied", "blocked"]),
   trustMode: z.enum(["ask", "readonly", "trusted"]),

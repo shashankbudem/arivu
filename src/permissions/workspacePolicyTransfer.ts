@@ -17,6 +17,7 @@ const WORKSPACE_POLICY_CAPABILITIES: WorkspacePolicyCapability[] = [
   "run_command",
   "network_fetch",
   "browser_control",
+  "computer_control",
   "mcp_call",
   "unknown"
 ];

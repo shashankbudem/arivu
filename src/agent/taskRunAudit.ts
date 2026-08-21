@@ -412,6 +412,8 @@ function capabilityLabel(capability: AgentTaskRunCapability) {
       return "Network fetch";
     case "browser_control":
       return "Browser control";
+    case "computer_control":
+      return "Computer control";
     case "mcp_call":
       return "MCP call";
     case "skill_context":

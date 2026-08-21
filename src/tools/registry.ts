@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { analyzeArgvCommand, analyzeShellCommand } from "../permissions/destructive.js";
 import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "../permissions/scopePolicy.js";
-import type { AppConfig } from "../config.js";
+import { appDataDir, type AppConfig } from "../config.js";
 import { resolveCommandExecutionProfile } from "../execution/profile.js";
 import { discoverSkills, formatSkillList, readSkill } from "../agent/skills.js";
 import type { ToolSchema } from "../agent/types.js";
@@ -43,6 +43,20 @@ import {
   type AppleScriptLanguage,
   type AppleScriptOperation
 } from "./applescript.js";
+import {
+  buildComputerScreenshotPlan,
+  CAPTURE_COORDINATE_SPACE_HINT,
+  captureScaleFactor,
+  COMPUTER_CAPTURE_DEFAULT_TIMEOUT_MS,
+  COMPUTER_CAPTURE_MAX_TIMEOUT_MS,
+  COMPUTER_CAPTURE_MIN_TIMEOUT_MS,
+  MAX_DISPLAY_ID,
+  MIN_DISPLAY_ID,
+  readPngDimensions,
+  SCREEN_RECORDING_PERMISSION_HINT,
+  screenCaptureUnsupportedReason,
+  screenshotFileName
+} from "./computerControl.js";
 import { assertRealPathInsideWorkspace, resolveSafeWorkspacePath } from "./pathSafety.js";
 import {
   elicitationRequestSchema,
@@ -1573,6 +1587,149 @@ export function createToolRegistry(context: ToolContext) {
         `status: ${result.exitCode === 0 ? "success" : "failed"}`,
         stdout ? `result:\n${stdout}` : "",
         stderr ? `stderr:\n${stderr}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+  });
+
+  register({
+    schema: {
+      name: "computer_screenshot",
+      description:
+        "Capture the machine's screen to a PNG and return its path and pixel dimensions. This sees every visible " +
+        "application, not just Arivu and not just this workspace, so it is approval-gated in every trust mode. " +
+        "Use browser_screenshot instead for anything inside Arivu's own browser. Captures a single display by " +
+        "default; pass region to capture a rectangle in global screen coordinates. macOS only, and macOS must have " +
+        "granted Screen Recording permission to the app running Arivu - without it the capture still succeeds but " +
+        "the image contains only the desktop picture with no windows. Region coordinates are screen points while the " +
+        "returned image is physical pixels, so on a Retina display the two differ by the reported scale factor. " +
+        "This tool observes only; it cannot click or type.",
+      parameters: objectSchema({
+        display: {
+          type: "number",
+          description: `1-based display index, from ${MIN_DISPLAY_ID} to ${MAX_DISPLAY_ID}. Defaults to the main display. Cannot be combined with region.`
+        },
+        region: {
+          type: "object",
+          description: "Rectangle in global screen coordinates. Cannot be combined with display.",
+          properties: {
+            x: { type: "number", description: "Left edge in screen coordinates." },
+            y: { type: "number", description: "Top edge in screen coordinates." },
+            width: { type: "number", description: "Width in pixels." },
+            height: { type: "number", description: "Height in pixels." }
+          },
+          required: ["x", "y", "width", "height"]
+        },
+        includeCursor: { type: "boolean", description: "Include the mouse pointer in the capture. Defaults to false." },
+        timeoutMs: {
+          type: "number",
+          description: `Wall-clock timeout in milliseconds, from ${COMPUTER_CAPTURE_MIN_TIMEOUT_MS} to ${COMPUTER_CAPTURE_MAX_TIMEOUT_MS}. Defaults to ${COMPUTER_CAPTURE_DEFAULT_TIMEOUT_MS}.`
+        }
+      })
+    },
+    async execute(args) {
+      const parsed = z
+        .object({
+          display: z.number().int().min(MIN_DISPLAY_ID).max(MAX_DISPLAY_ID).optional(),
+          region: z
+            .object({
+              x: z.number().int(),
+              y: z.number().int(),
+              width: z.number().int(),
+              height: z.number().int()
+            })
+            .optional(),
+          includeCursor: z.boolean().default(false),
+          timeoutMs: z
+            .number()
+            .int()
+            .min(COMPUTER_CAPTURE_MIN_TIMEOUT_MS)
+            .max(COMPUTER_CAPTURE_MAX_TIMEOUT_MS)
+            .default(COMPUTER_CAPTURE_DEFAULT_TIMEOUT_MS)
+        })
+        .parse(args);
+
+      const unsupported = screenCaptureUnsupportedReason(process.platform);
+      if (unsupported) {
+        throw new Error(unsupported);
+      }
+
+      // Captures land in app data, never in the workspace: they are evidence about the machine
+      // rather than project files, and writing them into the repo would put whatever was on screen
+      // into the user's git status.
+      const captureDir = path.join(appDataDir(), "screen-captures");
+      await mkdir(captureDir, { recursive: true });
+      const output = path.join(captureDir, screenshotFileName(new Date(), String(process.pid)));
+
+      const plan = buildComputerScreenshotPlan({
+        output,
+        display: parsed.display,
+        region: parsed.region,
+        includeCursor: parsed.includeCursor
+      });
+
+      await context.approvals.require({
+        type: "screen",
+        action: "capture",
+        target: plan.target,
+        output,
+        // A capture mutates nothing, but it reads far outside the workspace. Marking it risky keeps
+        // it on the loud side of any policy that distinguishes the two.
+        destructive: true
+      });
+
+      let result;
+      try {
+        result = await execa(plan.bin, plan.argv, {
+          cwd: context.workspaceRoot,
+          shell: false,
+          reject: false,
+          timeout: parsed.timeoutMs,
+          cancelSignal: context.signal,
+          stdin: "ignore"
+        });
+      } catch (error) {
+        if (looksLikeMissingBinary(error)) {
+          throw new Error(`${plan.bin} is not installed or not on PATH. It ships with macOS; this tool requires macOS.`);
+        }
+        throw error;
+      }
+      if (looksLikeMissingBinary(result)) {
+        throw new Error(`${plan.bin} is not installed or not on PATH. It ships with macOS; this tool requires macOS.`);
+      }
+
+      const stderr = truncateToolOutput(String(result.stderr ?? ""), MAX_RUN_OUTPUT_CHARS);
+      if (result.timedOut) {
+        throw new Error(`Screen capture timed out after ${parsed.timeoutMs}ms.`);
+      }
+      if (result.exitCode !== 0) {
+        throw new Error(`Screen capture failed (exit ${result.exitCode}).${stderr ? ` ${stderr}` : ""}`);
+      }
+      if (!(await exists(output))) {
+        // screencapture reports success for an interactive capture the user escaped, and for a
+        // rectangle that lands entirely off-screen, without ever writing the file.
+        throw new Error(`Screen capture reported success but wrote no file. ${SCREEN_RECORDING_PERMISSION_HINT}`);
+      }
+      const bytes = await readFile(output);
+      const dimensions = readPngDimensions(bytes);
+      if (!dimensions) {
+        throw new Error(`Screen capture wrote ${bytes.byteLength} bytes that are not a readable PNG.`);
+      }
+
+      // Only a region capture knows the size it asked for, so only a region capture can report the
+      // points-to-pixels ratio. Saying nothing beats guessing a scale for a whole-display capture.
+      const scale = parsed.region ? captureScaleFactor(parsed.region.width, dimensions.width) : undefined;
+
+      return [
+        `target: ${plan.target}`,
+        `path: ${output}`,
+        `dimensions: ${dimensions.width}x${dimensions.height} pixels`,
+        scale === undefined ? "" : `scale: ${scale}x (${parsed.region?.width}x${parsed.region?.height} points requested)`,
+        `bytes: ${bytes.byteLength}`,
+        stderr ? `stderr:\n${stderr}` : "",
+        `note: ${CAPTURE_COORDINATE_SPACE_HINT}`,
+        `note: ${SCREEN_RECORDING_PERMISSION_HINT}`
       ]
         .filter(Boolean)
         .join("\n");

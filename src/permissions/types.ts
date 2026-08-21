@@ -55,4 +55,15 @@ export type ApprovalAction =
       mode?: "visible" | "background";
       targetClasses?: BrowserTargetClass[];
       destructive?: boolean;
+    }
+  | {
+      // Reading the machine's screen, which shows every running app rather than only the workspace.
+      // Kept separate from "browser" (Arivu's own isolated browser) and from "shell" (which would
+      // file the capture under run_command) so the capability policy can govern it on its own terms.
+      type: "screen";
+      action: string;
+      target: string;
+      /** Where the capture lands, so the approval and the audit name the resulting file. */
+      output?: string;
+      destructive?: boolean;
     };

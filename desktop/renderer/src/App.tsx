@@ -188,6 +188,7 @@ const WORKSPACE_POLICY_CAPABILITIES: WorkspacePolicyCapability[] = [
   "run_command",
   "network_fetch",
   "browser_control",
+  "computer_control",
   "mcp_call",
   "unknown"
 ];
@@ -10582,6 +10583,8 @@ function approvalActionLabel(actionType: AgentTaskRunApproval["actionType"]) {
       return "Network approval";
     case "browser":
       return "Browser approval";
+    case "screen":
+      return "Screen capture approval";
   }
 }
 
@@ -11030,6 +11033,8 @@ function capabilityLabel(capability: AgentTaskRunCapability) {
       return "Network";
     case "browser_control":
       return "Browser";
+    case "computer_control":
+      return "Screen";
     case "mcp_call":
       return "MCP";
     case "skill_context":

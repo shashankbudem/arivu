@@ -103,6 +103,7 @@ type AgentTaskRunCapability =
   | "run_command"
   | "network_fetch"
   | "browser_control"
+  | "computer_control"
   | "mcp_call"
   | "skill_context"
   | "local_context"
@@ -110,7 +111,7 @@ type AgentTaskRunCapability =
 
 type CapabilityPolicyOverrideEffect = "prompt" | "deny";
 type WorkspacePolicyCapability =
-  "read_repo" | "write_workspace" | "run_command" | "network_fetch" | "browser_control" | "mcp_call" | "unknown";
+  "read_repo" | "write_workspace" | "run_command" | "network_fetch" | "browser_control" | "computer_control" | "mcp_call" | "unknown";
 type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyCapability, CapabilityPolicyOverrideEffect>>;
 type WorkspaceScopePolicyRules = {
   blockedPathPrefixes?: string[];
@@ -155,7 +156,7 @@ type AgentTaskRunToolCall = {
 type AgentTaskRunApprovalStatus = "allowed" | "requested" | "approved" | "denied" | "blocked";
 type AgentTaskRunApprovalEffect = "allow" | "prompt" | "deny";
 type AgentTaskRunApprovalOverride = "prompt" | "deny";
-type AgentTaskRunApprovalScopeKind = "path" | "query" | "command" | "network" | "browser" | "mcp" | "unknown";
+type AgentTaskRunApprovalScopeKind = "path" | "query" | "command" | "network" | "browser" | "screen" | "mcp" | "unknown";
 type AgentTaskRunApprovalScope = {
   kind: AgentTaskRunApprovalScopeKind;
   label: string;
@@ -182,7 +183,7 @@ type AgentTaskRunApprovalChangePreview = {
 };
 type AgentTaskRunApproval = {
   id: string;
-  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
+  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser" | "screen";
   capability: AgentTaskRunCapability;
   status: AgentTaskRunApprovalStatus;
   trustMode: TrustMode;
@@ -746,7 +747,7 @@ type SessionLifecycleEvent = {
 };
 
 type ApprovalPromptRequest = {
-  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser";
+  actionType: "read" | "write" | "shell" | "mcp" | "network" | "browser" | "screen";
   capability: AgentTaskRunCapability;
   summary: string;
   label: string;

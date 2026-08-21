@@ -51,6 +51,13 @@ export function scopeForApprovalAction(action: ApprovalAction): AgentTaskRunAppr
         value: truncateScopeText(browserScopeValue(action)),
         detail: truncateScopeText([action.action, action.mode].filter(Boolean).join(" - "), MAX_SCOPE_DETAIL)
       };
+    case "screen":
+      return {
+        kind: "screen",
+        label: "Screen target",
+        value: truncateScopeText(action.target),
+        detail: action.output ? truncateScopeText(`output: ${action.output}`, MAX_SCOPE_DETAIL) : undefined
+      };
   }
 }
 

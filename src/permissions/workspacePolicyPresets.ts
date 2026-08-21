@@ -17,6 +17,7 @@ const WORKSPACE_POLICY_PRESET_CAPABILITIES: WorkspacePolicyCapability[] = [
   "run_command",
   "network_fetch",
   "browser_control",
+  "computer_control",
   "mcp_call",
   "unknown"
 ];
@@ -32,13 +33,14 @@ const RAW_WORKSPACE_POLICY_PRESETS: WorkspacePolicyPreset[] = [
   {
     id: "review_first",
     label: "Review first",
-    description: "Ask before reads, writes, commands, network, browser, and MCP activity.",
+    description: "Ask before reads, writes, commands, network, browser, screen, and MCP activity.",
     overrides: {
       read_repo: "prompt",
       write_workspace: "prompt",
       run_command: "prompt",
       network_fetch: "prompt",
       browser_control: "prompt",
+      computer_control: "prompt",
       mcp_call: "prompt",
       unknown: "deny"
     },
@@ -61,13 +63,14 @@ const RAW_WORKSPACE_POLICY_PRESETS: WorkspacePolicyPreset[] = [
   {
     id: "locked_down",
     label: "Locked down",
-    description: "Prompt for reads and block writes, commands, network, browser, and MCP.",
+    description: "Prompt for reads and block writes, commands, network, browser, screen capture, and MCP.",
     overrides: {
       read_repo: "prompt",
       write_workspace: "deny",
       run_command: "deny",
       network_fetch: "deny",
       browser_control: "deny",
+      computer_control: "deny",
       mcp_call: "deny",
       unknown: "deny"
     },
