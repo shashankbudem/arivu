@@ -46,7 +46,7 @@ import {
 import {
   buildComputerScreenshotPlan,
   CAPTURE_COORDINATE_SPACE_HINT,
-  captureScaleFactor,
+  captureGeometry,
   COMPUTER_CAPTURE_DEFAULT_TIMEOUT_MS,
   COMPUTER_CAPTURE_MAX_TIMEOUT_MS,
   COMPUTER_CAPTURE_MIN_TIMEOUT_MS,
@@ -1719,13 +1719,23 @@ export function createToolRegistry(context: ToolContext) {
 
       // Only a region capture knows the size it asked for, so only a region capture can report the
       // points-to-pixels ratio. Saying nothing beats guessing a scale for a whole-display capture.
-      const scale = parsed.region ? captureScaleFactor(parsed.region.width, dimensions.width) : undefined;
+      const geometry = parsed.region ? captureGeometry(parsed.region, dimensions) : undefined;
+      const scaleLine =
+        geometry === undefined || geometry.kind === "unknown"
+          ? ""
+          : geometry.kind === "exact"
+            ? `scale: ${geometry.scale}x (${parsed.region?.width}x${parsed.region?.height} points requested)`
+            : // A clipped region means the caller's rectangle ran past a screen edge. Say so: the
+              // image is real but smaller than asked for, and silence would read as a clean capture.
+              `clipped: requested ${parsed.region?.width}x${parsed.region?.height} points but the region ran past a screen edge${
+                geometry.scale === undefined ? "" : `; backing scale is ${geometry.scale}x`
+              }`;
 
       return [
         `target: ${plan.target}`,
         `path: ${output}`,
         `dimensions: ${dimensions.width}x${dimensions.height} pixels`,
-        scale === undefined ? "" : `scale: ${scale}x (${parsed.region?.width}x${parsed.region?.height} points requested)`,
+        scaleLine,
         `bytes: ${bytes.byteLength}`,
         stderr ? `stderr:\n${stderr}` : "",
         `note: ${CAPTURE_COORDINATE_SPACE_HINT}`,

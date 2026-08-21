@@ -6,7 +6,7 @@ import { scopeForApprovalAction } from "../src/permissions/approvalScope.js";
 import { capabilityForApprovalAction, evaluateCapabilityPolicy } from "../src/permissions/capabilityPolicy.js";
 import {
   buildComputerScreenshotPlan,
-  captureScaleFactor,
+  captureGeometry,
   describeCaptureTarget,
   MAX_DISPLAY_ID,
   MIN_DISPLAY_ID,
@@ -117,21 +117,29 @@ describe("readPngDimensions", () => {
   });
 });
 
-describe("captureScaleFactor", () => {
-  it("derives the Retina backing scale from requested points versus written pixels", () => {
-    // Measured against a built-in 2560x1664 Retina panel: a 1x1 point region wrote a 2x2 PNG.
-    expect(captureScaleFactor(1, 2)).toBe(2);
-    expect(captureScaleFactor(800, 1600)).toBe(2);
-    expect(captureScaleFactor(800, 800)).toBe(1);
+describe("captureGeometry", () => {
+  it("reports a clean backing scale when both axes agree", () => {
+    // Measured: a 40x30 point region on a 1470x956 point display wrote an 80x60 pixel PNG.
+    expect(captureGeometry({ width: 40, height: 30 }, { width: 80, height: 60 })).toEqual({ kind: "exact", scale: 2 });
+    expect(captureGeometry({ width: 800, height: 600 }, { width: 800, height: 600 })).toEqual({ kind: "exact", scale: 1 });
+    expect(captureGeometry({ width: 10, height: 10 }, { width: 30, height: 30 })).toEqual({ kind: "exact", scale: 3 });
   });
 
-  it("declines to report a ratio that is clipping rather than scaling", () => {
-    // A region running off the screen edge comes back far smaller than requested; calling that a
-    // scale factor would send a later click to the wrong place.
-    expect(captureScaleFactor(800, 10)).toBeUndefined();
-    expect(captureScaleFactor(10, 800)).toBeUndefined();
-    expect(captureScaleFactor(0, 100)).toBeUndefined();
-    expect(captureScaleFactor(100, 0)).toBeUndefined();
+  it("calls a horizontally clipped capture clipped, not a fractional scale", () => {
+    // Measured: `-R 1400,0,100,1` on a 1470-point-wide display returned 140x2, because only 70 of
+    // the 100 requested points exist. Width alone would read as a 1.4x scale and misplace a click;
+    // the untouched height axis still carries the real factor.
+    expect(captureGeometry({ width: 100, height: 1 }, { width: 140, height: 2 })).toEqual({ kind: "clipped", scale: 2 });
+  });
+
+  it("calls a vertically clipped capture clipped", () => {
+    expect(captureGeometry({ width: 100, height: 100 }, { width: 200, height: 150 })).toEqual({ kind: "clipped", scale: 2 });
+  });
+
+  it("reports unknown rather than guessing when neither axis is clean", () => {
+    expect(captureGeometry({ width: 100, height: 100 }, { width: 140, height: 170 })).toEqual({ kind: "unknown" });
+    expect(captureGeometry({ width: 0, height: 100 }, { width: 100, height: 100 })).toEqual({ kind: "unknown" });
+    expect(captureGeometry({ width: 100, height: 100 }, { width: 100, height: 0 })).toEqual({ kind: "unknown" });
   });
 });
 

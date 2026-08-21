@@ -144,32 +144,52 @@ export function readPngDimensions(bytes: Uint8Array): { width: number; height: n
 }
 
 /**
- * Backing scale of the capture, derived by comparing what was asked for against what landed.
+ * Whether the capture came back at a clean backing scale, or was clipped at a screen edge.
  *
- * `screencapture -R` takes a rectangle in screen *points*, but writes a PNG in physical *pixels*.
- * On a Retina display those differ by the backing scale factor: asking for a 1x1 point region on a
- * 2x display produces a 2x2 pixel image (verified against a built-in 2560x1664 Retina panel). Any
- * coordinate read off the returned image therefore has to be divided by this factor before it means
- * anything to a future click, which is the whole reason it is reported rather than left implicit.
+ * `screencapture -R` takes a rectangle in screen *points* — the same space `CGDisplayBounds` and
+ * mouse events use — but writes the PNG in backing-store *pixels*. Measured on a 1470x956 point
+ * display: a 40x30 point region wrote 80x60 pixels, so the backing scale is 2 and a full capture is
+ * 2940x1912. (The panel is 2560x1664; macOS downsamples the backing store onto it. The panel
+ * resolution never enters this math.) A coordinate read off the image divided by the scale is a
+ * point, which is directly clickable — that conversion is the reason this is reported at all.
  *
- * Only derivable for a region capture, where the requested size is known. A whole-display capture
- * returns undefined: the display's size in points is not something this tool asked for.
+ * A region running past a screen edge is silently clipped rather than rejected: measured on the same
+ * display, `-R 1400,0,100,1` returned 140 pixels wide, not 200, because only 70 of the 100 requested
+ * points exist. Deriving the scale from width alone would report that clip as a 1.4x scale and send
+ * a later click to the wrong place. Both axes are checked instead: a clip on one axis leaves the
+ * other at the true backing scale, so agreement means a clean capture and disagreement means a clip.
  */
-export function captureScaleFactor(requestedEdge: number, actualEdge: number): number | undefined {
-  if (requestedEdge <= 0 || actualEdge <= 0) {
-    return undefined;
+export type CaptureGeometry = { kind: "exact"; scale: number } | { kind: "clipped"; scale?: number } | { kind: "unknown" };
+
+/** Real displays report integer backing scales; anything else is a clip, not a scale. */
+const PLAUSIBLE_BACKING_SCALES = [1, 2, 3];
+const SCALE_EPSILON = 0.01;
+
+export function captureGeometry(requested: { width: number; height: number }, actual: { width: number; height: number }): CaptureGeometry {
+  if (requested.width <= 0 || requested.height <= 0 || actual.width <= 0 || actual.height <= 0) {
+    return { kind: "unknown" };
   }
-  const scale = actualEdge / requestedEdge;
-  // Backing scales are small integers or simple fractions; anything else means the capture was
-  // clipped at a screen edge rather than scaled, and reporting a ratio would be misleading.
-  const rounded = Math.round(scale * 100) / 100;
-  return rounded >= 0.5 && rounded <= 4 ? rounded : undefined;
+  const horizontal = cleanBackingScale(actual.width / requested.width);
+  const vertical = cleanBackingScale(actual.height / requested.height);
+  if (horizontal !== undefined && horizontal === vertical) {
+    return { kind: "exact", scale: horizontal };
+  }
+  if (horizontal === undefined && vertical === undefined) {
+    return { kind: "unknown" };
+  }
+  // Exactly one axis survived at a clean scale, so that axis carries the display's true factor and
+  // the other one is what got cut. Both-clean-but-different would be ambiguous; report no scale.
+  return { kind: "clipped", scale: horizontal !== undefined && vertical !== undefined ? undefined : (horizontal ?? vertical) };
+}
+
+function cleanBackingScale(ratio: number): number | undefined {
+  return PLAUSIBLE_BACKING_SCALES.find((candidate) => Math.abs(ratio - candidate) < SCALE_EPSILON);
 }
 
 export const CAPTURE_COORDINATE_SPACE_HINT =
-  "Region coordinates are in screen points, but the returned PNG is in physical pixels. On a Retina " +
-  "display these differ by the backing scale factor, so divide any pixel coordinate read off this " +
-  "image by that factor before treating it as a screen position.";
+  "Region coordinates are in screen points, the same space mouse positions use, but the returned PNG " +
+  "is in backing-store pixels. Divide any pixel coordinate read off this image by the reported scale " +
+  "to get a clickable screen point.";
 
 /** Collision-free capture filename. `now` is injected so the name is testable without a clock. */
 export function screenshotFileName(now: Date, suffix: string): string {
