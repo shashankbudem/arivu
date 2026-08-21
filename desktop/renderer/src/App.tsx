@@ -10584,7 +10584,9 @@ function approvalActionLabel(actionType: AgentTaskRunApproval["actionType"]) {
     case "browser":
       return "Browser approval";
     case "screen":
-      return "Screen capture approval";
+      // Only the coarse actionType reaches here, and it covers both reading the screen and driving
+      // input. Naming one would be wrong half the time; the row's summary carries which it was.
+      return "Screen or input approval";
   }
 }
 

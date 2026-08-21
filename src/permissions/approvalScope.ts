@@ -54,7 +54,9 @@ export function scopeForApprovalAction(action: ApprovalAction): AgentTaskRunAppr
     case "screen":
       return {
         kind: "screen",
-        label: "Screen target",
+        // Reading the screen and driving input are different enough that one chip label should not
+        // stand for both; this is the one place the fine-grained action is still available.
+        label: action.action === "capture" ? "Screen capture target" : "Computer input target",
         value: truncateScopeText(action.target),
         detail: action.output ? truncateScopeText(`output: ${action.output}`, MAX_SCOPE_DETAIL) : undefined
       };

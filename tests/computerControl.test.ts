@@ -168,6 +168,13 @@ describe("tool registration", () => {
 });
 
 describe("computer_control policy wiring", () => {
+  it("labels an input scope as input rather than as a capture", () => {
+    // The audit chip is the only place the fine-grained action survives; a click filed as a
+    // "Screen capture target" would misreport what was approved.
+    const scope = scopeForApprovalAction({ type: "screen", action: "click", target: "left click x1 at 10,20 (points)" });
+    expect(scope.label).toBe("Computer input target");
+  });
+
   it("maps computer_ tools and screen approvals to the capability", () => {
     expect(capabilityForToolName("computer_screenshot")).toBe("computer_control");
     expect(capabilityForApprovalAction({ type: "screen", action: "capture", target: "entire display 1" })).toBe("computer_control");
@@ -199,6 +206,7 @@ describe("computer_control policy wiring", () => {
       output: "/data/screen-captures/screen-1.png"
     });
     expect(scope.kind).toBe("screen");
+    expect(scope.label).toBe("Screen capture target");
     expect(scope.value).toBe("screen region 800x600 at 10,20");
     expect(scope.detail).toMatch(/screen-1\.png/);
   });
