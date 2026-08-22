@@ -22,6 +22,15 @@ export default defineConfig([
     // so the packaged app runs from dist-desktop alone and electron-builder can drop
     // node_modules from the asar entirely. All five are pure JS with no native modules.
     noExternal: [/^execa(\/|$)/, /^zod(\/|$)/, /^chalk(\/|$)/, /^@inquirer\/prompts(\/|$)/, /^@modelcontextprotocol\/sdk(\/|$)/],
+    // Bundling execa pulls in cross-spawn, which does `require("child_process")` at load. An ESM
+    // bundle has no `require`, so esbuild emits a shim that throws -- and the app died on launch
+    // with `Dynamic require of "child_process" is not supported` before reaching a window. That
+    // shim already prefers a real `require` when one is in scope (`typeof require !== "undefined"`),
+    // so giving the module one is all it needs. Externalizing execa instead would undo the reason
+    // it is bundled: shipping dist-desktop without node_modules in the asar.
+    banner: {
+      js: 'import { createRequire as __arivuCreateRequire } from "node:module";\nconst require = __arivuCreateRequire(import.meta.url);'
+    },
     outDir: "dist-desktop/main",
     sourcemap: true,
     clean: true
