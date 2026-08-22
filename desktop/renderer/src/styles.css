@@ -7921,3 +7921,101 @@ html[data-theme="light"] *::-moz-selection {
   background: #000000;
   color: #00d4ff;
 }
+
+/* Approval strip -- the primary decision surface, docked in the composer above the footer.
+   Uses the same token palette as the other composer strips so it reads as part of the box, but
+   carries a warning-toned border because it is the one strip that blocks a running agent. */
+.approval-strip {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--warning-border, rgb(255 176 32 / 0.45));
+  border-radius: var(--btn-radius);
+  background: var(--warning-surface, rgb(255 176 32 / 0.08));
+}
+
+.approval-strip-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--warning-text, rgb(255 196 84));
+}
+
+/* min-width:0 lets the long target ellipsize instead of pushing the buttons off the row. */
+.approval-strip-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.approval-strip-body strong {
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.approval-strip-body span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--chrome-muted);
+  font-size: 11px;
+}
+
+.approval-strip-risk {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--danger-surface, rgb(255 86 86 / 0.14));
+  color: var(--danger-text, rgb(255 138 138));
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.approval-strip-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.approval-strip-details {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--chrome-border);
+  border-radius: var(--btn-radius);
+  background: transparent;
+  color: var(--chrome-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  transition: var(--btn-transition);
+}
+
+.approval-strip-details:hover {
+  color: var(--chrome-text);
+}
+
+/* The strip is denser than the dialog, so the shared buttons shrink rather than fork. */
+.deny-button.compact,
+.approve-button.compact {
+  height: 30px;
+  gap: 5px;
+  padding: 0 11px;
+  font-size: 11px;
+}
+
+.screen-approval-note {
+  margin: 0;
+  color: var(--chrome-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}

@@ -44,6 +44,16 @@ export type ApprovalView =
       query?: string;
     }
   | {
+      type: "screen";
+      destructive: boolean;
+      /** "capture" reads the screen; the rest inject input. The copy differs for each. */
+      action: string;
+      target: string;
+      risk?: "low" | "medium" | "high";
+      /** Why the payload was flagged, e.g. that typed text looks like a credential. */
+      analysis?: string;
+    }
+  | {
       type: "unknown";
       message: string;
     };
@@ -89,10 +99,41 @@ export function approvalViewFromRequest(request: ApprovalPromptRequest): Approva
         target: request.scope?.value ?? "",
         mode: undefined
       };
+    case "screen": {
+      // The summary is "<action>: <target>". Splitting on the first colon keeps the action out of
+      // the target so a compact strip can render them separately.
+      const separator = request.summary.indexOf(":");
+      const action = separator === -1 ? request.summary : request.summary.slice(0, separator).trim();
+      const target = request.scope?.value ?? (separator === -1 ? "" : request.summary.slice(separator + 1).trim());
+      return {
+        type: "screen",
+        destructive: request.risky,
+        action,
+        target,
+        risk: readRiskLine(request.label),
+        analysis: readLabelledLine(request.label, "Analysis")
+      };
+    }
     default:
       // read / mcp: the text view is simple and robust; let the caller fall back to it.
       return undefined;
   }
+}
+
+/**
+ * The main process renders risk and analysis into the prompt label rather than sending them as
+ * separate fields, so the structured view reads them back out of it. Losing them would strip the
+ * one thing that makes a screen approval decidable -- "contains something shaped like an API token"
+ * is the whole reason the prompt is worth reading.
+ */
+function readLabelledLine(label: string, name: string): string | undefined {
+  const line = label.split("\n").find((candidate) => candidate.startsWith(`${name}: `));
+  return line?.slice(name.length + 2).trim() || undefined;
+}
+
+function readRiskLine(label: string): "low" | "medium" | "high" | undefined {
+  const value = readLabelledLine(label, "Risk");
+  return value === "low" || value === "medium" || value === "high" ? value : undefined;
 }
 
 function sideBySideFromChangePreview(preview: ApprovalPromptRequest["changePreview"]): SideBySideDiff | undefined {

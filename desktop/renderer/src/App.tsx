@@ -53,6 +53,8 @@ import {
   Scissors,
   Server,
   Settings,
+  Monitor,
+  MousePointerClick,
   Shield,
   Square,
   Sun,
@@ -570,6 +572,9 @@ export function App() {
   const [status, setStatus] = useState("Starting");
   const [view, setView] = useState<ViewMode>("chat");
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  // The strip by the composer is the primary surface; the rich dialog is opt-in from it, so
+  // one decision never has two live surfaces at once.
+  const [approvalDetailsOpen, setApprovalDetailsOpen] = useState(false);
   const [elicitation, setElicitation] = useState<ElicitationPrompt | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retryPrompt, setRetryPrompt] = useState<ChatContent | null>(null);
@@ -2668,6 +2673,7 @@ export function App() {
     }
     await window.arivu.respondApproval(approval.id, approved);
     setApproval(null);
+    setApprovalDetailsOpen(false);
     setStatus(approved ? "Approved" : "Denied");
   }
 
@@ -3269,6 +3275,13 @@ export function App() {
                   {loadedSkills.length > 0 || pendingSkills.length > 0 ? (
                     <SkillContextStrip loadedSkills={loadedSkills} pendingSkills={pendingSkills} onRemovePending={removePendingSkill} />
                   ) : null}
+                  {approval ? (
+                    <ApprovalStrip
+                      approval={approval}
+                      onRespond={(approved) => void respondApproval(approved)}
+                      onExpand={() => setApprovalDetailsOpen(true)}
+                    />
+                  ) : null}
                   {imageAttachments.length > 0 ? <ImageAttachmentStrip images={imageAttachments} onRemove={removeImageAttachment} /> : null}
                   {fileAttachments.length > 0 ? <FileAttachmentStrip files={fileAttachments} onRemove={removeFileAttachment} /> : null}
                   {toolsPopoverOpen ? (
@@ -3613,7 +3626,13 @@ export function App() {
         ) : null}
       </section>
 
-      {approval ? <ApprovalDialog approval={approval} onRespond={(approved) => void respondApproval(approved)} /> : null}
+      {approval && approvalDetailsOpen ? (
+        <ApprovalDialog
+          approval={approval}
+          onRespond={(approved) => void respondApproval(approved)}
+          onCollapse={() => setApprovalDetailsOpen(false)}
+        />
+      ) : null}
       {elicitation && !approval ? (
         <ElicitationDialog prompt={elicitation} onRespond={(response) => void respondElicitation(response)} />
       ) : null}
@@ -8973,7 +8992,103 @@ function FirstRunOnboarding({
   );
 }
 
-function ApprovalDialog({ approval, onRespond }: { approval: ApprovalRequest; onRespond: (approved: boolean) => void }) {
+/**
+ * The compact decision surface, docked in the composer where the user is already looking. A pending
+ * approval blocks the agent run, and the previous modal-only design was missed for eight minutes in
+ * a real session -- the decision belongs next to the prompt box, not over the whole window.
+ *
+ * Deliberately no keyboard shortcut for approve or deny. This sits one Tab away from a textarea
+ * bound to Enter-submits, and a security decision should cost a deliberate click or an explicit
+ * focus move onto the button, never a stray keystroke.
+ */
+function ApprovalStrip({
+  approval,
+  onRespond,
+  onExpand
+}: {
+  approval: ApprovalRequest;
+  onRespond: (approved: boolean) => void;
+  onExpand: () => void;
+}) {
+  const view = (approval.request ? approvalViewFromRequest(approval.request) : undefined) ?? parseApprovalMessage(approval.message);
+  const risk = view.type === "screen" ? view.risk : undefined;
+
+  return (
+    <div className="approval-strip" role="group" aria-label="Approval required">
+      <div className="approval-strip-icon">
+        <Shield size={15} />
+      </div>
+      <div className="approval-strip-body">
+        <strong>{approvalStripTitle(view)}</strong>
+        <span title={approvalStripTarget(view, approval.message)}>{approvalStripTarget(view, approval.message)}</span>
+      </div>
+      {risk === "high" ? (
+        <span className="approval-strip-risk">
+          <AlertTriangle size={12} />
+          High risk
+        </span>
+      ) : null}
+      <div className="approval-strip-actions">
+        <button type="button" className="approval-strip-details" onClick={onExpand}>
+          Details
+        </button>
+        <button type="button" className="deny-button compact" onClick={() => onRespond(false)}>
+          <X size={14} />
+          Deny
+        </button>
+        <button type="button" className="approve-button compact" onClick={() => onRespond(true)}>
+          <Check size={14} />
+          Approve
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Short enough for one line in the strip; the dialog carries the full detail. */
+function approvalStripTitle(view: ApprovalView) {
+  switch (view.type) {
+    case "shell":
+      return "Run command";
+    case "write":
+      return "Write files";
+    case "browser":
+      return "Browser action";
+    case "network":
+      return "Network request";
+    case "screen":
+      return view.action === "capture" ? "Screen capture" : `Computer input: ${view.action}`;
+    default:
+      return "Approval required";
+  }
+}
+
+function approvalStripTarget(view: ApprovalView, fallback: string) {
+  switch (view.type) {
+    case "shell":
+      return view.command;
+    case "write":
+      return view.summary;
+    case "browser":
+      return view.target;
+    case "network":
+      return view.destination ?? view.summary;
+    case "screen":
+      return view.target;
+    default:
+      return fallback.split("\n")[0] ?? fallback;
+  }
+}
+
+function ApprovalDialog({
+  approval,
+  onRespond,
+  onCollapse
+}: {
+  approval: ApprovalRequest;
+  onRespond: (approved: boolean) => void;
+  onCollapse: () => void;
+}) {
   // Prefer the structured request from the main process; fall back to parsing the text message.
   const view = (approval.request ? approvalViewFromRequest(approval.request) : undefined) ?? parseApprovalMessage(approval.message);
 
@@ -8991,6 +9106,9 @@ function ApprovalDialog({ approval, onRespond }: { approval: ApprovalRequest; on
         </div>
         <ApprovalContent view={view} fallback={approval.message} />
         <div className="approval-actions">
+          <button type="button" className="secondary-command" onClick={onCollapse}>
+            Back
+          </button>
           <button type="button" className="deny-button" onClick={() => onRespond(false)}>
             <X size={17} />
             Deny
@@ -9071,6 +9189,33 @@ function ApprovalContent({ view, fallback }: { view: ApprovalView; fallback: str
     );
   }
 
+  if (view.type === "screen") {
+    return (
+      <div className="approval-detail browser-approval">
+        <div className="browser-approval-card">
+          {view.action === "capture" ? <Monitor size={16} /> : <MousePointerClick size={16} />}
+          <div>
+            <strong>{view.action}</strong>
+            <span>{view.target}</span>
+          </div>
+        </div>
+        <p className="screen-approval-note">
+          {view.action === "capture"
+            ? "Everything visible on that target is captured, including apps unrelated to this workspace."
+            : "This is injected into whatever currently holds focus, which may be any application on the machine."}
+        </p>
+        {view.analysis ? (
+          <div className="danger-badges">
+            <span className="danger-badge">
+              <AlertTriangle size={13} />
+              {view.analysis}
+            </span>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return <pre>{fallback}</pre>;
 }
 
@@ -9119,6 +9264,11 @@ function approvalSubtitle(view: ApprovalView) {
   }
   if (view.type === "network") {
     return "Review this network request before it leaves the machine.";
+  }
+  if (view.type === "screen") {
+    return view.action === "capture"
+      ? "Review what of your screen gets read."
+      : "Review this input before it is sent to whatever holds focus.";
   }
   return "The agent wants to perform an action that changes state or runs a command.";
 }
