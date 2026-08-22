@@ -1773,7 +1773,13 @@ export function createToolRegistry(context: ToolContext) {
     action: ComputerInputAction,
     schema: ToolSchema,
     parse: (args: unknown) => T,
-    plan: (parsed: T) => { script: string; target: string; analyzed: { text?: string; key?: string; modifiers?: Modifier[] } }
+    plan: (parsed: T) => {
+      script: string;
+      /** Text entry uses AppleScript; the CGEvent actions use JXA. See buildTypeScript for why. */
+      language: "AppleScript" | "JavaScript";
+      target: string;
+      analyzed: { text?: string; key?: string; modifiers?: Modifier[] };
+    }
   ) => {
     register({
       schema,
@@ -1782,7 +1788,7 @@ export function createToolRegistry(context: ToolContext) {
         if (process.platform !== "darwin") {
           throw new Error(`Input injection requires macOS; osascript is not available on ${process.platform}.`);
         }
-        const { script, target, analyzed } = plan(parsed);
+        const { script, language, target, analyzed } = plan(parsed);
         const analysis = analyzeComputerInput(action, analyzed);
         await context.approvals.require({
           type: "screen",
@@ -1796,7 +1802,7 @@ export function createToolRegistry(context: ToolContext) {
 
         let result;
         try {
-          result = await execa("osascript", ["-l", "JavaScript", "-e", script], {
+          result = await execa("osascript", ["-l", language, "-e", script], {
             cwd: context.workspaceRoot,
             shell: false,
             reject: false,
@@ -1812,7 +1818,9 @@ export function createToolRegistry(context: ToolContext) {
         }
 
         const stderr = String(result.stderr ?? "");
-        if (stderr.includes(ACCESSIBILITY_SENTINEL)) {
+        // Two shapes for the same missing permission: the JXA actions preflight it and throw a
+        // sentinel, while System Events reports it in its own words. Both mean Accessibility.
+        if (stderr.includes(ACCESSIBILITY_SENTINEL) || /not allowed assistive access/i.test(stderr)) {
           throw new Error(ACCESSIBILITY_PERMISSION_HINT);
         }
         if (result.timedOut) {
@@ -1857,6 +1865,7 @@ export function createToolRegistry(context: ToolContext) {
         .parse(args),
     (click) => ({
       script: buildClickScript(click),
+      language: "JavaScript",
       target: `${click.button ?? "left"} click x${click.clickCount ?? 1} at ${click.x},${click.y} (points)`,
       analyzed: {}
     })
@@ -1877,6 +1886,7 @@ export function createToolRegistry(context: ToolContext) {
     (args) => z.object({ text: z.string().min(1).max(MAX_TYPE_TEXT_CHARS) }).parse(args),
     (typed) => ({
       script: buildTypeScript(typed),
+      language: "AppleScript",
       target: `type ${typed.text.length} characters into the focused application`,
       analyzed: { text: typed.text }
     })
@@ -1908,6 +1918,7 @@ export function createToolRegistry(context: ToolContext) {
         .parse(args),
     (pressed) => ({
       script: buildKeyScript(pressed),
+      language: "JavaScript",
       target: [...(pressed.modifiers ?? []), pressed.key].join("+"),
       analyzed: { key: pressed.key, modifiers: pressed.modifiers }
     })
@@ -1939,6 +1950,7 @@ export function createToolRegistry(context: ToolContext) {
         .parse(args),
     (scroll) => ({
       script: buildScrollScript(scroll),
+      language: "JavaScript",
       target: `scroll ${scroll.deltaY} lines vertically, ${scroll.deltaX ?? 0} horizontally, ${
         scroll.x === undefined ? "under the current pointer" : `at ${scroll.x},${scroll.y} (points)`
       }`,

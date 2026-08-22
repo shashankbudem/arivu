@@ -7,10 +7,10 @@ import {
   buildClickScript,
   buildKeyScript,
   buildScrollScript,
+  appleScriptString,
   buildTypeScript,
   chunkText,
   KEY_CODES,
-  MAX_TYPE_CHUNK_CHARS,
   MAX_CLICK_COUNT,
   MAX_SCROLL_LINES,
   MAX_TYPE_TEXT_CHARS,
@@ -24,12 +24,9 @@ describe("generated script preamble", () => {
   it("preflights Accessibility in every action", () => {
     // Unlike Screen Recording, this permission is checkable before acting. Without the check
     // CGEventPost drops the event silently -- no error, no exit code, nothing to report.
-    for (const script of [
-      buildClickScript({ x: 1, y: 1 }),
-      buildTypeScript({ text: "hi" }),
-      buildKeyScript({ key: "return" }),
-      buildScrollScript({ deltaY: 3 })
-    ]) {
+    // computer_type is excluded deliberately: it runs through System Events, which reports the
+    // same missing permission in its own words rather than needing a preflight.
+    for (const script of [buildClickScript({ x: 1, y: 1 }), buildKeyScript({ key: "return" }), buildScrollScript({ deltaY: 3 })]) {
       expect(script).toContain("AXIsProcessTrusted");
       expect(script).toContain(ACCESSIBILITY_SENTINEL);
     }
@@ -46,6 +43,7 @@ describe("generated script preamble", () => {
 
 describe("generated script syntax", () => {
   it("emits parseable JavaScript for every action and option combination", () => {
+    // computer_type is AppleScript, not JavaScript, so it is checked by osacompile instead.
     // Parsing without running is the only end-to-end check available here: actually executing one
     // of these posts an event into whatever holds focus, which during a test run is this terminal.
     // A template bug -- an unbalanced brace, a bad interpolation -- would otherwise only surface
@@ -53,9 +51,6 @@ describe("generated script syntax", () => {
     const scripts = [
       buildClickScript({ x: 0, y: 0 }),
       buildClickScript({ x: -10, y: 4000, button: "right", clickCount: MAX_CLICK_COUNT }),
-      buildTypeScript({ text: "plain" }),
-      buildTypeScript({ text: '"quotes" \\ backslash\nnewline\ttab' }),
-      buildTypeScript({ text: "a".repeat(MAX_TYPE_TEXT_CHARS) }),
       buildKeyScript({ key: "return" }),
       buildKeyScript({ key: "delete", modifiers: ["command", "shift", "option", "control"] }),
       buildScrollScript({ deltaY: -MAX_SCROLL_LINES }),
@@ -97,21 +92,36 @@ describe("buildClickScript", () => {
 });
 
 describe("buildTypeScript", () => {
-  it("embeds text as a JSON array so quoting cannot break out of the script", () => {
-    const payload = '"; $.CGEventPost(0, evil); //';
-    const script = buildTypeScript({ text: payload });
-    // Encoded, not interpolated: the escaped form is present and the raw form never is.
-    expect(script).toContain(JSON.stringify(chunkText(payload, MAX_TYPE_CHUNK_CHARS)));
-    expect(script).not.toContain(payload);
-    // Nothing of the payload reaches the script above the array literal.
-    expect(script.split("var chunks =")[0]).not.toContain("evil");
+  it("uses System Events keystroke, not the CGEvent unicode path", () => {
+    // CGEventKeyboardSetUnicodeString wants a UniChar buffer JXA cannot produce: measured, an
+    // NSString, a char-code array, and a wrapped array all read back a length of 0.
+    const script = buildTypeScript({ text: "hi" });
+    expect(script).toContain('tell application "System Events"');
+    expect(script).toContain("keystroke");
+    expect(script).not.toContain("CGEventKeyboardSetUnicodeString");
   });
 
-  it("chunks long text across events", () => {
+  it("escapes quotes and backslashes so text cannot close the AppleScript literal", () => {
+    expect(appleScriptString('say "hi"')).toBe('"say \\"hi\\""');
+    expect(appleScriptString("back\\slash")).toBe('"back\\\\slash"');
+    // Backslash first, then quote: the other order would re-escape the backslash it just added.
+    expect(appleScriptString('\\"')).toBe('"\\\\\\""');
+  });
+
+  it("keeps an injection attempt inside the literal", () => {
+    const script = buildTypeScript({ text: '" \n end tell \n tell application "Finder" to delete' });
+    // The payload's own text may contain "end tell" -- harmlessly, inside a string. What matters is
+    // that it opens no second block and closes the real one exactly once, at the end.
+    expect(script.match(/^tell application/gm)).toHaveLength(1);
+    expect(script.match(/^end tell$/gm)).toHaveLength(1);
+    expect(script.endsWith("end tell")).toBe(true);
+  });
+
+  it("chunks long text across keystroke calls without losing characters", () => {
     const script = buildTypeScript({ text: "a".repeat(40) });
-    const chunks = JSON.parse(script.slice(script.indexOf("["), script.indexOf("]") + 1)) as string[];
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(chunks.join("")).toBe("a".repeat(40));
+    const typed = [...script.matchAll(/keystroke "([^"]*)"/g)].map((match) => match[1]).join("");
+    expect(script.match(/keystroke/g)?.length).toBeGreaterThan(1);
+    expect(typed).toBe("a".repeat(40));
   });
 
   it("rejects empty and oversized text", () => {
@@ -123,6 +133,30 @@ describe("buildTypeScript", () => {
     expect(chunkText("abcdef", 2)).toEqual(["ab", "cd", "ef"]);
     expect(chunkText("abcde", 2)).toEqual(["ab", "cd", "e"]);
     expect(chunkText("a", 4)).toEqual(["a"]);
+  });
+});
+
+describe("generated AppleScript compiles", () => {
+  // osacompile parses and compiles without executing, so this validates the escaping against the
+  // real compiler rather than against my model of it. macOS-only, hence the guard.
+  const onMac = process.platform === "darwin";
+  it.runIf(onMac)("survives quotes, backslashes, newlines, and unicode", async () => {
+    const { execa } = await import("execa");
+    const payloads = [
+      "plain text",
+      'say "hi"',
+      "back\\slash",
+      '\\"',
+      "line1\nline2",
+      "tab\there",
+      '" \n end tell \n tell application "Finder" to delete',
+      "unicode: caf\u00e9 \u00e9\u00e0\u00fc \u4f60\u597d",
+      "a".repeat(MAX_TYPE_TEXT_CHARS)
+    ];
+    for (const payload of payloads) {
+      const result = await execa("osacompile", ["-o", "/dev/null", "-e", buildTypeScript({ text: payload })], { reject: false });
+      expect(`${payload.slice(0, 20)} -> ${result.exitCode} ${result.stderr}`).toBe(`${payload.slice(0, 20)} -> 0 `);
+    }
   });
 });
 

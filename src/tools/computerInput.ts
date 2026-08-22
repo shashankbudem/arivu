@@ -247,6 +247,20 @@ for (var i = 1; i <= ${clickCount}; i++) {
 }`);
 }
 
+/**
+ * Text entry is the one action that does NOT go through CGEvent, because the CGEvent way to carry
+ * text is `CGEventKeyboardSetUnicodeString`, which takes a `const UniChar *` that JXA's bridge
+ * cannot produce. Measured: setting it with an NSString, a JS array of char codes, or a wrapped
+ * array all read back a length of 0, while a keycode set through `CGEventSetIntegerValueField`
+ * round-trips correctly on the same event — so the event is fine and the string never lands. The
+ * bridge's `Ref()` out-parameter marshalling is itself unreliable enough (it reports `typeof
+ * "string"`) that the read-back cannot fully condemn the setter either, which is the point: an
+ * unverifiable mechanism is not one to type a user's text through.
+ *
+ * System Events `keystroke` is the documented macOS primitive for this, is layout-aware, and fails
+ * loudly rather than silently when Accessibility is missing ("not allowed assistive access") — the
+ * opposite of `CGEventPost`, which drops the event with no error at all.
+ */
 export function buildTypeScript(params: ComputerTypeParams): string {
   const text = params.text;
   if (text.length === 0) {
@@ -255,20 +269,18 @@ export function buildTypeScript(params: ComputerTypeParams): string {
   if (text.length > MAX_TYPE_TEXT_CHARS) {
     throw new Error(`text is ${text.length} characters; the limit is ${MAX_TYPE_TEXT_CHARS}.`);
   }
-  // Chunked because one keyboard event's unicode payload is bounded; the chunks are embedded as a
-  // JSON array so no amount of quoting in the text can break out of the generated script.
+  // Chunked so a long string arrives as several keystroke calls rather than one enormous literal.
   const chunks = chunkText(text, MAX_TYPE_CHUNK_CHARS);
-  return wrapScript(`
-var chunks = ${JSON.stringify(chunks)};
-for (var i = 0; i < chunks.length; i++) {
-  var chunk = chunks[i];
-  var down = $.CGEventCreateKeyboardEvent($(), 0, true);
-  $.CGEventKeyboardSetUnicodeString(down, chunk.length, $(chunk));
-  $.CGEventPost(${CG.hidEventTap}, down);
-  var up = $.CGEventCreateKeyboardEvent($(), 0, false);
-  $.CGEventKeyboardSetUnicodeString(up, chunk.length, $(chunk));
-  $.CGEventPost(${CG.hidEventTap}, up);
-}`);
+  const body = chunks.map((chunk) => `\tkeystroke ${appleScriptString(chunk)}`).join("\n");
+  return `tell application "System Events"\n${body}\nend tell`;
+}
+
+/**
+ * AppleScript string literal. Backslash first, then quote: escaping the quote first would leave the
+ * backslash it introduced to be escaped again by the second pass, doubling it.
+ */
+export function appleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 export function buildKeyScript(params: ComputerKeyParams): string {
