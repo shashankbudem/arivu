@@ -20,6 +20,8 @@ jobs:
           node-version: 20
           cache: npm
       - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt, clippy
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
