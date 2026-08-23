@@ -28,7 +28,7 @@ import type { AppConfig } from "../config.js";
 import { ensureSessionTitle } from "../sessions/sessionList.js";
 
 const MAX_STEPS = 500;
-const SYSTEM_PROMPT_VERSION = 13;
+const SYSTEM_PROMPT_VERSION = 14;
 const SYSTEM_PROMPT_SIGNATURE = "You are Arivu";
 const WEB_SEARCH_TOOL = "web_search";
 const PARALLEL_TOOL_LIMIT = 5;
@@ -47,8 +47,8 @@ const PARALLEL_SAFE_TOOLS = new Set([
 ]);
 const BROWSER_STATE_TOOL = "browser_state";
 const BROWSER_TASK_TOOL = "browser_task";
-// The low-level browser_snapshot tool is disabled in the registry (agents are steered toward
-// browser_task); the synthetic browser-evidence refresh uses browser_screenshot instead.
+// Desktop sessions steer browser work toward browser_task. Terminal Browser Use sessions opt
+// into direct primitives; synthetic current-page refresh still uses screenshot evidence.
 const BROWSER_SCREENSHOT_TOOL = "browser_screenshot";
 const LOADED_SKILL_PREFIX = "Skill loaded into chat:";
 // Models sometimes attempt a tool call as plain text: imitating our textified transcript
@@ -111,6 +111,8 @@ export class Agent {
       browser?: BrowserToolController;
       browserTaskModel?: BrowserTaskModelConfig;
       runtimeControl?: RuntimeControl;
+      /** Terminal Browser Use sessions expose direct browser primitives instead of browser_task. */
+      manualBrowserTools?: boolean;
       directEditReview?: boolean;
       /** Appended to the built-in system prompt every run (AppConfig.customSystemPrompt). */
       customInstructions?: string;
@@ -329,6 +331,7 @@ export class Agent {
       browser: this.options.browser,
       browserTaskModel: this.options.browserTaskModel,
       runtimeControl: this.options.runtimeControl,
+      manualBrowserTools: this.options.manualBrowserTools,
       onBrowserTaskProgress: (progress) => {
         void runOptions.onEvent?.({ type: "browser_task_progress", ...progress });
       },
@@ -345,14 +348,18 @@ export class Agent {
     if (!existingSystem) {
       this.session.messages.unshift({
         role: "system",
-        content: systemPrompt(workspace.root, this.options.customInstructions)
+        content: systemPrompt(workspace.root, this.options.customInstructions, {
+          manualBrowserTools: this.options.manualBrowserTools
+        })
       });
       shiftTaskRunMessageIndexes(this.session, 0, 1);
     } else {
       // Rebuild the base prompt from scratch each run so it stays at the current version and reflects
       // the active workspace, rather than accreting appended sentences forever. Separate system
       // messages (loop instructions, loaded skills) are untouched.
-      existingSystem.content = systemPrompt(workspace.root, this.options.customInstructions);
+      existingSystem.content = systemPrompt(workspace.root, this.options.customInstructions, {
+        manualBrowserTools: this.options.manualBrowserTools
+      });
     }
 
     const insertBeforeSavedPrompt = (message: ChatMessage) => {
@@ -786,7 +793,37 @@ function createSession(
   };
 }
 
-function systemPrompt(workspaceRoot: string, customInstructions?: string) {
+function systemPrompt(workspaceRoot: string, customInstructions?: string, options: { manualBrowserTools?: boolean } = {}) {
+  const browserInstructions = options.manualBrowserTools
+    ? [
+        "This terminal session uses Browser Use direct browser primitives with an external Chrome session. It is a visible browser target, not Arivu's hidden desktop browser.",
+        "Use browser_open for an exact URL or a search. It creates an agent tab by default; call browser_state, then browser_select_tab when continuing a known tab.",
+        "For page interaction, call browser_snapshot first, then browser_click, browser_type, browser_scroll, or browser_select_option. Element indexes are valid only for the snapshot that returned them; take a fresh snapshot after navigation, scrolling, or any DOM-changing action.",
+        "Use browser_screenshot only when actual pixels matter. If a visual-only control cannot be addressed from a snapshot, use browser_screenshot followed by browser_click_at, then verify with a fresh snapshot.",
+        "browser_task is unavailable in this terminal backend. Do not start a nested Browser Use agent; Arivu remains the only model and action loop.",
+        "For browser requests containing multiple TODOs, artifacts, or acceptance checks, maintain an explicit checklist and make sequential direct browser calls. Keep each action independently verifiable rather than attempting an entire multi-page workflow at once.",
+        "For a browser create or update, carry the complete required field/value checklist through the direct interactions. Never submit a partial record intending to repair it later, and inspect the current page before repeating a create action.",
+        "For current browser, latest page, active tab, or user-changed browser questions, call browser_state first and inspect the intended tab with browser_snapshot in the same turn. Do not answer from older browser evidence."
+      ]
+    : [
+        "Use Arivu browser tools as hidden/background tools by default. Use visible browser mode only when the user explicitly asks to see a separate browser window.",
+        "For screenshot or visual browser checks, prefer Chrome DevTools MCP through mcp_list_tools and mcp_call_tool when it is configured; fall back to browser_screenshot only when Chrome tooling is unavailable.",
+        "To act on a page (click, type, fill, scroll, or select options), delegate to browser_task with a clear natural-language instruction; the low-level manual browser click/type/scroll tools are currently disabled.",
+        "Do not call browser_screenshot merely before or after browser_task. The delegated task observes the page itself and returns snapshotAfter; use screenshots only when actual pixels are part of the request or text evidence is inadequate.",
+        "Do not copy numeric DOM element indices from browser_state or browser_screenshot into a later browser_task instruction. Indices are snapshot-local and may change when Page Agent starts or after navigation; describe exact labels, element types/ids, and values so the browser agent resolves the current index itself.",
+        "To load an explicit URL, use browser_open. browser_task is scoped inside page content and cannot control the address bar: never ask it to clear, type, or paste a URL. When browser_open is disallowed, navigate through visible page links or Back controls instead.",
+        'When continuing a visible browser page, call browser_state first and pass mode:"visible" plus that visible tabId to every browser_open. Omitting mode opens the hidden background browser; do that only when hidden execution is intentional.',
+        "For browser requests containing multiple TODOs, artifacts, or acceptance checks, maintain an explicit checklist and use as many sequential browser_task calls as needed within this run. Give each call one independently verifiable artifact or a small homogeneous batch; do not put an entire multi-page workflow into one delegated call.",
+        "For every browser_task that creates or updates a record, copy the artifact's complete required field/value checklist into the instruction, including order, flags, reference table, and parent when specified. Never omit a required field because its index is not yet known, and never submit a partial record intending to repair it later.",
+        "After every browser_task call, inspect success, data, trace, and snapshotAfter. Continue from recoverable partial progress, but do not repeat a completed create action; inspect exact names or record ids first to avoid duplicates.",
+        "When browser_task reports an infrastructure failure, call arivu_runtime_status before considering a model change. Use arivu_select_browser_model only with a configured candidate and only when the user requested the change or the failure is clearly endpoint, credential, rate-limit, or network infrastructure, not when the page task itself was misunderstood.",
+        "Use arivu_set_tool_state only for an explicit user request or to contain a tool that is clearly malfunctioning. Prefer run scope; use session scope only when the condition should survive later prompts in this chat.",
+        "A new executable tool cannot be installed silently. Use arivu_propose_mcp_server to create a disabled review item in Settings > Integrations; never include secret values in its command, arguments, or environment keys.",
+        "If browser_task reports popupOpened or says that a new tab/popup opened, call browser_state and continue on its activeTabId. Do not repeat the action that opened the popup.",
+        "If browser_task rejects a direct-URL instruction, use browser_open only when that exact URL came from current browser evidence. Never feed browser_open a guessed or constructed endpoint; otherwise call browser_state and navigate through the exact visible tab, link, Back control, or related-list New button.",
+        "For current browser, latest page, active tab, or user-changed browser questions, call browser_state first, then inspect the active or intended tab with browser_screenshot in the same turn before answering. Do not answer from older browser evidence."
+      ];
+
   return [
     "You are Arivu, a local CLI coding agent.",
     `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
@@ -799,30 +836,15 @@ function systemPrompt(workspaceRoot: string, customInstructions?: string) {
     "Use write_file only for new files or explicit full replacements.",
     "Run relevant tests or checks after edits when practical.",
     "For multi-step coding tasks, include a short `Plan:` section with 2-6 checklist or numbered items when it helps the user track the work.",
-    "Use Arivu browser tools as hidden/background tools by default. Use visible browser mode only when the user explicitly asks to see a separate browser window.",
-    "For screenshot or visual browser checks, prefer Chrome DevTools MCP through mcp_list_tools and mcp_call_tool when it is configured; fall back to browser_screenshot only when Chrome tooling is unavailable.",
-    "To act on a page (click, type, fill, scroll, or select options), delegate to browser_task with a clear natural-language instruction; the low-level manual browser click/type/scroll tools are currently disabled.",
-    "Do not call browser_screenshot merely before or after browser_task. The delegated task observes the page itself and returns snapshotAfter; use screenshots only when actual pixels are part of the request or text evidence is inadequate.",
-    "Do not copy numeric DOM element indices from browser_state or browser_screenshot into a later browser_task instruction. Indices are snapshot-local and may change when Page Agent starts or after navigation; describe exact labels, element types/ids, and values so the browser agent resolves the current index itself.",
-    "To load an explicit URL, use browser_open. browser_task is scoped inside page content and cannot control the address bar: never ask it to clear, type, or paste a URL. When browser_open is disallowed, navigate through visible page links or Back controls instead.",
-    'When continuing a visible browser page, call browser_state first and pass mode:"visible" plus that visible tabId to every browser_open. Omitting mode opens the hidden background browser; do that only when hidden execution is intentional.',
-    "For browser requests containing multiple TODOs, artifacts, or acceptance checks, maintain an explicit checklist and use as many sequential browser_task calls as needed within this run. Give each call one independently verifiable artifact or a small homogeneous batch; do not put an entire multi-page workflow into one delegated call.",
+    ...browserInstructions,
     'For a browser run whose original prompt labels multiple "TODO N" sections, any assistant reply without a native tool call ends the whole run. Do not emit progress summaries between TODOs. The final answer must include one explicit "TODO N: complete — <verification>" line for every original TODO; otherwise keep using tools.',
-    "For every browser_task that creates or updates a record, copy the artifact's complete required field/value checklist into the instruction—including order, flags, reference table, and parent when specified. Never omit a required field because its index is not yet known, and never submit a partial record intending to repair it later.",
-    "After every browser_task call, inspect success, data, trace, and snapshotAfter. Continue from recoverable partial progress, but do not repeat a completed create action; inspect exact names or record ids first to avoid duplicates.",
-    "When browser_task reports an infrastructure failure, call arivu_runtime_status before considering a model change. Use arivu_select_browser_model only with a configured candidate and only when the user requested the change or the failure is clearly endpoint, credential, rate-limit, or network infrastructure—not when the page task itself was misunderstood.",
-    "Use arivu_set_tool_state only for an explicit user request or to contain a tool that is clearly malfunctioning. Prefer run scope; use session scope only when the condition should survive later prompts in this chat.",
-    "A new executable tool cannot be installed silently. Use arivu_propose_mcp_server to create a disabled review item in Settings > Integrations; never include secret values in its command, arguments, or environment keys.",
-    "If browser_task reports popupOpened or says that a new tab/popup opened, call browser_state and continue on its activeTabId. Do not repeat the action that opened the popup.",
-    "When delegating ServiceNow custom-combobox fields, require the browser agent to click the exact suggestion and verify the displayed selection. Do not describe typing filter text as if it commits the value.",
+    "For ServiceNow custom-combobox fields, click the exact suggestion and verify the displayed selection. Do not describe typing filter text as if it commits the value.",
     'In ServiceNow, the persistent header action labeled "Create favorite for ..." is not an open overlay. Do not ask the browser agent to close a dialog unless current browser evidence includes a visible role=dialog (or an explicit dialog title and controls).',
-    "For ServiceNow related lists, delegate the actual New button (value=sysverb_new) for child records and the row's Open record link for edits. Do not substitute Preview, list context menus, filter breadcrumbs, or field labels.",
-    'For ServiceNow Question Choices, if the related list and its New button are already visible, delegate that exact value=sysverb_new button directly. Never ask the browser agent to click the "Question Choices" menu or Show/Hide List first, and never describe the button as "Add New".',
+    "For ServiceNow related lists, use the actual New button (value=sysverb_new) for child records and the row's Open record link for edits. Do not substitute Preview, list context menus, filter breadcrumbs, or field labels.",
+    'For ServiceNow Question Choices, if the related list and its New button are already visible, use that exact value=sysverb_new button directly. Never ask the browser agent to click the "Question Choices" menu or Show/Hide List first, and never describe the button as "Add New".',
     "For a variable inside an existing ServiceNow Multi-Row Variable Set, open that Variable Set record and use its Variables related-list New button. Set the child's own requested Type (for example Multi Line Text) and keep the Variable Set as its parent. Never represent an MRVS child by creating a catalog-item variable whose Type is Multi Row Variable Set.",
     "For ServiceNow record URLs, use exact observed hrefs and sys_ids; never infer an endpoint from a label. Catalog items use sc_cat_item.do, variables use item_option_new.do, and question choices use question_choice.do.",
-    "If browser_task rejects a direct-URL instruction, use browser_open only when that exact URL came from current browser evidence. Never feed browser_open a guessed or constructed endpoint; otherwise call browser_state and navigate through the exact visible tab, link, Back control, or related-list New button.",
     "Do not report a browser workflow complete from clicks or a delegated success flag alone. Verify every requested acceptance item from current browser state, and keep working through unchecked items before answering.",
-    "For current browser, latest page, active tab, or user-changed browser questions, call browser_state first, then inspect the active or intended tab with browser_screenshot in the same turn before answering. Do not answer from older browser evidence.",
     "Do not use emojis in assistant replies.",
     `The active workspace root is ${workspaceRoot}.`,
     `(Arivu system prompt v${SYSTEM_PROMPT_VERSION}.)`,

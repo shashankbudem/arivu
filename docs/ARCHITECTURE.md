@@ -11,11 +11,15 @@ arivu
   -> src/cli.ts
   -> loadConfig()
   -> TuiApp
+  -> NativeTuiBackend (models, tools, sessions, approvals)
+  -> authenticated loopback NDJSON
+  -> native/arivu-tui (Rust + Ratatui + Crossterm)
+  -> xai-ratatui-inline viewport
   -> Agent.run(prompt)
   -> OpenAICompatibleChatClient.complete()
   -> tool execution loop
   -> SessionStore.save()
-  -> TUI render update
+  -> native TUI render update
 ```
 
 Desktop mode:
@@ -44,8 +48,12 @@ arivu "task"
 ## Main modules
 
 - `src/cli.ts`: command parsing, config resolution, TUI vs one-shot dispatch.
-- `src/tui/TuiApp.ts`: blessed-based terminal UI controller, slash commands, modal lifecycle, run state, and keyboard routing.
-- `src/tui/presentation.ts`: pure TUI transcript/activity formatting, responsive sizing, command-palette data, and prompt-editor behavior.
+- `src/tui/TuiApp.ts`: small launcher for the native terminal UI.
+- `src/tui/NativeTuiBackend.ts`: TypeScript-side agent, tool, Browser Use terminal browser, approval, session, compaction, and slash-command orchestration.
+- `src/tui/nativeLauncher.ts` and `src/tui/nativeProtocol.ts`: authenticated per-launch loopback transport and typed Rust/TypeScript event contract.
+- `src/tui/nativeSessionPresentation.ts`: pure saved-transcript and full-activity reconstruction for the native interface.
+- `src/tui/commands.ts`: shared slash-command parsing plus session and git-diff formatting.
+- `native/arivu-tui/`: native Ratatui/Crossterm input and rendering, Grok-style inline scrollback, activity/session/approval overlays, and fuzzy slash completion.
 - `desktop/main/main.ts`: Electron composition root. It creates the main window and long-lived services, wires lifecycle events, and delegates IPC, navigation, smoke, and benchmark behavior.
 - `desktop/main/desktopController.ts`: stateful desktop-agent orchestration for workspaces, sessions, task runs, models, tools, policies, and queued prompts.
 - `desktop/main/desktopIpc.ts`: trusted renderer IPC registration and payload routing.
@@ -68,7 +76,8 @@ arivu "task"
 - `src/agent/taskRuns.ts`: durable per-prompt run helpers for status, capability, tool-call, and artifact tracking.
 - `src/agent/taskWorktree.ts`: git worktree creation, changed-file summary, bounded patch preview, sync/conflict resolution, merge/discard/cleanup, and model instruction helpers for isolated task execution.
 - `src/tools/registry.ts`: tool definitions and execution.
-- `src/tools/browserControl.ts`: shared browser tool contract and URL/mode helpers used by the desktop-backed browser tools.
+- `src/tools/browserControl.ts`: shared browser tool contract and URL/mode helpers used by desktop and terminal browser controllers.
+- `src/browser/browserUseCliController.ts`: direct Browser Use CLI/CDP adapter for native TUI and one-shot CLI sessions.
 - `src/tools/mcp.ts`: MCP stdio client helpers for configured servers.
 - `src/tools/pathSafety.ts`: workspace path containment.
 - `src/tools/fileState.ts`: read-before-write state tracking.
@@ -143,14 +152,15 @@ The current tool set is:
 - `read_skill`
 - `mcp_list_tools`
 - `mcp_call_tool`
-- `browser_state` (desktop only)
-- `browser_select_tab` (desktop only)
-- `browser_open` (desktop only)
-- `browser_screenshot` (desktop only)
-- `browser_snapshot` (desktop only)
-- `browser_console` (desktop only)
-- `browser_click` (desktop only)
-- `browser_type` (desktop only)
+- `browser_state` (desktop and Browser Use terminal sessions)
+- `browser_select_tab` (desktop and Browser Use terminal sessions)
+- `browser_open` (desktop and Browser Use terminal sessions)
+- `browser_screenshot` (desktop and Browser Use terminal sessions)
+- `browser_snapshot` (desktop and Browser Use terminal sessions)
+- `browser_console` (desktop and Browser Use terminal sessions)
+- `browser_click` (desktop and Browser Use terminal sessions)
+- `browser_type` (desktop and Browser Use terminal sessions)
+- `browser_task` (desktop only)
 - `apply_patch`
 - `write_file`
 - `run`
@@ -166,7 +176,9 @@ The `run` tool accepts either a structured `argv` vector or a shell `command` st
 
 `mcp_list_tools` and `mcp_call_tool` connect to configured MCP servers using the official TypeScript SDK's stdio client transport. Each call opens a short-lived client, connects, performs the list/call request with a timeout, formats MCP content blocks into text, and closes the client.
 
-Browser tools are registered only when the desktop main process provides a `BrowserToolController`. `browser_state` returns active mode, active visible tab id, visible tab URL/title/loading/freshness metadata, and the background target so model turns can refresh tab awareness before answering current-browser questions. `browser_select_tab` switches the active visible tab by `tabId`. `browser_open` normalizes localhost-style URLs, direct HTTP/HTTPS/file URLs, and likely hostnames; plain non-URL text becomes a Google search URL. It opens the hidden isolated browser target by default, or the separate visible window when `mode: "visible"` is supplied. In visible mode, `browser_open` can create a new tab with `newTab: true` or target a known tab with `tabId`; follow-up screenshot/snapshot/console/click/type tools also accept `tabId` and otherwise use the active visible tab. `browser_snapshot` returns compact page text and key interactable elements, `browser_console` returns collected console entries, `browser_screenshot` writes a temporary PNG, `browser_click`/`browser_type` operate by selector or visible label text, and `browser_click_at` clicks exact screenshot/CSS coordinates when selectors fail. Browser state/select/open/screenshot/snapshot/console/click/type actions route through the capability policy table and workspace scope rules; default trust modes allow isolated browser control without approval, while workspace overrides can prompt/block and browser target-class allowlists can restrict hidden/background, visible, local, file, or public browser targets.
+Browser tools are registered only when the active host provides a `BrowserToolController`. On desktop, `browser_state` returns active mode, active visible tab id, visible tab URL/title/loading/freshness metadata, and the background target so model turns can refresh tab awareness before answering current-browser questions. `browser_select_tab` switches the active visible tab by `tabId`. `browser_open` normalizes localhost-style URLs, direct HTTP/HTTPS/file URLs, and likely hostnames; plain non-URL text becomes a Google search URL. It opens the hidden isolated browser target by default, or the separate visible window when `mode: "visible"` is supplied. In visible mode, `browser_open` can create a new tab with `newTab: true` or target a known tab with `tabId`; follow-up screenshot/snapshot/console/click/type tools also accept `tabId` and otherwise use the active visible tab. `browser_snapshot` returns compact page text and key interactable elements, `browser_console` returns collected console entries, `browser_screenshot` writes a temporary PNG, `browser_click`/`browser_type` operate by selector or visible label text, and `browser_click_at` clicks exact screenshot/CSS coordinates when selectors fail. Browser state/select/open/screenshot/snapshot/console/click/type actions route through the capability policy table and workspace scope rules; default trust modes allow isolated browser control without approval, while workspace overrides can prompt/block and browser target-class allowlists can restrict hidden/background, visible, local, file, or public browser targets.
+
+Native TUI and one-shot CLI hosts supply `BrowserUseCliController` instead. It sends direct Browser Use Python-helper calls to an external Chrome/CDP session, keeps a compact stable Browser Use session name, and maps a fresh accessibility snapshot into temporary element indexes for direct click/type/select actions. Terminal `browser_open` defaults to visible semantics and creates an agent tab when no tab is selected, preserving the user's current tab. Terminal sessions enable the direct manual primitives and intentionally do not register `browser_task`, so Arivu never nests Browser Use's autonomous agent inside its own model loop. Screenshots are temporary PNGs; Browser Use console history is not retained.
 
 ## Desktop IPC
 

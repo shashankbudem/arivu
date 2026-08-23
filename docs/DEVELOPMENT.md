@@ -4,6 +4,7 @@
 
 - Node.js 20.17.0 or newer.
 - npm.
+- Rust 1.92 or newer for the native Ratatui TUI.
 - `rg` installed for the search tool.
 - `git` installed for workspace detection and status.
 - Optional: a Tavily API key for higher-quality web search.
@@ -21,6 +22,7 @@ npm install
 ```bash
 npm run typecheck
 npm test
+npm run native:tui:test
 npm run build
 npm run desktop:build
 npm run desktop:dev
@@ -210,6 +212,16 @@ arivu
 arivu compact <session-id> --dry-run
 ```
 
+Browser Use terminal check:
+
+```bash
+uv tool install browser-use
+browser-use --doctor
+arivu "Open example.com in the browser, inspect the heading, and report it."
+```
+
+For a particular Chrome debugging session, export `BU_CDP_URL` before starting `arivu`. Confirm the model receives direct browser snapshot/click/type tools and does not receive `browser_task`.
+
 Desktop check:
 
 ```bash
@@ -320,24 +332,28 @@ Inside the TUI:
 - `/activity` toggles the complete tool-activity drawer.
 - `/clear` clears visible conversation.
 - `/exit` exits.
-- `PageUp`/`PageDown`, `Shift+PageUp`/`Shift+PageDown`, and the `Ctrl+Home`/`Ctrl+End` variants scroll or jump the conversation and activity panes.
-- `Ctrl+P`, `Ctrl+G`, `Ctrl+S`, and `Ctrl+X` open the command palette, Activity drawer, saved-session picker, and shortcut reference.
+- Type `/` to open fuzzy slash completion; `Up`/`Down` selects, `Tab` completes, and `Enter` runs the selected command.
+- `Ctrl+P`, `Ctrl+G`, `Ctrl+S`, and `Ctrl+L` open slash commands, Activity, saved sessions, and clear the visible terminal.
+- `PageUp`/`PageDown` or `j`/`k` move through the open Activity, help, or session overlay.
+- `/help` opens the complete keyboard reference.
 
-The transcript remains full-width at every terminal size. Activity opens as a responsive overlay drawer so narrow terminals retain usable conversation space.
+Finalized transcript blocks are committed to terminal-native scrollback. The live response, status, compact composer, and any active overlay remain in a small inline viewport so normal terminal selection, search, and scrollback continue to work.
 
 ## Working on the TUI
 
-The TUI controller is in `src/tui/TuiApp.ts`; pure formatting, prompt editing, and responsive presentation helpers are in `src/tui/presentation.ts`. Keep these behaviors intact:
+The TypeScript runtime bridge is in `src/tui/NativeTuiBackend.ts`; the Rust terminal app is under `native/arivu-tui/`. `src/tui/TuiApp.ts` only launches that bridge. Keep these behaviors intact:
 
 - Default `arivu` opens the TUI.
 - One-shot mode stays non-interactive.
 - `sessions` prints recent saved sessions newest first, supports `--search`, `--workspace`, `--pinned`, `--unpinned`, `--project`, and `--standalone`; `resume <session-id>` opens the TUI with full session history; and `compact <session-id>` derives a smaller model context with `--recent`, `--entry-limit`, and `--dry-run` controls without deleting transcript messages.
 - Inside the TUI, `/compact [n]` compacts only the active model context, `/sessions [n]` lists recent saved sessions, accepts the same filter flags, `/sessions --pick` opens a keyboard-selectable resume picker, `/resume <session-id>` switches the live TUI into that session, `/diff` shows a local git change summary, `/activity` toggles complete tool details, and pane scrolling shortcuts keep long conversation/activity logs reachable without mouse support.
-- Command-palette or modal keystrokes must never leak into the main prompt or start a model turn.
-- New transcript entries preserve a reader's scroll position unless that pane was already following the tail.
+- Slash-picker or modal keystrokes must never leak into the main prompt or start a model turn.
+- Finalized transcript entries must be inserted above the inline viewport rather than redrawing or clearing terminal scrollback.
 - A prompt submitted during an active turn is queued and starts after the current turn settles.
 - Narrow terminals remain usable.
 - Approval prompts still resolve the same permission promise.
+
+Use `npm run native:tui:format`, `npm run native:tui:format:check`, `npm run native:tui:lint`, `npm run native:tui:test`, and `npm run native:tui:build` for the Rust frontend. `npm run build` stages the current platform binary under `dist/native/<platform>-<arch>/`.
 
 ## Working on the desktop app
 
@@ -387,7 +403,7 @@ When adding or changing a tool:
 - Treat MCP tools as configured external processes. `mcp_list_tools` is discovery; `mcp_call_tool` may perform whatever the selected MCP server implements.
 - Keep runtime self-management bounded: run/session model and tool changes may reference only registered candidates/tools; persistent saved settings and executable MCP activation must remain behind explicit user review.
 - Treat web tools as external data transmission; do not send secrets, private source, or personal data in search queries.
-- Treat browser tools as rendered-page access. Keep page content untrusted, use hidden isolated browser sessions by default, and prefer Chrome DevTools MCP for visual screenshots or deeper debugging when it is configured.
+- Treat browser tools as rendered-page access. Keep page content untrusted. Desktop uses hidden isolated sessions by default; native TUI and one-shot CLI use Browser Use's direct external Chrome/CDP session with a visible agent tab. Prefer Chrome DevTools MCP for desktop visual debugging when it is configured, and keep the terminal path on direct Browser Use primitives rather than nesting another autonomous agent.
 - `browser_task` accepts integer-looking strings for `maxSteps` and `timeoutMs` because some OpenAI-compatible models serialize numeric tool arguments as strings. Nonnumeric strings, out-of-range values, and sensitive boolean arguments remain strictly validated.
 - Keep `web_search` useful for current-information prompts: verify the active managed provider is honored, and verify the no-key Bing RSS profile routes news-like queries to Bing News RSS.
 - Add tests for safety-sensitive behavior.

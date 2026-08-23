@@ -901,12 +901,17 @@ export function SettingsView({
               </div>
             </section>
             <label hidden={activeSettingsSection !== "permissions"}>
-              <span>Trust mode</span>
+              <span>Approval mode</span>
               <select value={trustMode} onChange={(event) => setTrustMode(event.target.value as TrustMode)}>
-                <option value="ask">ask</option>
-                <option value="readonly">readonly</option>
-                <option value="trusted">trusted</option>
+                {trustMode === "readonly" ? <option value="readonly">Readonly (legacy)</option> : null}
+                <option value="ask">Manual</option>
+                <option value="trusted">Auto — Automatically approve routine actions</option>
+                <option value="bypass">Bypass — Do not ask approval at all</option>
               </select>
+              <small className="field-note">
+                Manual reviews sensitive actions. Auto proceeds with routine work and requests approval at review boundaries. Bypass never
+                opens approval dialogs; explicit workspace blocks still apply.
+              </small>
             </label>
             <label className="custom-system-prompt-field" hidden={activeSettingsSection !== "permissions"}>
               <span>Custom system prompt</span>

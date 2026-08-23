@@ -54,7 +54,7 @@ import {
   type TaskWorktreeAction,
   type TaskWorktreeActionOptions
 } from "./features/worktrees/worktreePresentation";
-import { capabilityLabel } from "./features/activity/capabilityPresentation";
+import { capabilityLabel, trustModeLabel } from "./features/activity/capabilityPresentation";
 import { randomId } from "./shared/id";
 import { isRecord } from "./shared/typeGuards";
 import {
@@ -3506,7 +3506,7 @@ function RuntimeDetails({ state, gitValue }: { state: DesktopState; gitValue: st
       ? [{ label: "Auto picked", value: `${state.modelSelection.model} (${state.modelSelection.providerName})` }]
       : []),
     { label: "Base URL", value: state.config.baseUrl },
-    { label: "Trust", value: state.config.trustMode },
+    { label: "Approval mode", value: trustModeLabel(state.config.trustMode) },
     { label: "Git", value: gitValue },
     { label: "API key", value: state.config.apiKeyPresent ? "saved" : "missing" },
     {
@@ -3904,7 +3904,7 @@ function buildSessionCommandOutput({
             }
           ]
         : []),
-      { label: "Trust mode", value: state.config.trustMode },
+      { label: "Approval mode", value: trustModeLabel(state.config.trustMode) },
       {
         label: "Context used",
         value: `~${formatNumber(estimatedContextTokens)} / ${formatNumber(COMPOSER_TOKEN_BUDGET)} tokens`

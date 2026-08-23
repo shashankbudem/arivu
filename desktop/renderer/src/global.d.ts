@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-type TrustMode = "ask" | "readonly" | "trusted";
+type TrustMode = "ask" | "readonly" | "trusted" | "bypass";
 type ProviderToolCallingMode = "auto" | "enabled" | "disabled";
 type ProviderImageInputMode = "auto" | "enabled" | "disabled";
 type WebSearchProviderKind = "tavily" | "brave" | "exa" | "serper" | "bing";

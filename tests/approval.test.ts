@@ -42,6 +42,24 @@ describe("approval manager", () => {
     expect(prompted).toBe(false);
   });
 
+  it("never prompts in bypass mode while retaining explicit workspace blocks", async () => {
+    let prompts = 0;
+    const approvals = new ApprovalManager(
+      "bypass",
+      async () => {
+        prompts += 1;
+        return false;
+      },
+      { run_command: "prompt" }
+    );
+
+    await expect(approvals.require({ type: "shell", command: "rm -rf dist" })).resolves.toBeUndefined();
+    expect(prompts).toBe(0);
+
+    const blocked = new ApprovalManager("bypass", async () => true, { run_command: "deny" });
+    await expect(blocked.require({ type: "shell", command: "npm test" })).rejects.toThrow(/Refused shell/);
+  });
+
   it("can require approval for trusted workspace writes with a workspace override", async () => {
     let prompted = false;
     const approvals = new ApprovalManager(

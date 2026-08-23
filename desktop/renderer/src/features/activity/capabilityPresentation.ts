@@ -26,9 +26,11 @@ export function trustModeLabel(mode: TrustMode) {
     case "readonly":
       return "Readonly";
     case "ask":
-      return "Ask";
+      return "Manual";
     case "trusted":
-      return "Trusted";
+      return "Auto";
+    case "bypass":
+      return "Bypass";
   }
 }
 

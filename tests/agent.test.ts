@@ -1239,6 +1239,28 @@ describe("agent", () => {
     expect(String(baseMessages[0]?.content)).not.toContain("Old appended sentence");
   });
 
+  it("advertises direct Browser Use tools and terminal-specific browser guidance", async () => {
+    const client = new ScriptedClient([{ message: { role: "assistant", content: "Ready." } }]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      browser: createFakeBrowser(),
+      manualBrowserTools: true
+    });
+
+    await agent.run("say hello");
+
+    const names = client.requests[0]?.tools.map((tool) => tool.name) ?? [];
+    expect(names).toContain("browser_snapshot");
+    expect(names).toContain("browser_click");
+    expect(names).toContain("browser_type");
+    expect(names).not.toContain("browser_task");
+    const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(requestText).toContain("Browser Use direct browser primitives");
+    expect(requestText).toContain("browser_task is unavailable in this terminal backend");
+  });
+
   it("ignores tool calls that were not advertised for the current step", async () => {
     vi.stubGlobal(
       "fetch",

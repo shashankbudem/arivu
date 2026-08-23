@@ -21,3 +21,4 @@ __pycache__/
 .venv-browser-bench/
 benchmarks/results/
 output/servicenow-benchmark/
+native/**/target/

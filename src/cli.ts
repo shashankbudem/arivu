@@ -2,6 +2,8 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { Agent } from "./agent/Agent.js";
+import { randomUUID } from "node:crypto";
+import { BrowserUseCliController } from "./browser/browserUseCliController.js";
 import {
   COMPACT_RECENT_MESSAGE_COUNT,
   applyContextCompactionCheckpoint,
@@ -419,6 +421,8 @@ async function runOneShot(task: string, config: AppConfig) {
     webSearchProvider: resolveWebSearchProvider(config),
     mcpServers: config.mcpServers,
     scopePolicyRules,
+    browser: new BrowserUseCliController({ sessionId: `cli-${randomUUID()}` }),
+    manualBrowserTools: true,
     customInstructions: config.customSystemPrompt,
     minStepIntervalMs: config.chatModelRequestDelayMs,
     // Interactive terminal sessions can answer structured ask_user questions inline.
@@ -443,7 +447,7 @@ function validateRuntimeConfig(config: Omit<AppConfig, "trustMode"> & { trustMod
 }
 
 function isTrustMode(value: string): value is AppConfig["trustMode"] {
-  return ["ask", "readonly", "trusted"].includes(value);
+  return ["ask", "readonly", "trusted", "bypass"].includes(value);
 }
 
 function isConfigKey(key: string): key is ConfigKey {

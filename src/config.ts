@@ -16,7 +16,7 @@ export { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles }
 const APP_SLUG = "arivu";
 const LEGACY_APP_SLUG = "shankinster";
 
-const TrustModeSchema = z.enum(["ask", "readonly", "trusted"]);
+const TrustModeSchema = z.enum(["ask", "readonly", "trusted", "bypass"]);
 const WorkspacePolicyCapabilitySchema = z.enum([
   "read_repo",
   "write_workspace",

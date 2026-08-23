@@ -52,7 +52,7 @@ type CapabilityRule = {
 
 type CapabilityPolicyTable = Record<TrustMode, Record<AgentTaskRunCapability, CapabilityRule>>;
 
-const TRUST_MODES: TrustMode[] = ["readonly", "ask", "trusted"];
+const TRUST_MODES: TrustMode[] = ["readonly", "ask", "trusted", "bypass"];
 const EFFECT_RANK: Record<CapabilityPolicyEffect, number> = {
   allow: 0,
   prompt: 1,
@@ -170,6 +170,17 @@ export const CAPABILITY_POLICY_TABLE: CapabilityPolicyTable = {
     browser_control: { base: "allow", label: "Browser allowed", reason: "isolated browser actions are allowed without approval" },
     mcp_call: { base: "prompt", label: "Requires approval", reason: "MCP tools require approval" },
     unknown: { base: "prompt", label: "Requires approval", reason: "unknown capabilities require approval" }
+  },
+  bypass: {
+    read_repo: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" },
+    local_context: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" },
+    skill_context: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" },
+    write_workspace: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" },
+    run_command: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" },
+    network_fetch: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" },
+    browser_control: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" },
+    mcp_call: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" },
+    unknown: { base: "allow", label: "Bypass allowed", reason: "approval bypass is active" }
   }
 };
 
@@ -203,7 +214,10 @@ export function evaluateCapabilityPolicy(
     label: rule.label,
     reason: rule.reason
   };
-  return applyPolicyOverride(baseDecision, options.overrides?.[capability]);
+  // Bypass deliberately suppresses approval-only workspace tightening. Explicit workspace
+  // blocks still apply, so a project can keep non-negotiable boundaries without reopening a prompt.
+  const override = options.overrides?.[capability];
+  return applyPolicyOverride(baseDecision, trustMode === "bypass" && override === "prompt" ? undefined : override);
 }
 
 export function evaluateApprovalPolicy(

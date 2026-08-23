@@ -210,7 +210,7 @@ const OTHER_OPTION_VALUE = "__arivu_other__";
 
 /**
  * Terminal frontend: renders the same request through @inquirer prompts. Used by the CLI;
- * blessed-based TUI sessions and headless runs pass no elicitor and get "unavailable".
+ * Terminal and headless runs pass no desktop elicitor and get "unavailable".
  */
 export async function terminalElicit(request: ElicitationRequest): Promise<ElicitationResponse> {
   if (!process.stdin.isTTY) {

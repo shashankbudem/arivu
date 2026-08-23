@@ -64,11 +64,12 @@ export function FirstRunOnboarding({
           <input value={apiKey} onChange={(event) => setApiKey(event.target.value)} type="password" placeholder="sk-..." />
         </label>
         <label>
-          <span>Trust mode</span>
+          <span>Approval mode</span>
           <select value={trustMode} onChange={(event) => setTrustMode(event.target.value as TrustMode)}>
-            <option value="ask">ask — approve each action</option>
-            <option value="readonly">readonly — reads only, no writes/commands</option>
-            <option value="trusted">trusted — auto-approve safe actions</option>
+            {trustMode === "readonly" ? <option value="readonly">Readonly (legacy)</option> : null}
+            <option value="ask">Manual</option>
+            <option value="trusted">Auto — Automatically approve routine actions</option>
+            <option value="bypass">Bypass — Do not ask approval at all</option>
           </select>
         </label>
         {error ? <p className="onboarding-error">{error}</p> : null}

@@ -22,6 +22,14 @@ Reason: small dependency, direct terminal primitives, enough for conversation/ac
 
 Tradeoff: less modern component ergonomics than Ink/React.
 
+## 2026-07-31: Replace Blessed with Grok Build's native TUI stack
+
+Decision: replace the Blessed renderer with a native Rust frontend using Ratatui 0.29, Crossterm 0.28, and Grok Build's `xai-ratatui-inline` engine pinned to revision `dd04f397b1d02f2272b092555669dfba1f01bc85`. Keep Arivu's TypeScript agent/runtime behind an authenticated per-launch loopback protocol.
+
+Reason: the full-screen Blessed surface did not match Grok Build's compact terminal behavior. The native inline viewport lets finalized output become ordinary terminal scrollback while preserving Arivu's existing providers, tools, browser tasks, approvals, sessions, and context logic.
+
+Tradeoff: source builds now require Rust 1.92+, and release packaging must ship a native binary for each supported platform and architecture.
+
 ## 2026-06-04: Desktop-first app direction
 
 Decision: add an Electron + React desktop app while keeping CLI/TUI surfaces.

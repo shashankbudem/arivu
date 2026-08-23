@@ -20,7 +20,7 @@ import {
   type WorkspacePolicyTransferPayload
 } from "../../../../../src/permissions/workspacePolicyTransfer";
 
-const TRUST_MODE_ORDER: TrustMode[] = ["readonly", "ask", "trusted"];
+const TRUST_MODE_ORDER: TrustMode[] = ["ask", "trusted", "bypass"];
 
 const WORKSPACE_POLICY_CAPABILITIES: WorkspacePolicyCapability[] = [
   "read_repo",
