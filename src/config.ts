@@ -5,11 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "./permissions/scopePolicy.js";
 import { normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
-import {
-  defaultWebSearchProvider,
-  WEB_SEARCH_PROVIDER_KINDS,
-  type WebSearchProviderProfile
-} from "./tools/webSearchProvider.js";
+import { defaultWebSearchProvider, WEB_SEARCH_PROVIDER_KINDS, type WebSearchProviderProfile } from "./tools/webSearchProvider.js";
 
 export { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
 

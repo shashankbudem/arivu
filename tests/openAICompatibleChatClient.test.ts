@@ -712,9 +712,7 @@ describe("OpenAICompatibleChatClient", () => {
       maxRequestRetries: 0
     });
 
-    await expect(client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow(
-      "Model request failed (400)"
-    );
+    await expect(client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow("Model request failed (400)");
     expect(calls).toBe(1);
   });
 

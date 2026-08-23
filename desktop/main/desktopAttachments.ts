@@ -13,7 +13,6 @@ import type { PromptImageAttachment as ImageAttachment } from "../../src/agent/p
 import { appDataDir } from "../../src/config.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 
-
 export type LocalImageResult = {
   mimeType: string;
   size: number;

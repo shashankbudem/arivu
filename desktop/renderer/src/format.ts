@@ -24,11 +24,7 @@ export function formatDateTime(value: string) {
 }
 
 /** Returns a localized date and time only for a valid message timestamp. */
-export function formatMessageDateTime(
-  value?: string,
-  fallback?: string,
-  options: Intl.DateTimeFormatOptions = {}
-): string | undefined {
+export function formatMessageDateTime(value?: string, fallback?: string, options: Intl.DateTimeFormatOptions = {}): string | undefined {
   const timestamp = [value, fallback].find((candidate) => {
     return typeof candidate === "string" && !Number.isNaN(new Date(candidate).getTime());
   });

@@ -5,7 +5,9 @@ import { deriveVisibleMessages } from "../desktop/renderer/src/messagePresentati
 describe("message presentation", () => {
   it("formats valid timestamps and falls back without depending on the host timezone", () => {
     const value = "2026-07-27T12:34:56.000Z";
-    const expected = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(new Date(value));
+    const expected = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(
+      new Date(value)
+    );
     expect(formatMessageDateTime(value, undefined, { timeZone: "UTC" })).toBe(expected);
     expect(formatMessageDateTime("not-a-date", value, { timeZone: "UTC" })).toBe(expected);
     expect(formatMessageDateTime(undefined)).toBeUndefined();

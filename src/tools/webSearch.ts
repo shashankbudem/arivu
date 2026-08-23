@@ -184,7 +184,13 @@ async function searchExa(query: string, maxResults: number, endpoint: string, ap
     .map((result) => ({
       title: result.title?.trim() ?? "",
       url: result.url?.trim() ?? "",
-      snippet: result.highlights?.map((highlight) => highlight.trim()).filter(Boolean).join(" ") || result.text?.trim() || "",
+      snippet:
+        result.highlights
+          ?.map((highlight) => highlight.trim())
+          .filter(Boolean)
+          .join(" ") ||
+        result.text?.trim() ||
+        "",
       publishedAt: result.publishedDate?.trim() || undefined,
       score: result.score
     }))

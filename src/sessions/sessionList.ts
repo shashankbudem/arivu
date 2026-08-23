@@ -68,12 +68,7 @@ const CONTINUATION_TITLE_PATTERN = /^(continue|resume|go on|ok|yes|y|please cont
  * "Untitled session".
  */
 export function deriveSessionTitleFromText(text: string, wordLimit = SESSION_TITLE_WORD_LIMIT): string {
-  const words = text
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, Math.max(1, wordLimit));
+  const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean).slice(0, Math.max(1, wordLimit));
   return words.join(" ") || "Untitled session";
 }
 
