@@ -2,12 +2,17 @@ import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { MAX_PROMPT_IMAGE_BYTES, type PromptImageAttachment as ImageAttachment } from "../../src/agent/promptPayload.js";
+import {
+  countAttachmentLines,
+  imageMimeTypeForPath,
+  MAX_CONTEXT_FILE_BYTES,
+  MAX_CONTEXT_FILE_CHARS,
+  MAX_IMAGE_BYTES
+} from "../../src/agent/attachmentPolicy.js";
+import type { PromptImageAttachment as ImageAttachment } from "../../src/agent/promptPayload.js";
 import { appDataDir } from "../../src/config.js";
 import { relativeToWorkspace, resolveSafeWorkspacePath } from "../../src/tools/pathSafety.js";
 
-const MAX_CONTEXT_FILE_BYTES = 256 * 1024;
-const MAX_CONTEXT_FILE_CHARS = 24_000;
 
 export type LocalImageResult = {
   mimeType: string;
@@ -30,11 +35,11 @@ export async function readImageAttachment(filePath: string): Promise<ImageAttach
   if (!fileStat.isFile()) {
     throw new Error(`${path.basename(filePath)} is not a file.`);
   }
-  if (fileStat.size > MAX_PROMPT_IMAGE_BYTES) {
-    throw new Error(`${path.basename(filePath)} is larger than ${formatBytes(MAX_PROMPT_IMAGE_BYTES)}.`);
+  if (fileStat.size > MAX_IMAGE_BYTES) {
+    throw new Error(`${path.basename(filePath)} is larger than ${formatBytes(MAX_IMAGE_BYTES)}.`);
   }
 
-  const mimeType = mimeTypeForPath(filePath);
+  const mimeType = imageMimeTypeForPath(filePath);
   if (!mimeType) {
     throw new Error(`${path.basename(filePath)} is not a supported image type.`);
   }
@@ -73,7 +78,7 @@ export async function readContextFileAttachment(workspaceRoot: string, filePath:
     path: relativeToWorkspace(workspaceRoot, target),
     name: path.basename(target),
     size: fileStat.size,
-    lineCount: countLines(content),
+    lineCount: countAttachmentLines(content),
     content,
     truncated
   };
@@ -83,7 +88,7 @@ export function isAllowedBrowserScreenshotPath(filePath: string) {
   if (!path.basename(filePath).startsWith("arivu-browser-") && !path.basename(filePath).startsWith("annotation-")) {
     return false;
   }
-  if (!mimeTypeForPath(filePath)) {
+  if (!imageMimeTypeForPath(filePath)) {
     return false;
   }
 
@@ -101,28 +106,7 @@ export function formatBytes(bytes: number) {
   return `${Math.round(bytes / 1024 / 1024)} MB`;
 }
 
-function mimeTypeForPath(filePath: string): string | undefined {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".png") {
-    return "image/png";
-  }
-  if (ext === ".jpg" || ext === ".jpeg") {
-    return "image/jpeg";
-  }
-  if (ext === ".webp") {
-    return "image/webp";
-  }
-  if (ext === ".gif") {
-    return "image/gif";
-  }
-  return undefined;
-}
-
 function isInsideDirectory(parent: string, child: string) {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
   return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
-}
-
-function countLines(text: string) {
-  return text.length === 0 ? 0 : text.split(/\r\n|\r|\n/).length;
 }

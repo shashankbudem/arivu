@@ -1,10 +1,13 @@
 import { access, mkdir } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { execa } from "execa";
 import { appDataDir } from "../config.js";
 import type {
   AgentTaskRunVerification,
+  AgentTaskRun,
   AgentTaskRunWorktree,
   AgentTaskRunWorktreeConflict,
   AgentTaskRunWorktreeDiff,
@@ -16,6 +19,7 @@ import type {
   AgentTaskRunWorktreePullRequestReview,
   AgentTaskRunWorktreePullRequestReviewNotification
 } from "./types.js";
+import { upsertTaskRunCommandArtifact } from "./taskRuns.js";
 
 export const DEFAULT_TASK_WORKTREE_PATCH_PREVIEW_BYTES = 80_000;
 const MAX_PULL_REQUEST_FEEDBACK_ITEMS = 5;
@@ -122,6 +126,91 @@ export async function createTaskWorktree(options: CreateTaskWorktreeOptions): Pr
   };
 }
 
+export async function fetchTaskWorktreePullRequestCheckLogs(taskRun: AgentTaskRun, worktree: AgentTaskRunWorktree) {
+  const review = worktree.pullRequest?.review;
+  if (!worktree.pullRequest?.url || !review?.checkItems?.length) throw new Error("Refresh a created PR before fetching check evidence.");
+  const items = review.checkItems.filter((item) => item.logCommand && ["failed", "cancelled", "unknown"].includes(item.bucket));
+  if (!items.length) throw new Error("No failed, cancelled, or unknown PR check evidence commands are available.");
+  const cwd = await resolveTaskWorktreePath(worktree);
+  for (const item of items) {
+    const parsed = parseCheckLogCommand(item.logCommand!);
+    const id = `pr-check:${safeSegment(item.name)}:${parsed.source === "gh" ? `${safeSegment(parsed.runId)}${parsed.jobId ? `:${safeSegment(parsed.jobId)}` : ""}` : shortHash(parsed.url)}`;
+    const startedAt = Date.now();
+    const now = new Date().toISOString();
+    try {
+      const result = await execa(parsed.file, parsed.args, { cwd, reject: false });
+      const artifact = upsertTaskRunCommandArtifact(taskRun, {
+        id,
+        title: `PR check log: ${item.name}`,
+        command: item.logCommand!,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        durationMs: Date.now() - startedAt,
+        workingDirectory: cwd,
+        executionProfile: "host",
+        executionIsolation: "host",
+        workspaceRoot: cwd,
+        now
+      });
+      item.logArtifactId = artifact.id;
+      item.logFetchedAt = now;
+      item.logError =
+        result.exitCode === 0 ? undefined : truncateCheckText(result.stderr || result.stdout || `Exit code ${result.exitCode}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const artifact = upsertTaskRunCommandArtifact(taskRun, {
+        id,
+        title: `PR check log: ${item.name}`,
+        command: item.logCommand!,
+        stderr: message,
+        exitCode: 1,
+        durationMs: Date.now() - startedAt,
+        workingDirectory: cwd,
+        executionProfile: "host",
+        executionIsolation: "host",
+        workspaceRoot: cwd,
+        now
+      });
+      item.logArtifactId = artifact.id;
+      item.logFetchedAt = now;
+      item.logError = truncateCheckText(message);
+    }
+  }
+}
+
+function parseCheckLogCommand(command: string) {
+  const gh = /^gh run view '([0-9]+)' --repo '([^']+)'(?: --job '([0-9]+)')? (--log(?:-failed)?)$/.exec(command);
+  if (gh)
+    return {
+      source: "gh" as const,
+      file: "gh",
+      runId: gh[1]!,
+      jobId: gh[3]!,
+      args: ["run", "view", gh[1]!, "--repo", gh[2]!, ...(gh[3] ? ["--job", gh[3]] : []), gh[4]!]
+    };
+  const curl = /^curl -L --max-time 30 --silent --show-error '(https?:\/\/[^']+)'$/.exec(command);
+  if (curl)
+    return { source: "curl" as const, file: "curl", url: curl[1]!, args: ["-L", "--max-time", "30", "--silent", "--show-error", curl[1]!] };
+  throw new Error("Unsupported PR check evidence command.");
+}
+function safeSegment(value: string) {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "check"
+  );
+}
+function shortHash(value: string) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+function truncateCheckText(value: string) {
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length <= 240 ? text : `${text.slice(0, 237).trimEnd()}...`;
+}
+
 export function taskWorktreeInstruction(worktree: PreparedTaskWorktree) {
   return [
     "Task worktree mode is active for this request.",
@@ -130,6 +219,19 @@ export function taskWorktreeInstruction(worktree: PreparedTaskWorktree) {
     `The task branch is ${worktree.branch} at base ${worktree.baseRef}.`,
     "Do not assume edits are applied to the original checkout. Summarize the worktree path and branch when you make changes."
   ].join("\n");
+}
+
+export function approvedPlanWorktreeInstruction(taskRunId: string) {
+  return [
+    `This prompt executes approved plan task run ${taskRunId} in a new task worktree. Keep changes scoped to that approved plan.`,
+    "At the end of your final response, include a `Completion notes:` checklist with one bullet per approved plan item.",
+    "Prefix each completion bullet with `Completed:`, `Needs evidence:`, or `Blocked:`.",
+    "When possible, end each bullet with `[evidence: file=path; command=command; report=path; check=name]` using only labels that match actual work or verification evidence."
+  ].join("\n");
+}
+
+export function replayTaskWorktreeInstruction(taskRunId: string) {
+  return `This prompt replays verification evidence from task run ${taskRunId}. Rerun the selected commands against the current task worktree and report the results.`;
 }
 
 export async function summarizeTaskWorktree(
@@ -553,12 +655,38 @@ function assertTaskWorktreeReady(worktree: AgentTaskRunWorktree, worktreesRoot?:
   if (!isPathInside(worktreePath, managedRoot)) {
     throw new Error("Refusing to manage a task worktree outside Arivu app data.");
   }
+  let canonicalManagedRoot: string;
+  let canonicalWorktreePath: string;
+  try {
+    canonicalManagedRoot = realpathSync(managedRoot);
+    canonicalWorktreePath = canonicalPathOrExistingParent(worktreePath);
+  } catch {
+    throw new Error("Refusing to manage a task worktree outside Arivu app data.");
+  }
+  if (!isPathInside(canonicalWorktreePath, canonicalManagedRoot)) {
+    throw new Error("Refusing to manage a task worktree outside Arivu app data.");
+  }
   return {
     originalRoot: path.resolve(worktree.originalRoot),
     path: worktreePath,
     branch: worktree.branch,
     baseRef: worktree.baseRef
   };
+}
+
+function canonicalPathOrExistingParent(target: string) {
+  let candidate = target;
+  const missingSegments: string[] = [];
+  while (true) {
+    try {
+      return path.join(realpathSync(candidate), ...missingSegments.reverse());
+    } catch {
+      const parent = path.dirname(candidate);
+      if (parent === candidate) throw new Error("no existing parent");
+      missingSegments.push(path.basename(candidate));
+      candidate = parent;
+    }
+  }
 }
 
 function assertVerificationAllowsLifecycle(verification: AgentTaskRunVerification | undefined, action: string) {

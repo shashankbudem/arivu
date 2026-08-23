@@ -4,6 +4,7 @@ import {
   findCredentialRequest,
   formatElicitationResponse,
   MAX_ELICITATION_QUESTIONS,
+  validateElicitationResponse,
   type ElicitationRequest
 } from "../src/tools/elicitation.js";
 import { createToolRegistry } from "../src/tools/registry.js";
@@ -122,6 +123,55 @@ describe("formatElicitationResponse", () => {
     const unavailable = JSON.parse(formatElicitationResponse(baseRequest(), { status: "unavailable" }));
     expect(unavailable.status).toBe("unavailable");
     expect(unavailable.note).toMatch(/normal chat message/i);
+  });
+});
+
+describe("validateElicitationResponse", () => {
+  it("uses the same URL acceptance rules as JavaScript URL parsing", () => {
+    const request: ElicitationRequest = { questions: [{ id: "url", type: "url", label: "URL", required: true }] };
+    for (const value of ["https://example.com", "http://[::1]:8080/path", "https:///path", "https://example.com/%zz"]) {
+      expect(validateElicitationResponse(request, { status: "answered", answers: [{ id: "url", value }] })).toBeUndefined();
+    }
+    for (const value of ["https://", "https://example.com:abc", "https://exa%mple.com", "https://[::1"]) {
+      expect(validateElicitationResponse(request, { status: "answered", answers: [{ id: "url", value }] })).toBeTruthy();
+    }
+  });
+
+  it("rejects protocol-bypassed number, choice, and file constraints", () => {
+    const request: ElicitationRequest = {
+      questions: [
+        { id: "count", type: "number", label: "Count", min: 10 },
+        { id: "choice", type: "select", label: "Choice", options: [{ value: "safe" }] },
+        { id: "files", type: "files", label: "Files", minCount: 1 }
+      ]
+    };
+    expect(validateElicitationResponse(request, { status: "answered", answers: [{ id: "count", value: 1 }] })).toMatch(/at least 10/);
+    expect(validateElicitationResponse(request, { status: "answered", answers: [{ id: "choice", value: "injected" }] })).toMatch(
+      /listed option/
+    );
+    expect(validateElicitationResponse(request, { status: "answered", answers: [{ id: "files", value: ["relative.txt"] }] })).toMatch(
+      /existing absolute/
+    );
+    expect(
+      validateElicitationResponse(request, { status: "answered", answers: [{ id: "files", value: ["/definitely/missing"] }] })
+    ).toMatch(/existing absolute/);
+  });
+
+  it("rejects malicious non-string multiselect and file elements without throwing", () => {
+    const choices: ElicitationRequest = {
+      questions: [{ id: "choice", type: "multiselect", label: "Choice", options: [{ value: "safe" }], allowOther: true }]
+    };
+    const files: ElicitationRequest = { questions: [{ id: "files", type: "files", label: "Files" }] };
+    expect(() =>
+      validateElicitationResponse(choices, { status: "answered", answers: [{ id: "choice", value: [1] as any }] })
+    ).not.toThrow();
+    expect(validateElicitationResponse(choices, { status: "answered", answers: [{ id: "choice", value: [1] as any }] })).toMatch(
+      /text options/
+    );
+    expect(() => validateElicitationResponse(files, { status: "answered", answers: [{ id: "files", value: [123] as any }] })).not.toThrow();
+    expect(validateElicitationResponse(files, { status: "answered", answers: [{ id: "files", value: [123] as any }] })).toMatch(
+      /file paths/
+    );
   });
 });
 

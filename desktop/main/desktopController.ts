@@ -3,7 +3,6 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { dialog, shell, type WebContents } from "electron";
-import { execa } from "execa";
 import { Agent } from "../../src/agent/Agent.js";
 import { ChangeCheckpoint, type ChangeCheckpointEntry } from "../../src/tools/changeCheckpoint.js";
 import {
@@ -53,25 +52,26 @@ import {
   finishTaskRun,
   markTaskRunRunning,
   recordTaskRunApproval,
-  recordTaskRunAssistantCompletion,
-  recordTaskRunAssistantPlan,
   recordTaskRunEvent,
+  recordLatestAssistantTaskMetadata as recordLatestAssistantTaskRunMetadata,
   syncTaskRunLoopState,
-  trimTaskRuns,
-  upsertTaskRunCommandArtifact
+  trimTaskRuns
 } from "../../src/agent/taskRuns.js";
 import {
   abortTaskWorktreeConflict,
+  approvedPlanWorktreeInstruction,
   cleanupMergedTaskWorktree,
   continueTaskWorktreeConflict,
   createTaskWorktreePullRequest,
   createTaskWorktree,
   discardTaskWorktree,
+  fetchTaskWorktreePullRequestCheckLogs,
   mergeTaskWorktree,
   prepareTaskWorktreePullRequest,
   previewTaskWorktreePatch,
   refreshTaskWorktreePullRequest,
   resolveTaskWorktreePath,
+  replayTaskWorktreeInstruction,
   summarizeTaskWorktree,
   syncTaskWorktreeWithOriginal,
   taskWorktreeInstruction
@@ -100,8 +100,7 @@ import {
   saveConfig,
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot,
-  type AppConfig,
-  type McpToolProposal
+  type AppConfig
 } from "../../src/config.js";
 import { resolveBrowserTaskContextWindowTokens, resolveBrowserTaskModel } from "../../src/agent/browserTaskModel.js";
 import { ModelCatalogStore } from "../../src/models/ModelCatalogStore.js";
@@ -124,6 +123,7 @@ import { createToolRegistry } from "../../src/tools/registry.js";
 import type { RuntimeMcpServerProposalInput, RuntimeMcpServerProposalResult } from "../../src/tools/runtimeControl.js";
 import type { BrowserState, BrowserTaskModelConfig } from "../../src/tools/browserControl.js";
 import { detectWorkspace, type WorkspaceInfo } from "../../src/workspace.js";
+import { proposeMcpServer as persistMcpServerProposal } from "../../src/harness/mcpProposals.js";
 import type { DesktopBrowserController } from "./browserController.js";
 import {
   applyConfigPatch,
@@ -131,7 +131,6 @@ import {
   mergeBrowserTaskModelPatch,
   mergeBrowserVisualGroundingPatch,
   normalizeDisabledTools,
-  normalizeMcpServerProposalInput,
   normalizeProviders,
   normalizeWebSearchProviders,
   preserveProviderKeys,
@@ -174,14 +173,7 @@ import {
 import type { DesktopInteractionBroker } from "./desktopInteractionBroker.js";
 import { readWorkspacePolicyBundleFromRoot, type WorkspacePolicyBundleResult } from "./workspacePolicyFile.js";
 import { RuntimeControlService } from "./runtimeControlService.js";
-import {
-  parseSavedPullRequestCheckLogCommand,
-  safeArtifactSegment,
-  shortHash,
-  taskRunArtifactIncludesEvidencePath,
-  taskRunExecutionRoot,
-  truncateInlineText
-} from "./taskRunEvidence.js";
+import { taskRunArtifactIncludesEvidencePath, taskRunExecutionRoot } from "./taskRunEvidence.js";
 import { toolParameterNames, toolStatus, type ToolSummary } from "./toolPresentation.js";
 import { normalizeScaffoldOptions, scaffoldWorkspace, type WorkspaceScaffoldOptions } from "./workspaceScaffold.js";
 
@@ -1053,73 +1045,7 @@ export class DesktopController {
   }
 
   private async fetchPullRequestCheckLogs(taskRun: AgentTaskRun, worktree: NonNullable<AgentTaskRun["worktree"]>) {
-    const pullRequest = worktree.pullRequest;
-    const review = pullRequest?.review;
-    if (!pullRequest?.url || !review?.checkItems?.length) {
-      throw new Error("Refresh a created PR before fetching check evidence.");
-    }
-    const actionable = review.checkItems.filter(
-      (item) => item.logCommand && (item.bucket === "failed" || item.bucket === "cancelled" || item.bucket === "unknown")
-    );
-    if (actionable.length === 0) {
-      throw new Error("No failed, cancelled, or unknown PR check evidence commands are available.");
-    }
-
-    const cwd = await resolveTaskWorktreePath(worktree);
-    for (const item of actionable) {
-      const logCommand = item.logCommand;
-      if (!logCommand) {
-        continue;
-      }
-      const parsed = parseSavedPullRequestCheckLogCommand(logCommand);
-      const artifactInputId =
-        parsed.source === "github_actions"
-          ? `pr-check-log:${safeArtifactSegment(item.name)}:${safeArtifactSegment(parsed.runId)}${
-              parsed.jobId ? `:${safeArtifactSegment(parsed.jobId)}` : ""
-            }`
-          : `pr-check-details:${safeArtifactSegment(item.name)}:${shortHash(parsed.url)}`;
-      const startedAt = Date.now();
-      const now = new Date().toISOString();
-      try {
-        const result = await execa(parsed.file, parsed.args, { cwd, reject: false });
-        const artifact = upsertTaskRunCommandArtifact(taskRun, {
-          id: artifactInputId,
-          title: parsed.source === "github_actions" ? `PR check log: ${item.name}` : `PR check details: ${item.name}`,
-          command: logCommand,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode,
-          durationMs: Date.now() - startedAt,
-          workingDirectory: cwd,
-          executionProfile: "host",
-          executionIsolation: "host",
-          workspaceRoot: cwd,
-          now
-        });
-        item.logArtifactId = artifact.id;
-        item.logFetchedAt = now;
-        item.logError =
-          result.exitCode === 0 ? undefined : truncateInlineText(result.stderr || result.stdout || `Exit code ${result.exitCode}`, 240);
-      } catch (error) {
-        const message = formatError(error);
-        const artifact = upsertTaskRunCommandArtifact(taskRun, {
-          id: artifactInputId,
-          title: parsed.source === "github_actions" ? `PR check log: ${item.name}` : `PR check details: ${item.name}`,
-          command: logCommand,
-          stderr: message,
-          exitCode: 1,
-          durationMs: Date.now() - startedAt,
-          workingDirectory: cwd,
-          executionProfile: "host",
-          executionIsolation: "host",
-          workspaceRoot: cwd,
-          now
-        });
-        item.logArtifactId = artifact.id;
-        item.logFetchedAt = now;
-        item.logError = truncateInlineText(message, 240);
-      }
-    }
+    await fetchTaskWorktreePullRequestCheckLogs(taskRun, worktree);
   }
 
   async taskRunPlanAction(input: TaskRunPlanActionInput = {}) {
@@ -1446,39 +1372,7 @@ export class DesktopController {
   }
 
   async proposeMcpServer(input: RuntimeMcpServerProposalInput): Promise<RuntimeMcpServerProposalResult> {
-    const saved = await loadConfig({ includeEnv: false });
-    const normalized = normalizeMcpServerProposalInput(input);
-    const existing = (saved.toolProposals ?? []).find(
-      (proposal) =>
-        proposal.name.toLowerCase() === normalized.name.toLowerCase() &&
-        proposal.command === normalized.command &&
-        JSON.stringify(proposal.args) === JSON.stringify(normalized.args)
-    );
-    if (existing) {
-      return {
-        id: existing.id,
-        name: existing.name,
-        status: "pending_review",
-        reviewLocation: "Settings > Integrations"
-      };
-    }
-
-    const proposal: McpToolProposal = {
-      id: randomUUID(),
-      kind: "mcp_server",
-      ...normalized,
-      createdAt: new Date().toISOString()
-    };
-    await saveConfig({
-      ...saved,
-      toolProposals: [proposal, ...(saved.toolProposals ?? [])].slice(0, 20)
-    });
-    return {
-      id: proposal.id,
-      name: proposal.name,
-      status: "pending_review",
-      reviewLocation: "Settings > Integrations"
-    };
+    return persistMcpServerProposal(input);
   }
 
   async sendPrompt(prompt: PromptPayload, eventTarget?: WebContents) {
@@ -1678,20 +1572,11 @@ export class DesktopController {
         role: "system",
         content: [
           taskWorktreeInstruction(worktree),
-          plannedFromRun
-            ? [
-                `This prompt executes approved plan task run ${plannedFromRun.id} in a new task worktree. Keep changes scoped to that approved plan.`,
-                "At the end of your final response, include a `Completion notes:` checklist with one bullet per approved plan item.",
-                "Prefix each completion bullet with `Completed:`, `Needs evidence:`, or `Blocked:`.",
-                "When possible, end each bullet with `[evidence: file=path; command=command; report=path; check=name]` using only labels that match actual work or verification evidence."
-              ].join("\n")
-            : undefined,
+          plannedFromRun ? approvedPlanWorktreeInstruction(plannedFromRun.id) : undefined,
           continuedRun
             ? `This prompt continues existing task run ${continuedRun.id}. Keep the repair in the same task worktree.`
             : undefined,
-          replayOfTaskRunId
-            ? `This prompt replays verification evidence from task run ${replayOfTaskRunId}. Rerun the selected commands against the current task worktree and report the results.`
-            : undefined
+          replayOfTaskRunId ? replayTaskWorktreeInstruction(replayOfTaskRunId) : undefined
         ]
           .filter((line): line is string => Boolean(line))
           .join("\n")
@@ -2198,31 +2083,15 @@ export class DesktopController {
     if (!taskRun) {
       return;
     }
-    for (let index = session.messages.length - 1; index > taskRun.userMessageIndex; index -= 1) {
-      const message = session.messages[index];
-      if (message?.role !== "assistant") {
-        continue;
-      }
-      if (taskRun.plan?.sourceMessageIndex === index && taskRun.completion?.sourceMessageIndex === index) {
-        return;
-      }
-      const now = new Date().toISOString();
-      const changedPlan =
-        taskRun.plan?.sourceMessageIndex === index ? false : recordTaskRunAssistantPlan(taskRun, message.content, now, index);
-      const changedCompletion =
-        taskRun.completion?.sourceMessageIndex === index ? false : recordTaskRunAssistantCompletion(taskRun, message.content, now, index);
-      const changed = changedPlan || changedCompletion;
-      if (!changed) {
-        continue;
-      }
-      session.updatedAt = taskRun.updatedAt;
-      if (this.session?.id === session.id) {
-        this.session = session;
-      }
-      await this.store.save(session);
-      await this.sendSessionLifecycleEvent("updated", session);
+    if (!recordLatestAssistantTaskRunMetadata(taskRun, session.messages)) {
       return;
     }
+    session.updatedAt = taskRun.updatedAt;
+    if (this.session?.id === session.id) {
+      this.session = session;
+    }
+    await this.store.save(session);
+    await this.sendSessionLifecycleEvent("updated", session);
   }
 
   private findTaskRun(session: AgentSession, taskRunId: string | undefined): AgentTaskRun | undefined {

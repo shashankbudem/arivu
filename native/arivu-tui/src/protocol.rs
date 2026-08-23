@@ -112,6 +112,41 @@ pub struct ModelChoice {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ElicitationOption {
+    pub value: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ElicitationQuestion {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub options: Vec<ElicitationOption>,
+    #[serde(default)]
+    pub allow_other: bool,
+    #[serde(default)]
+    pub placeholder: String,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub min_count: Option<usize>,
+    #[serde(default)]
+    pub max_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
     Init {
@@ -191,6 +226,14 @@ pub enum ServerEvent {
         #[serde(default)]
         risky: bool,
     },
+    Elicitation {
+        id: String,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        reason: String,
+        questions: Vec<ElicitationQuestion>,
+    },
     Modal {
         title: String,
         body: String,
@@ -230,13 +273,39 @@ fn default_approval_title() -> String {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientEvent {
-    Hello { token: String },
-    Submit { value: String },
+    Hello {
+        token: String,
+    },
+    Submit {
+        value: String,
+    },
     Stop,
     Quit,
-    ApprovalResponse { id: String, approved: bool },
-    ResumeSession { id: String },
-    SelectModel { id: String },
+    ApprovalResponse {
+        id: String,
+        approved: bool,
+    },
+    ElicitationResponse {
+        id: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<ElicitationAnswer>>,
+    },
+    ResumeSession {
+        id: String,
+    },
+    SelectModel {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ElicitationAnswer {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<bool>,
 }
 
 #[cfg(test)]

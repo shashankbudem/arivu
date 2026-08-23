@@ -1,5 +1,4 @@
 import {
-  loadConfig,
   mergeRedactedMcpServers,
   redactMcpServers,
   type AppConfig,
@@ -9,7 +8,7 @@ import {
   type McpToolProposal,
   type WebSearchProviderProfile
 } from "../../src/config.js";
-import type { RuntimeMcpServerProposalInput } from "../../src/tools/runtimeControl.js";
+export { createDisabledToolsReader, normalizeDisabledTools, normalizeMcpServerProposalInput } from "../../src/harness/mcpProposals.js";
 
 export type PublicBrowserTaskModelProfile = Omit<BrowserTaskModelConfigProfile, "apiKey" | "fallbackModels"> & {
   apiKeyPresent: boolean;
@@ -160,53 +159,6 @@ export function mergeBrowserVisualGroundingPatch(
     ...saved,
     providerId,
     model
-  };
-}
-
-export function normalizeDisabledTools(names: string[]): string[] {
-  return [...new Set(names.map((name) => name.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
-}
-
-export function normalizeMcpServerProposalInput(input: RuntimeMcpServerProposalInput): Omit<McpToolProposal, "id" | "kind" | "createdAt"> {
-  const name = input.name.trim().replace(/\s+/g, " ");
-  const command = input.command.trim();
-  const reason = input.reason.trim();
-  if (!name || name.length > 80) {
-    throw new Error("MCP proposal name must be between 1 and 80 characters.");
-  }
-  if (!command || command.length > 500) {
-    throw new Error("MCP proposal command must be between 1 and 500 characters.");
-  }
-  if (!reason || reason.length > 1_000) {
-    throw new Error("MCP proposal reason must be between 1 and 1000 characters.");
-  }
-  const envKeys = [...new Set(input.envKeys.map((key) => key.trim()).filter(Boolean))];
-  if (envKeys.some((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))) {
-    throw new Error("MCP proposal environment keys must be variable names, not secret values.");
-  }
-  return {
-    name,
-    description: input.description.trim().slice(0, 500),
-    command,
-    args: input.args.slice(0, 40).map((arg) => arg.slice(0, 500)),
-    envKeys: envKeys.slice(0, 40),
-    reason
-  };
-}
-
-/**
- * Reads disabled tools fresh so settings changes made during a run apply on its next
- * model step. A failed read keeps the last known list rather than failing open.
- */
-export function createDisabledToolsReader(initial: string[]): () => Promise<string[]> {
-  let lastKnown = initial;
-  return async () => {
-    try {
-      lastKnown = (await loadConfig({ includeEnv: false })).disabledTools ?? [];
-    } catch {
-      // Keep lastKnown.
-    }
-    return lastKnown;
   };
 }
 

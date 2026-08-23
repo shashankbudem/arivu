@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import path from "node:path";
 import { checkbox, input, select } from "@inquirer/prompts";
 import { z } from "zod";
 
@@ -164,6 +165,61 @@ export function hasElicitationValue(value: ElicitationAnswer["value"]): boolean 
     return value.length > 0;
   }
   return Number.isFinite(value);
+}
+
+/** Validates frontend replies before they are returned to the agent. */
+export function validateElicitationResponse(request: ElicitationRequest, response: ElicitationResponse): string | undefined {
+  if (response.status !== "answered") {
+    return undefined;
+  }
+  const responseAnswers = response.answers ?? [];
+  const answers = new Map(responseAnswers.map((answer) => [answer.id, answer]));
+  if (answers.size !== responseAnswers.length) return "The response contains duplicate answers.";
+  for (const answer of answers.values()) {
+    if (!request.questions.some((question) => question.id === answer.id)) {
+      return "The response contains an unknown question.";
+    }
+  }
+  for (const question of request.questions) {
+    const answer = answers.get(question.id);
+    if (!answer || answer.skipped || !hasElicitationValue(answer.value)) {
+      if (question.required) return `An answer is required for ${question.label}.`;
+      continue;
+    }
+    if (question.type === "url") {
+      if (typeof answer.value !== "string") return `Enter a valid URL for ${question.label}.`;
+      const result = validateUrlInput(answer.value, question);
+      if (result !== true) return result;
+    } else if (question.type === "number") {
+      if (typeof answer.value !== "number" || !Number.isFinite(answer.value)) return `Enter a number for ${question.label}.`;
+      if (question.min !== undefined && answer.value < question.min) return `Must be at least ${question.min}.`;
+      if (question.max !== undefined && answer.value > question.max) return `Must be at most ${question.max}.`;
+    } else if (question.type === "select") {
+      if (typeof answer.value !== "string") return `Choose an option for ${question.label}.`;
+      if (!question.options?.some((option) => option.value === answer.value) && !question.allowOther)
+        return `Choose a listed option for ${question.label}.`;
+    } else if (question.type === "multiselect") {
+      if (!Array.isArray(answer.value)) return `Choose one or more options for ${question.label}.`;
+      if (answer.value.some((value) => typeof value !== "string")) return `Choose text options for ${question.label}.`;
+      if (answer.value.some((value) => !question.options?.some((option) => option.value === value)) && !question.allowOther)
+        return `Choose only listed options for ${question.label}.`;
+    } else if (question.type === "text") {
+      if (typeof answer.value !== "string" || answer.value.length > MAX_ELICITATION_TEXT_ANSWER_CHARS)
+        return `Enter text for ${question.label}.`;
+    } else if (question.type === "files" || question.type === "images") {
+      if (!Array.isArray(answer.value)) return `Provide file paths for ${question.label}.`;
+      if (answer.value.some((filePath) => typeof filePath !== "string")) return `Provide file paths for ${question.label}.`;
+      if (answer.value.length < (question.minCount ?? 0) || answer.value.length > (question.maxCount ?? MAX_ELICITATION_FILE_COUNT))
+        return `Provide the requested number of files for ${question.label}.`;
+      if (answer.value.some((filePath) => !isAbsoluteUserPath(filePath) || !existsSync(filePath)))
+        return `Provide existing absolute paths for ${question.label}.`;
+    }
+  }
+  return undefined;
+}
+
+export function isAbsoluteUserPath(value: string) {
+  return path.isAbsolute(value) || path.win32.isAbsolute(value);
 }
 
 /**

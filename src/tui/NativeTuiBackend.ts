@@ -1,8 +1,19 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Agent } from "../agent/Agent.js";
 import { BrowserUseCliController } from "../browser/browserUseCliController.js";
-import { chatContentToText } from "../agent/content.js";
+import { chatContentToText, textPart, type ChatContent, type ChatContentPart } from "../agent/content.js";
+import {
+  countAttachmentLines,
+  imageMimeTypeForPath,
+  MAX_CONTEXT_FILE_ATTACHMENTS,
+  MAX_CONTEXT_FILE_BYTES,
+  MAX_CONTEXT_FILE_CHARS,
+  MAX_IMAGE_ATTACHMENTS,
+  MAX_IMAGE_BYTES
+} from "../agent/attachmentPolicy.js";
+import { promptTextWithFileContext, type PromptFileContext } from "../agent/fileContext.js";
 import {
   COMPACT_RECENT_MESSAGE_COUNT,
   applyContextCompactionCheckpoint,
@@ -10,14 +21,86 @@ import {
   contextMessagesForSession
 } from "../agent/contextCompaction.js";
 import { OpenAICompatibleChatClient } from "../agent/OpenAICompatibleChatClient.js";
-import { AgentRunAbortedError, type AgentRunEvent, type AgentSession, type ApprovalPromptRequest, type ChatUsage } from "../agent/types.js";
 import {
+  AgentRunAbortedError,
+  type AgentRunEvent,
+  type AgentSession,
+  type AgentTaskRun,
+  type AgentTaskRunApprovalEvent,
+  type ApprovalPromptRequest,
+  type ChatUsage
+} from "../agent/types.js";
+import { configForModelSelection, applyModelSelectionToSession } from "../harness/sessionRuntime.js";
+import { RuntimeControlService } from "../harness/runtimeControlService.js";
+import {
+  createDisabledToolsReader,
+  normalizeDisabledTools,
+  proposeMcpServer,
+  reviewMcpProposal,
+  safeMcpProposalDisplay
+} from "../harness/mcpProposals.js";
+import {
+  beginAgentLoopIteration,
+  continuationAgentLoopInstruction,
+  createAgentLoopState,
+  finishAgentLoop,
+  finishAgentLoopIteration,
+  initialAgentLoopInstruction,
+  planningApprovalInstruction,
+  stripAgentLoopDecision
+} from "../harness/agentLoop.js";
+import {
+  abortTaskWorktreeConflict,
+  cleanupMergedTaskWorktree,
+  createTaskWorktree,
+  discardTaskWorktree,
+  mergeTaskWorktree,
+  previewTaskWorktreePatch,
+  summarizeTaskWorktree,
+  syncTaskWorktreeWithOriginal,
+  continueTaskWorktreeConflict,
+  approvedPlanWorktreeInstruction,
+  replayTaskWorktreeInstruction,
+  taskWorktreeInstruction,
+  prepareTaskWorktreePullRequest,
+  createTaskWorktreePullRequest,
+  refreshTaskWorktreePullRequest,
+  fetchTaskWorktreePullRequestCheckLogs,
+  resolveTaskWorktreePath
+} from "../agent/taskWorktree.js";
+import { resolveModelForPrompt } from "../agent/modelRouter.js";
+import { buildTaskRunReportRemediationInstruction } from "../agent/reportRemediation.js";
+import {
+  enqueuePrompt,
+  markPromptForSteering,
+  restoreQueuedPrompt,
+  takeNextQueuedPrompt,
+  takeSteeringMessages
+} from "../agent/queuedPrompts.js";
+import {
+  createAgentTaskRun,
+  finishTaskRun,
+  markTaskRunRunning,
+  recordTaskRunApproval,
+  recordTaskRunEvent,
+  recordLatestAssistantTaskMetadata,
+  syncTaskRunLoopState,
+  trimTaskRuns
+} from "../agent/taskRuns.js";
+import { ChangeCheckpoint, type ChangeCheckpointEntry } from "../tools/changeCheckpoint.js";
+import { createToolRegistry } from "../tools/registry.js";
+import { validateElicitationResponse, type ElicitationRequest, type ElicitationResponse } from "../tools/elicitation.js";
+import {
+  loadConfig,
+  saveConfig,
   normalizeCapabilityBaseUrl,
+  appDataDir,
   resolveModelListEndpoint,
   resolveWebSearchProvider,
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot,
-  type AppConfig
+  type AppConfig,
+  type McpToolProposal
 } from "../config.js";
 import { ModelCatalogStore } from "../models/ModelCatalogStore.js";
 import { resolveContextWindowTokens } from "../models/contextResolver.js";
@@ -44,7 +127,13 @@ import {
 } from "./commands.js";
 import { NATIVE_TUI_COMMANDS, NATIVE_TUI_HELP } from "./nativeCommands.js";
 import { NativeTuiProcess } from "./nativeLauncher.js";
-import type { NativeActivityItem, NativeClientEvent, NativeInitData, NativeServerEvent } from "./nativeProtocol.js";
+import type {
+  NativeActivityItem,
+  NativeClientEvent,
+  NativeElicitationQuestion,
+  NativeInitData,
+  NativeServerEvent
+} from "./nativeProtocol.js";
 import {
   formatShellCommandDisplay,
   parseShellEscape,
@@ -82,7 +171,18 @@ type ModelOperation = {
   snapshot: { model: string; baseUrl: string; sessionId?: string };
 };
 
-type QueuedInput = { kind: "prompt"; value: string } | { kind: "shell"; command: string };
+type QueuedInput = { kind: "prompt"; content: ChatContent; queuedPromptId?: string } | { kind: "shell"; command: string };
+
+const NATIVE_PLAN_TOOL_NAMES = [
+  "list",
+  "read",
+  "search",
+  "git_status",
+  "current_datetime",
+  "current_location",
+  "list_skills",
+  "read_skill"
+];
 
 export class NativeTuiBackend {
   private config!: AppConfig;
@@ -100,16 +200,33 @@ export class NativeTuiBackend {
   private closing = false;
   private runAbortController?: AbortController;
   private readonly promptQueue: QueuedInput[] = [];
+  private readonly pendingAttachments: ChatContentPart[] = [];
+  private readonly pendingFileContexts: PromptFileContext[] = [];
+  private nextPromptPlanMode = false;
+  private nextPromptApprovedPlanTaskRunId?: string;
+  private nextPromptLoopMaxIterations?: number;
+  private nextPromptWorktreeMode = false;
+  private nextPromptWorktreeContinuation?: { taskRunId: string; replayOfTaskRunId?: string };
   private readonly approvalResolvers = new Map<string, (approved: boolean) => void>();
+  private readonly elicitationResolvers = new Map<string, (response: ElicitationResponse) => void>();
+  private readonly elicitationRequests = new Map<string, ElicitationRequest>();
   private readonly activityInputs = new Map<string, string>();
   private activeBrowserToolId?: string;
   private queuedDispatchGeneration = 0;
   private pendingQueuedInput?: QueuedInput;
+  private pendingQueueCancellation?: Promise<void>;
+  private deferQueuedPromptHandoff = false;
+  private queueStartupBlocked = false;
   private modelOperationGeneration = 0;
   private modelOperation?: ModelOperation;
   private browserController?: BrowserUseCliController;
   private browserSessionKey = `tui-${randomUUID()}`;
   private shellCommandRunner: ShellCommandRunner = runShellCommand;
+  private activeTaskRunId?: string;
+  private activeCheckpoint?: ChangeCheckpoint;
+  private activeExecutionCwd?: string;
+  private activeRuntimeControl?: RuntimeControlService;
+  private readonly sessionDisabledTools = new Map<string, Set<string>>();
 
   constructor(private readonly options: NativeTuiBackendOptions) {}
 
@@ -127,6 +244,7 @@ export class NativeTuiBackend {
     this.workspace = await detectWorkspace(this.cwd);
     this.modelCatalog = await this.catalogStore.load();
     this.agent = this.createAgent(this.currentSession);
+    this.restoreDurablePromptQueue();
 
     this.transport = new NativeTuiProcess({
       cwd: this.cwd,
@@ -137,44 +255,61 @@ export class NativeTuiBackend {
     try {
       await this.transport.start();
       this.send({ type: "init", data: this.buildInitData() });
+      if (this.promptQueue.length > 0) {
+        this.finishForegroundRun();
+      }
       await this.transport.wait();
     } finally {
       this.closing = true;
       this.stopRun();
       this.resolveAllApprovals(false);
+      this.resolveAllElicitations();
+      await this.pendingQueueCancellation?.catch(() => undefined);
       this.transport.close();
     }
   }
 
-  private createAgent(session?: AgentSession) {
-    const scopePolicyRules = workspaceScopeRulesForRoot(this.config, this.workspace.root);
+  private createAgent(session?: AgentSession, taskRunId?: string, checkpoint?: ChangeCheckpoint, config = this.config, cwd = this.cwd) {
+    const scopePolicyRules = workspaceScopeRulesForRoot(config, this.workspace.root);
+    const sessionDisabledTools = session ? (this.sessionDisabledTools.get(session.id) ?? new Set<string>()) : new Set<string>();
+    if (session) this.sessionDisabledTools.set(session.id, sessionDisabledTools);
+    const runtimeControl = new RuntimeControlService({
+      configuredBrowserTaskModel: { baseUrl: config.baseUrl, model: config.model, apiKey: config.apiKey },
+      readSavedDisabledTools: createDisabledToolsReader(config.disabledTools ?? []),
+      sessionDisabledTools,
+      onSessionBrowserModelChange: () => undefined,
+      onProposeMcpServer: proposeMcpServer
+    });
+    this.activeRuntimeControl = runtimeControl;
     return new Agent({
-      client: new OpenAICompatibleChatClient(this.config),
+      client: new OpenAICompatibleChatClient(config),
       approvals: new ApprovalManager(
-        this.config.trustMode,
+        config.trustMode,
         (message, request) => this.confirm(message, request),
-        workspacePolicyOverridesForRoot(this.config, this.workspace.root),
-        undefined,
+        workspacePolicyOverridesForRoot(config, this.workspace.root),
+        taskRunId && session ? (event) => this.recordApprovalEvent(session, taskRunId, event) : undefined,
         scopePolicyRules,
         this.workspace.root
       ),
-      cwd: this.cwd,
-      model: this.config.model,
-      baseUrl: this.config.baseUrl,
-      webSearchProvider: resolveWebSearchProvider(this.config),
-      mcpServers: this.config.mcpServers,
+      cwd,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      webSearchProvider: resolveWebSearchProvider(config),
+      mcpServers: config.mcpServers,
       scopePolicyRules,
       browser: this.browserControllerForSession(),
       manualBrowserTools: true,
-      customInstructions: this.config.customSystemPrompt,
-      minStepIntervalMs: this.config.chatModelRequestDelayMs,
-      contextWindowTokens: resolveContextWindowTokens(
-        this.config,
-        { model: this.config.model, baseUrl: this.config.baseUrl },
-        this.modelCatalog
-      ),
+      runtimeControl,
+      customInstructions: config.customSystemPrompt,
+      minStepIntervalMs: config.chatModelRequestDelayMs,
+      // Native TUI has no browser_task supervisor. It deliberately retains the direct
+      // Browser Use primitives while sharing the run evidence/checkpoint machinery.
+      directEditReview: true,
+      elicit: (request) => this.elicit(request),
+      checkpoint,
+      contextWindowTokens: resolveContextWindowTokens(config, { model: config.model, baseUrl: config.baseUrl }, this.modelCatalog),
       onContextWindowObserved: (tokens) =>
-        recordContextFromRuntime(this.catalogStore, { baseUrl: this.config.baseUrl, model: this.config.model }, tokens),
+        recordContextFromRuntime(this.catalogStore, { baseUrl: config.baseUrl, model: config.model }, tokens),
       session
     });
   }
@@ -204,9 +339,36 @@ export class NativeTuiBackend {
         this.exit();
         break;
       case "approval_response":
+        if (typeof event.id !== "string" || typeof event.approved !== "boolean") {
+          this.setStatus("The approval response is invalid.", true);
+          break;
+        }
         this.approvalResolvers.get(event.id)?.(event.approved);
         this.approvalResolvers.delete(event.id);
         break;
+      case "elicitation_response": {
+        if (typeof event.id !== "string" || (event.status !== "answered" && event.status !== "declined")) {
+          this.setStatus("The question response is invalid.", true);
+          break;
+        }
+        const request = this.elicitationRequests.get(event.id);
+        let validationError = "The question request is no longer active.";
+        try {
+          validationError = request
+            ? (validateElicitationResponse(request, { status: event.status, answers: event.answers }) ?? "")
+            : validationError;
+        } catch {
+          validationError = "The question response is invalid.";
+        }
+        if (validationError) {
+          this.setStatus(validationError, true);
+          break;
+        }
+        this.elicitationResolvers.get(event.id)?.({ status: event.status, answers: event.answers });
+        this.elicitationResolvers.delete(event.id);
+        this.elicitationRequests.delete(event.id);
+        break;
+      }
       case "resume_session":
         if (this.busy) {
           this.setStatus("Stop the active turn before switching sessions");
@@ -233,6 +395,7 @@ export class NativeTuiBackend {
     this.cancelModelOperation();
     this.stopRun();
     this.resolveAllApprovals(false);
+    this.resolveAllElicitations();
   }
 
   private async submit(rawValue: string) {
@@ -261,8 +424,8 @@ export class NativeTuiBackend {
       // FIFO behavior as a prompt sent while a turn is active.
       this.cancelModelOperation();
       const input: QueuedInput = { kind: "shell", command: shellEscape.command };
-      if (this.busy) {
-        this.queueInput(input);
+      if (this.busy || this.hasQueuedPromptBacklog()) {
+        await this.queueInput(input);
       } else {
         this.runInBackground(this.runQueuedInput(input), "Unable to run command");
       }
@@ -277,20 +440,32 @@ export class NativeTuiBackend {
     // surface a picker over a turn that has already started.
     this.cancelModelOperation();
 
-    const input: QueuedInput = { kind: "prompt", value };
-    if (this.busy) {
-      this.queueInput(input);
+    const content = this.composePromptContent(value);
+    const input: QueuedInput = { kind: "prompt", content };
+    if (this.busy || this.hasQueuedPromptBacklog()) {
+      await this.queueInput(input);
+      this.pendingAttachments.length = 0;
+      this.pendingFileContexts.length = 0;
     } else {
       this.runInBackground(this.runQueuedInput(input), "Unable to run prompt");
+      this.pendingAttachments.length = 0;
+      this.pendingFileContexts.length = 0;
     }
   }
 
-  private queueInput(input: QueuedInput) {
+  private async queueInput(input: QueuedInput) {
+    if (input.kind === "prompt" && this.currentSession) {
+      const id = randomUUID();
+      enqueuePrompt(this.currentSession, { id, content: input.content, state: "queued", createdAt: new Date().toISOString() });
+      input = { ...input, queuedPromptId: id };
+      this.currentSession.updatedAt = new Date().toISOString();
+      await this.store.save(this.currentSession);
+    }
     this.promptQueue.push(input);
     this.send({
       type: "status",
       message: `${this.promptQueue.length} item${this.promptQueue.length === 1 ? "" : "s"} queued`,
-      busy: true,
+      busy: this.busy,
       queue_len: this.promptQueue.length
     });
   }
@@ -303,18 +478,217 @@ export class NativeTuiBackend {
       await this.runShellEscape(input.command);
       return;
     }
-    await this.runPrompt(input.value);
+    if (input.queuedPromptId && this.currentSession) {
+      const prompt = takeNextQueuedPrompt(this.currentSession);
+      if (!prompt || prompt.id !== input.queuedPromptId) {
+        throw new Error("Queued prompt state no longer matches the foreground queue.");
+      }
+      this.currentSession.updatedAt = new Date().toISOString();
+      await this.store.save(this.currentSession);
+      this.deferQueuedPromptHandoff = true;
+      let taskRunStarted: boolean | undefined;
+      try {
+        taskRunStarted = await this.runPrompt(prompt.content);
+      } finally {
+        this.deferQueuedPromptHandoff = false;
+      }
+      // A routing failure occurs before a task run exists. Restore its durable and in-memory
+      // FIFO ownership before letting the foreground scheduler choose the next item; otherwise
+      // a later prompt can observe the restored durable A while holding in-memory B.
+      if (taskRunStarted === false && this.currentSession) {
+        // A steering prompt has no active run after a preflight failure. Recover
+        // it as ordinary FIFO work, matching restart behavior, rather than
+        // leaving an orphaned steering record that can never be consumed.
+        const recovered = { ...prompt, state: "queued" as const };
+        restoreQueuedPrompt(this.currentSession, recovered);
+        this.currentSession.updatedAt = new Date().toISOString();
+        await this.store.save(this.currentSession);
+        this.promptQueue.unshift({ ...input, queuedPromptId: recovered.id });
+        this.queueStartupBlocked = true;
+        this.busy = false;
+        this.setStatus("Queued startup failed. Queue is paused; use /queue retry after fixing configuration.");
+      }
+      return;
+    }
+    await this.runPrompt(input.content);
   }
 
-  private async runPrompt(value: string) {
-    this.send({ type: "commit", entry: { kind: "user", text: value, time: new Date().toISOString() } });
-    await this.executeAgentTurn((signal) =>
-      this.agent.run(value, {
-        onEvent: (event) => this.handleAgentEvent(event),
-        onUsage: (usage) => this.recordRunUsage(usage),
-        signal
-      })
+  private restoreDurablePromptQueue() {
+    if (!this.currentSession?.queuedPrompts?.length || this.promptQueue.length > 0) {
+      return;
+    }
+    this.promptQueue.push(
+      ...this.currentSession.queuedPrompts
+        // A steering request is only special while an Agent turn is active. Once
+        // that turn is gone, recover it as ordinary FIFO work rather than orphaning
+        // its durable record on restart.
+        .filter((prompt) => prompt.state === "queued" || prompt.state === "steering")
+        .map((prompt) => ({
+          kind: "prompt" as const,
+          content: prompt.content,
+          queuedPromptId: prompt.id
+        }))
     );
+  }
+
+  private hasQueuedPromptBacklog() {
+    return this.promptQueue.length > 0 || Boolean(this.currentSession?.queuedPrompts?.length);
+  }
+
+  private retryQueuedPrompts() {
+    if (this.busy) {
+      this.setStatus("Stop the active turn before retrying queued prompts", true);
+      return;
+    }
+    this.restoreDurablePromptQueue();
+    if (this.promptQueue.length === 0) {
+      this.setStatus("No queued prompts to retry");
+      return;
+    }
+    this.queueStartupBlocked = false;
+    this.busy = true;
+    this.finishForegroundRun();
+  }
+
+  private async runPrompt(content: ChatContent): Promise<boolean> {
+    const controller = this.reserveAgentTurn("Working");
+    let taskRunStarted = false;
+    try {
+      // Resolve `auto` for every prompt, just as the desktop harness does. The durable
+      // session keeps `auto` as the selected mode but records the concrete model that served
+      // this task run for later review.
+      const baseConfig = configForSession(this.config, this.currentSession);
+      const selection = resolveModelForPrompt(baseConfig, content, { session: this.currentSession });
+      const runConfig = configForModelSelection(baseConfig, selection);
+      const now = new Date().toISOString();
+      const session = applyModelSelectionToSession(
+        this.currentSession
+          ? { ...this.currentSession, messages: [...this.currentSession.messages], updatedAt: now }
+          : {
+              id: randomUUID(),
+              cwd: this.cwd,
+              projectRoot: this.workspace.root,
+              trustMode: runConfig.trustMode,
+              messages: [],
+              createdAt: now,
+              updatedAt: now
+            },
+        selection
+      );
+      session.trustMode = runConfig.trustMode;
+      const planModeEnabled = this.nextPromptPlanMode;
+      const loopMaxIterations = !planModeEnabled ? this.nextPromptLoopMaxIterations : undefined;
+      const approvedPlanTaskRunId = !planModeEnabled ? this.nextPromptApprovedPlanTaskRunId : undefined;
+      const worktreeContinuation = !planModeEnabled ? this.nextPromptWorktreeContinuation : undefined;
+      const worktreeModeArmed = !planModeEnabled && this.nextPromptWorktreeMode;
+      const approvedPlan = approvedPlanTaskRunId ? this.resolveTaskRunId(session, approvedPlanTaskRunId) : undefined;
+      this.nextPromptPlanMode = false;
+      this.nextPromptApprovedPlanTaskRunId = undefined;
+      this.nextPromptLoopMaxIterations = undefined;
+      this.nextPromptWorktreeMode = false;
+      this.nextPromptWorktreeContinuation = undefined;
+      if (
+        approvedPlanTaskRunId &&
+        (!approvedPlan?.planMode?.enabled || approvedPlan.planReview?.status !== "approved" || !approvedPlan.plan)
+      )
+        throw new Error("Approved plan task run was not found or is not approved.");
+      const worktreeModeEnabled = !planModeEnabled && (worktreeModeArmed || Boolean(worktreeContinuation) || Boolean(approvedPlan));
+      const loop = loopMaxIterations ? createAgentLoopState(content, loopMaxIterations, now) : undefined;
+      if (planModeEnabled) {
+        session.messages.push({ role: "system", content: planningApprovalInstruction(), createdAt: now });
+      }
+      if (loop) session.agentLoop = loop;
+      if (loop) session.messages.push({ role: "system", content: initialAgentLoopInstruction(loop), createdAt: now });
+      const taskRun = createAgentTaskRun({
+        userMessageIndex: session.messages.length,
+        prompt: content,
+        model: selection.model,
+        providerName: selection.providerName,
+        modelSelectionReason: selection.reason,
+        planModeEnabled,
+        loop,
+        worktreeEnabled: worktreeModeEnabled,
+        now
+      });
+      session.taskRuns = trimTaskRuns([...(session.taskRuns ?? []), taskRun]);
+      this.currentSession = session;
+      this.activeTaskRunId = taskRun.id;
+      taskRunStarted = true;
+      let executionCwd = this.cwd;
+      if (worktreeModeEnabled) {
+        const source = worktreeContinuation ? this.resolveTaskRunId(session, worktreeContinuation.taskRunId) : undefined;
+        const worktree = source?.worktree;
+        if (
+          worktreeContinuation &&
+          (!worktree?.enabled || !worktree.path || !worktree.branch || !worktree.originalRoot || !worktree.baseRef)
+        )
+          throw new Error("Managed worktree continuation was not found.");
+        const prepared = worktreeContinuation
+          ? {
+              path: await resolveTaskWorktreePath(worktree!),
+              branch: worktree!.branch!,
+              originalRoot: worktree!.originalRoot!,
+              baseRef: worktree!.baseRef!,
+              createdAt: worktree!.createdAt ?? now
+            }
+          : await createTaskWorktree({ cwd: this.cwd, sessionId: session.id, taskRunId: taskRun.id });
+        if (!(await stat(prepared.path)).isDirectory()) throw new Error("Task worktree target is not a folder.");
+        taskRun.worktree = {
+          enabled: true,
+          status: "ready",
+          ...prepared,
+          plannedFromTaskRunId: approvedPlan?.id,
+          continuedFromTaskRunId: source?.id,
+          replayOfTaskRunId: worktreeContinuation?.replayOfTaskRunId
+        };
+        executionCwd = prepared.path;
+        session.messages.push({
+          role: "system",
+          content: [
+            taskWorktreeInstruction(prepared),
+            approvedPlan ? approvedPlanWorktreeInstruction(approvedPlan.id) : undefined,
+            source ? `This prompt continues existing task run ${source.id}. Keep the repair in the same task worktree.` : undefined,
+            worktreeContinuation?.replayOfTaskRunId ? replayTaskWorktreeInstruction(worktreeContinuation.replayOfTaskRunId) : undefined
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          createdAt: now
+        });
+        taskRun.userMessageIndex += 1;
+      }
+      this.config = configForSession(this.config, session);
+      this.activeExecutionCwd = executionCwd;
+      this.activeCheckpoint = worktreeModeEnabled ? undefined : new ChangeCheckpoint();
+      markTaskRunRunning(taskRun, now);
+      this.agent = this.createAgent(session, taskRun.id, this.activeCheckpoint, runConfig, executionCwd);
+      this.send({ type: "commit", entry: { kind: "user", text: chatContentToText(content), time: new Date().toISOString() } });
+      // A started run is durable before the first provider request. If startup itself fails,
+      // the catch path below upgrades this same record to failed/stopped with recovery state.
+      await this.store.save(session);
+      await this.executeAgentTurn((signal) =>
+        loop
+          ? this.runNativeAgentLoop(content, signal)
+          : this.agent.run(content, {
+              allowedToolNames: planModeEnabled ? NATIVE_PLAN_TOOL_NAMES : undefined,
+              disabledToolNames: () => this.activeRuntimeControl?.disabledToolNames() ?? Promise.resolve([]),
+              onEvent: (event) => this.handleAgentEvent(event),
+              onUsage: (usage) => this.recordRunUsage(usage),
+              takeSteeringMessages: () => (this.currentSession ? takeSteeringMessages(this.currentSession) : []),
+              onSteeringMessagesApplied: async () => {
+                if (this.currentSession) {
+                  this.dropConsumedQueuedInputs();
+                  this.currentSession.updatedAt = new Date().toISOString();
+                  await this.store.save(this.currentSession);
+                }
+              },
+              signal
+            })
+      );
+      return true;
+    } catch (error) {
+      await this.failPreparedAgentTurn(error, controller, !this.deferQueuedPromptHandoff || taskRunStarted);
+      return taskRunStarted;
+    }
   }
 
   private async runShellEscape(command: string) {
@@ -393,25 +767,79 @@ export class NativeTuiBackend {
       this.setStatus("Nothing to continue");
       return;
     }
-    await this.executeAgentTurn((signal) =>
-      this.agent.continue({
-        onEvent: (event) => this.handleAgentEvent(event),
-        onUsage: (usage) => this.recordRunUsage(usage),
-        signal
-      })
-    );
+    const controller = this.reserveAgentTurn("Working");
+    try {
+      const content: ChatContent = "Continue the current task.";
+      const baseConfig = configForSession(this.config, this.currentSession);
+      const selection = resolveModelForPrompt(baseConfig, content, { session: this.currentSession });
+      const runConfig = configForModelSelection(baseConfig, selection);
+      const now = new Date().toISOString();
+      const session = applyModelSelectionToSession(
+        { ...this.currentSession, messages: [...this.currentSession.messages], updatedAt: now },
+        selection
+      );
+      const taskRun = createAgentTaskRun({
+        userMessageIndex: this.mostRecentUserMessageIndex(session),
+        prompt: content,
+        model: selection.model,
+        providerName: selection.providerName,
+        modelSelectionReason: selection.reason,
+        now
+      });
+      session.taskRuns = trimTaskRuns([...(session.taskRuns ?? []), taskRun]);
+      markTaskRunRunning(taskRun, now);
+      this.currentSession = session;
+      this.config = configForSession(this.config, session);
+      this.activeTaskRunId = taskRun.id;
+      this.activeCheckpoint = new ChangeCheckpoint();
+      this.agent = this.createAgent(session, taskRun.id, this.activeCheckpoint, runConfig);
+      await this.store.save(session);
+      await this.executeAgentTurn((signal) =>
+        this.agent.continue({
+          disabledToolNames: () => this.activeRuntimeControl?.disabledToolNames() ?? Promise.resolve([]),
+          onEvent: (event) => this.handleAgentEvent(event),
+          onUsage: (usage) => this.recordRunUsage(usage),
+          takeSteeringMessages: () => (this.currentSession ? takeSteeringMessages(this.currentSession) : []),
+          onSteeringMessagesApplied: async () => {
+            if (this.currentSession) {
+              this.dropConsumedQueuedInputs();
+              this.currentSession.updatedAt = new Date().toISOString();
+              await this.store.save(this.currentSession);
+            }
+          },
+          signal
+        })
+      );
+    } catch (error) {
+      await this.failPreparedAgentTurn(error, controller);
+    }
   }
 
-  private async executeAgentTurn(runner: (signal: AbortSignal) => Promise<{ output: string; session: AgentSession }>) {
+  private reserveAgentTurn(status: string) {
+    // Reserve before the first await in model routing/setup. The normal FIFO handoff already
+    // reserves `busy`; replacing its controller here preserves that reservation and ensures a
+    // keystroke cannot start a second foreground model run in the setup window.
+    const controller = new AbortController();
     this.busy = true;
-    this.runAbortController = new AbortController();
+    this.runAbortController = controller;
     this.lastRunUsage = undefined;
     this.activeBrowserToolId = undefined;
     this.activityInputs.clear();
-    this.send({ type: "run_started", status: "Working" });
+    this.send({ type: "run_started", status });
+    return controller;
+  }
+
+  private async executeAgentTurn(runner: (signal: AbortSignal) => Promise<{ output: string; session: AgentSession }>) {
+    const controller = this.runAbortController ?? this.reserveAgentTurn("Working");
 
     try {
-      const result = await runner(this.runAbortController.signal);
+      const result = await runner(controller.signal);
+      await this.completeTaskRun(
+        result.session,
+        this.activeTaskRunId,
+        taskRunStatusForLoop(result.session.agentLoop),
+        this.activeCheckpoint
+      );
       await this.store.save(result.session);
       this.currentSession = result.session;
       this.cwd = result.session.cwd;
@@ -429,21 +857,177 @@ export class NativeTuiBackend {
           : undefined
       });
     } catch (error) {
-      if (error instanceof AgentRunAbortedError || this.runAbortController.signal.aborted) {
+      // Agent keeps partial messages/tool evidence and adds a recovery note before it throws.
+      // Save that exact mutable session for both Stop and failures instead of only the happy path.
+      const session = this.currentSession;
+      if (error instanceof AgentRunAbortedError || controller.signal.aborted) {
+        if (session) {
+          if (session.agentLoop?.status === "running") session.agentLoop = finishAgentLoop(session.agentLoop, "stopped");
+          await this.completeTaskRun(session, this.activeTaskRunId, "stopped", this.activeCheckpoint);
+          await this.store.save(session);
+        }
         this.send({ type: "run_stopped", message: "Run stopped." });
       } else {
+        if (session) {
+          if (session.agentLoop?.status === "running") session.agentLoop = finishAgentLoop(session.agentLoop, "failed");
+          await this.completeTaskRun(
+            session,
+            this.activeTaskRunId,
+            "failed",
+            this.activeCheckpoint,
+            error instanceof Error ? error.message : String(error)
+          );
+          await this.store.save(session);
+        }
         this.send({ type: "run_failed", message: error instanceof Error ? error.message : String(error) });
       }
     } finally {
+      if (this.runAbortController === controller) {
+        this.runAbortController = undefined;
+      }
+      this.activeBrowserToolId = undefined;
+      this.activeTaskRunId = undefined;
+      this.activeCheckpoint = undefined;
+      this.activeExecutionCwd = undefined;
+      this.finishForegroundRun();
+    }
+  }
+
+  private async runNativeAgentLoop(content: ChatContent, signal: AbortSignal): Promise<{ output: string; session: AgentSession }> {
+    let output = "";
+    let session = this.currentSession!;
+    while (session.agentLoop?.status === "running") {
+      const startedAt = new Date().toISOString();
+      session.agentLoop = beginAgentLoopIteration(session.agentLoop, startedAt);
+      const run = session.taskRuns?.find((entry) => entry.id === this.activeTaskRunId);
+      if (run) syncTaskRunLoopState(run, session.agentLoop);
+      const toolStartCount = run?.tools.length ?? 0;
+      const artifactStartCount = run?.artifacts.length ?? 0;
+      session.updatedAt = startedAt;
+      await this.store.save(session);
+      const result =
+        session.agentLoop.iteration === 1
+          ? await this.agent.run(content, {
+              disabledToolNames: () => this.activeRuntimeControl?.disabledToolNames() ?? Promise.resolve([]),
+              onEvent: (event) => this.handleAgentEvent(event),
+              onUsage: (usage) => this.recordRunUsage(usage),
+              takeSteeringMessages: () => (this.currentSession ? takeSteeringMessages(this.currentSession) : []),
+              onSteeringMessagesApplied: async () => {
+                this.dropConsumedQueuedInputs();
+                if (this.currentSession) await this.store.save(this.currentSession);
+              },
+              signal
+            })
+          : await this.agent.continue({
+              disabledToolNames: () => this.activeRuntimeControl?.disabledToolNames() ?? Promise.resolve([]),
+              onEvent: (event) => this.handleAgentEvent(event),
+              onUsage: (usage) => this.recordRunUsage(usage),
+              takeSteeringMessages: () => (this.currentSession ? takeSteeringMessages(this.currentSession) : []),
+              onSteeringMessagesApplied: async () => {
+                this.dropConsumedQueuedInputs();
+                if (this.currentSession) await this.store.save(this.currentSession);
+              },
+              signal
+            });
+      session = result.session;
+      this.currentSession = session;
+      const activeLoop = session.agentLoop;
+      if (!activeLoop) break;
+      const decision = stripAgentLoopDecision(session) ?? "done";
+      output = chatContentToText([...session.messages].reverse().find((message) => message.role === "assistant")?.content ?? result.output);
+      const afterRun = this.findTaskRun(session, this.activeTaskRunId);
+      if (afterRun) recordLatestAssistantTaskMetadata(afterRun, session.messages);
+      const terminal = activeLoop.stopRequested
+        ? "stopped"
+        : decision === "blocked"
+          ? "blocked"
+          : decision === "continue" && activeLoop.iteration < activeLoop.maxIterations
+            ? undefined
+            : decision === "continue"
+              ? "max_iterations"
+              : "completed";
+      const assistantMessageIndex = session.messages.map((message) => message.role).lastIndexOf("assistant");
+      session.agentLoop = finishAgentLoopIteration(activeLoop, {
+        decision,
+        status: terminal ?? "continued",
+        output,
+        assistantMessageIndex: assistantMessageIndex >= 0 ? assistantMessageIndex : undefined,
+        toolCallCount: Math.max(0, (afterRun?.tools.length ?? 0) - toolStartCount),
+        artifactCount: Math.max(0, (afterRun?.artifacts.length ?? 0) - artifactStartCount)
+      });
+      if (terminal) session.agentLoop = finishAgentLoop(session.agentLoop, terminal);
+      const taskRun = this.findTaskRun(session, this.activeTaskRunId);
+      if (taskRun) syncTaskRunLoopState(taskRun, session.agentLoop);
+      if (terminal === "stopped") {
+        output = "Loop stopped after the current iteration.";
+        session.messages.push({ role: "assistant", content: output, createdAt: new Date().toISOString() });
+      }
+      if (terminal === "max_iterations") {
+        output = `Loop stopped after reaching ${session.agentLoop.maxIterations} iterations.`;
+        session.messages.push({
+          role: "assistant",
+          content: `${output} Review the latest result or continue manually.`,
+          createdAt: new Date().toISOString()
+        });
+      }
+      if (!terminal) {
+        const remediation = buildTaskRunReportRemediationInstruction(taskRun, session.messages);
+        if (remediation) session.messages.push({ role: "system", content: remediation, createdAt: new Date().toISOString() });
+        const loopForContinuation = session.agentLoop;
+        session.messages.push({
+          role: "system",
+          content: continuationAgentLoopInstruction(loopForContinuation),
+          createdAt: new Date().toISOString()
+        });
+        session.agentLoop = { ...loopForContinuation, updatedAt: new Date().toISOString() };
+        if (taskRun) syncTaskRunLoopState(taskRun, session.agentLoop);
+      }
+      session.updatedAt = new Date().toISOString();
+      await this.store.save(session);
+    }
+    return { output, session };
+  }
+
+  private async failPreparedAgentTurn(error: unknown, controller: AbortController, handOffForeground = true) {
+    if (this.runAbortController !== controller) {
+      return;
+    }
+    const stopped = error instanceof AgentRunAbortedError || controller.signal.aborted;
+    const session = this.currentSession;
+    try {
+      if (session) {
+        await this.completeTaskRun(
+          session,
+          this.activeTaskRunId,
+          stopped ? "stopped" : "failed",
+          this.activeCheckpoint,
+          stopped ? undefined : error instanceof Error ? error.message : String(error)
+        );
+        await this.store.save(session);
+      }
+      this.send(
+        stopped
+          ? { type: "run_stopped", message: "Run stopped." }
+          : { type: "run_failed", message: error instanceof Error ? error.message : String(error) }
+      );
+    } finally {
       this.runAbortController = undefined;
       this.activeBrowserToolId = undefined;
-      this.finishForegroundRun();
+      this.activeTaskRunId = undefined;
+      this.activeCheckpoint = undefined;
+      this.activeExecutionCwd = undefined;
+      if (handOffForeground) this.finishForegroundRun();
     }
   }
 
   private finishForegroundRun() {
     if (this.closing) {
       this.busy = false;
+      return;
+    }
+    if (this.queueStartupBlocked) {
+      this.busy = false;
+      this.setStatus("Queued startup is paused; use /queue retry after fixing configuration.");
       return;
     }
     const next = this.promptQueue.shift();
@@ -467,7 +1051,14 @@ export class NativeTuiBackend {
           return;
         }
         this.pendingQueuedInput = undefined;
-        this.runInBackground(this.runQueuedInput(next), `Unable to run queued ${nextLabel}`);
+        this.runInBackground(
+          (async () => {
+            await this.pendingQueueCancellation;
+            this.pendingQueueCancellation = undefined;
+            await this.runQueuedInput(next);
+          })(),
+          `Unable to run queued ${nextLabel}`
+        );
       });
     }
   }
@@ -483,9 +1074,29 @@ export class NativeTuiBackend {
       totalTokens: previous.totalTokens + (usage.totalTokens ?? (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
       requestCount: previous.requestCount + 1
     };
+    const taskRun = this.findTaskRun(this.currentSession, this.activeTaskRunId);
+    if (taskRun) {
+      taskRun.usage = {
+        promptTokens: (taskRun.usage?.promptTokens ?? 0) + (usage.promptTokens ?? 0),
+        completionTokens: (taskRun.usage?.completionTokens ?? 0) + (usage.completionTokens ?? 0),
+        totalTokens: (taskRun.usage?.totalTokens ?? 0) + (usage.totalTokens ?? (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
+        requestCount: (taskRun.usage?.requestCount ?? 0) + 1
+      };
+      taskRun.updatedAt = new Date().toISOString();
+    }
   }
 
-  private handleAgentEvent(event: AgentRunEvent) {
+  private async handleAgentEvent(event: AgentRunEvent) {
+    const taskRun = this.findTaskRun(this.currentSession, this.activeTaskRunId);
+    if (taskRun) {
+      const changed = recordTaskRunEvent(taskRun, event, new Date().toISOString(), { workspaceRoot: this.activeExecutionCwd ?? this.cwd });
+      if (changed && this.currentSession) {
+        this.currentSession.updatedAt = taskRun.updatedAt;
+        // Persist tool/audit evidence at each safe event boundary. This makes an app crash
+        // reviewable too, rather than treating end-of-turn as the only durable checkpoint.
+        await this.store.save(this.currentSession);
+      }
+    }
     if (event.type === "assistant_delta") {
       this.send({ type: "assistant_delta", delta: event.delta });
       return;
@@ -553,6 +1164,94 @@ export class NativeTuiBackend {
     }
   }
 
+  private findTaskRun(session: AgentSession | undefined, taskRunId: string | undefined) {
+    return taskRunId ? session?.taskRuns?.find((run) => run.id === taskRunId) : undefined;
+  }
+
+  private resolveTaskRunId(session: AgentSession | undefined, value: string) {
+    const runs = session?.taskRuns ?? [];
+    const exact = runs.find((run) => run.id === value);
+    if (exact) {
+      return exact;
+    }
+    const matches = runs.filter((run) => run.id.startsWith(value));
+    if (matches.length === 1) {
+      return matches[0];
+    }
+    if (matches.length > 1) {
+      throw new Error(`Task-run prefix ${JSON.stringify(value)} is ambiguous; use the full id shown in /runs.`);
+    }
+    return undefined;
+  }
+
+  private mostRecentUserMessageIndex(session: AgentSession) {
+    for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+      if (session.messages[index]?.role === "user") {
+        return index;
+      }
+    }
+    // `/continue` is unavailable for an empty session; retain a safe schema-valid fallback.
+    return 0;
+  }
+
+  private async recordApprovalEvent(session: AgentSession, taskRunId: string, event: AgentTaskRunApprovalEvent) {
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    recordTaskRunApproval(taskRun, event, new Date().toISOString());
+    session.updatedAt = taskRun.updatedAt;
+    await this.store.save(session);
+  }
+
+  private checkpointFile(sessionId: string, taskRunId: string) {
+    return path.join(appDataDir(), "checkpoints", sessionId, `${taskRunId}.json`);
+  }
+
+  private async completeTaskRun(
+    session: AgentSession,
+    taskRunId: string | undefined,
+    status: AgentTaskRun["status"],
+    checkpoint: ChangeCheckpoint | undefined,
+    error?: string
+  ) {
+    const taskRun = this.findTaskRun(session, taskRunId);
+    if (!taskRun) {
+      return;
+    }
+    const now = new Date().toISOString();
+    recordLatestAssistantTaskMetadata(taskRun, session.messages, now);
+    if (checkpoint && checkpoint.size > 0) {
+      const file = this.checkpointFile(session.id, taskRun.id);
+      await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+      await writeFile(file, JSON.stringify(checkpoint.toJSON()), { encoding: "utf8", mode: 0o600 });
+      taskRun.checkpoint = { changedPaths: checkpoint.changedPaths(), capturedAt: now };
+    }
+    finishTaskRun(taskRun, status, error, now);
+    session.updatedAt = taskRun.updatedAt;
+  }
+
+  private async undoTaskRun(taskRunId: string) {
+    const session = this.currentSession;
+    const taskRun = this.resolveTaskRunId(session, taskRunId);
+    if (!session || !taskRun?.checkpoint) {
+      throw new Error("No revertible checkpoint was found for that run.");
+    }
+    if (taskRun.checkpoint.revertedAt) {
+      throw new Error("This run's checkpoint was already reverted.");
+    }
+    const raw = await readFile(this.checkpointFile(session.id, taskRun.id), "utf8");
+    const reverted = await new ChangeCheckpoint(JSON.parse(raw) as ChangeCheckpointEntry[]).revert();
+    const now = new Date().toISOString();
+    taskRun.checkpoint = { ...taskRun.checkpoint, revertedAt: now };
+    taskRun.updatedAt = now;
+    session.updatedAt = now;
+    await this.store.save(session);
+    await rm(this.checkpointFile(session.id, taskRun.id), { force: true });
+    this.commitSystem(`Undid ${reverted.length} path${reverted.length === 1 ? "" : "s"} from run ${shortId(taskRun.id)}.`);
+    this.setStatus("Changes undone");
+  }
+
   private async handleSlashCommand(value: string) {
     const command = parseTuiSlashCommand(value);
     if (!command || command.kind === "unknown") {
@@ -578,9 +1277,27 @@ export class NativeTuiBackend {
       case "activity":
         this.send({ type: "toggle_activity" });
         break;
+      case "tools":
+        await this.manageToolAvailability(command.action, command.name);
+        break;
+      case "integrations":
+        await this.manageMcpIntegrations(command.action, command.id);
+        break;
       case "clear":
         this.send({ type: "clear" });
         this.setStatus("Visible transcript cleared");
+        break;
+      case "new":
+        await this.startNewSession();
+        break;
+      case "delete":
+        await this.deleteCurrentSession();
+        break;
+      case "rename":
+        await this.renameCurrentSession(command.title);
+        break;
+      case "pin":
+        await this.pinCurrentSession();
         break;
       case "continue":
         this.runInBackground(this.continueTurn(), "Unable to continue session");
@@ -597,6 +1314,87 @@ export class NativeTuiBackend {
         break;
       case "diff":
         await this.showGitDiff();
+        break;
+      case "runs":
+        this.showTaskRuns();
+        break;
+      case "undo":
+        await this.undoTaskRun(command.taskRunId).catch((error) => {
+          this.commitError(`Unable to undo run: ${error instanceof Error ? error.message : String(error)}`);
+          this.setStatus("Undo failed");
+        });
+        break;
+      case "steer":
+        await this.steerQueuedPrompt(command.promptId);
+        break;
+      case "queue":
+        this.retryQueuedPrompts();
+        break;
+      case "attach":
+        await this.attachWorkspaceContext(command.attachmentType, command.path);
+        break;
+      case "attachments":
+        this.managePendingAttachments(command.action, command.index);
+        break;
+      case "plan":
+        if (command.action === "arm") {
+          this.nextPromptPlanMode = true;
+          this.commitSystem("Plan mode armed for the next prompt. It will use read-only discovery tools and require review.");
+          this.setStatus("Plan mode armed");
+        } else if (command.action === "run") {
+          const plan = this.resolveTaskRunId(this.currentSession, command.taskRunId!);
+          if (!plan?.planMode?.enabled || plan.planReview?.status !== "approved" || !plan.plan)
+            throw new Error("Approve a captured plan before running it.");
+          this.nextPromptApprovedPlanTaskRunId = plan.id;
+          this.nextPromptWorktreeMode = true;
+          this.commitSystem(`Approved plan ${plan.id} armed for a new managed worktree. Send the implementation prompt next.`);
+          this.setStatus("Approved plan worktree armed");
+        } else {
+          this.reviewPlan(command.action, command.taskRunId!);
+        }
+        break;
+      case "loop":
+        if (command.action === "arm") {
+          this.nextPromptLoopMaxIterations = command.maxIterations;
+          this.commitSystem(`Loop mode armed for the next prompt (${command.maxIterations} iterations maximum).`);
+          this.setStatus("Loop mode armed");
+        } else if (this.currentSession?.agentLoop?.status === "running") {
+          this.currentSession.agentLoop.stopRequested = true;
+          this.currentSession.updatedAt = new Date().toISOString();
+          await this.store.save(this.currentSession);
+          this.setStatus("Loop will stop after its current iteration", true);
+        } else {
+          this.commitError("There is no running loop to stop.");
+          this.setStatus("Loop stop unavailable");
+        }
+        break;
+      case "worktree":
+        if (command.action === "arm") {
+          this.nextPromptWorktreeMode = true;
+          this.commitSystem("Task worktree mode armed for the next prompt.");
+          this.setStatus("Worktree mode armed");
+        } else if (command.action === "run" || command.action === "replay") {
+          const run = this.resolveTaskRunId(this.currentSession, command.taskRunId!);
+          if (!run?.worktree?.enabled || run.worktree.status !== "ready")
+            throw new Error("Only a ready managed worktree can be continued.");
+          let replayOfTaskRunId: string | undefined;
+          if (command.action === "replay") {
+            const replay = this.resolveTaskRunId(this.currentSession, command.replayOfTaskRunId!);
+            if (
+              !replay?.worktree?.enabled ||
+              replay.worktree.path !== run.worktree.path ||
+              replay.worktree.branch !== run.worktree.branch
+            ) {
+              throw new Error("Replay evidence must belong to the same managed worktree.");
+            }
+            replayOfTaskRunId = replay.id;
+          }
+          this.nextPromptWorktreeContinuation = { taskRunId: run.id, replayOfTaskRunId };
+          this.commitSystem(`Worktree continuation armed for ${run.id}. Send the repair prompt next.`);
+          this.setStatus("Worktree continuation armed");
+        } else {
+          await this.applyWorktreeAction(command.action, command.taskRunId!);
+        }
         break;
       case "compact":
         await this.compactCurrentSession(command.recentMessageCount);
@@ -622,6 +1420,308 @@ export class NativeTuiBackend {
     return true;
   }
 
+  private async manageToolAvailability(action: "list" | "enable" | "disable", name?: string) {
+    const runtime = this.activeRuntimeControl;
+    const available = this.tuiToolNames();
+    runtime?.setAvailableToolNames(available);
+    if (action === "list") {
+      const disabled = new Set(await (runtime?.disabledToolNames() ?? createDisabledToolsReader(this.config.disabledTools ?? [])()));
+      this.commitSystem(
+        [
+          "Tools:",
+          ...available.map((tool) => `  ${disabled.has(tool) ? "disabled" : "enabled "}  ${tool}`),
+          "",
+          "Use /tools disable <tool> or /tools enable <tool>. Changes are saved and refresh at every tool-call boundary.",
+          "Control tools (ask_user and arivu_*) cannot be disabled."
+        ].join("\n")
+      );
+      this.setStatus(`${available.length} tools available`);
+      return;
+    }
+    const tool = name?.trim();
+    if (!tool) throw new Error("A tool name is required.");
+    if (!available.includes(tool)) throw new Error(`Unknown tool: ${tool}`);
+    if (tool === "ask_user" || tool.startsWith("arivu_"))
+      throw new Error(`${tool} is part of Arivu's control boundary and cannot be disabled.`);
+    const saved = await loadConfig({ includeEnv: false });
+    const disabled = new Set(normalizeDisabledTools(saved.disabledTools ?? []));
+    if (action === "disable") disabled.add(tool);
+    else disabled.delete(tool);
+    await saveConfig({ ...saved, disabledTools: [...disabled] });
+    this.config = { ...this.config, disabledTools: [...disabled] };
+    this.commitSystem(
+      `${tool} ${action === "disable" ? "disabled" : "enabled"} in saved tool settings. ${this.busy ? "The active run refreshes this at its next tool boundary." : "It applies to the next run."}`
+    );
+    this.setStatus(`Tool ${action}d`);
+  }
+
+  private tuiToolNames() {
+    const registry = createToolRegistry({
+      workspaceRoot: this.workspace.root,
+      approvals: new ApprovalManager(
+        this.config.trustMode,
+        async () => false,
+        workspacePolicyOverridesForRoot(this.config, this.workspace.root),
+        undefined,
+        workspaceScopeRulesForRoot(this.config, this.workspace.root),
+        this.workspace.root
+      ),
+      webSearchProvider: resolveWebSearchProvider(this.config),
+      mcpServers: this.config.mcpServers,
+      scopePolicyRules: workspaceScopeRulesForRoot(this.config, this.workspace.root),
+      browser: this.browserControllerForSession(),
+      manualBrowserTools: true,
+      directEditReview: true,
+      runtimeControl: this.activeRuntimeControl
+    });
+    return registry.schemas.map((tool) => tool.name).sort();
+  }
+
+  private async manageMcpIntegrations(action: "list" | "install" | "enable" | "disable" | "reject" | "remove", id?: string) {
+    const saved = await loadConfig({ includeEnv: false });
+    if (action === "list") {
+      const proposals = ((saved.toolProposals ?? []) as McpToolProposal[]).map(safeMcpProposalDisplay);
+      const integrations = Object.entries(saved.mcpServers).map(([name, server]) => {
+        const integration = server as { command: string; args: string[]; env?: Record<string, string>; disabled?: boolean };
+        return {
+          name,
+          command: "configured executable",
+          argCount: integration.args.length,
+          envKeys: Object.keys(integration.env ?? {}),
+          enabled: !integration.disabled
+        };
+      });
+      this.commitSystem(
+        [
+          "MCP integrations (commands never display credential values):",
+          ...(integrations.length
+            ? integrations.map(
+                (server) =>
+                  `  ${server.enabled ? "enabled " : "disabled"}  ${server.name}: ${server.command} (${server.argCount} argument${server.argCount === 1 ? "" : "s"}) ${server.envKeys.length ? `[keys: ${server.envKeys.join(", ")}]` : ""}`
+              )
+            : ["  No installed MCP integrations."]),
+          "",
+          "Pending review proposals:",
+          ...(proposals.length
+            ? proposals.map(
+                (proposal) =>
+                  `  ${proposal.id}  ${proposal.name}: ${proposal.command} ${proposal.args.join(" ")} ${proposal.envKeys.length ? `[keys: ${proposal.envKeys.join(", ")}]` : ""}\n    ${proposal.reason}`
+              )
+            : ["  No pending proposals."]),
+          "",
+          "Install keeps a proposal disabled. Use /integrations enable <server-name> only after reviewing its command and credential keys."
+        ].join("\n")
+      );
+      this.setStatus(`${proposals.length} MCP proposal${proposals.length === 1 ? "" : "s"} pending`);
+      return;
+    }
+    if (!id?.trim())
+      throw new Error(`Usage: /integrations ${action} <${action === "install" || action === "reject" ? "proposal-id" : "server-name"}>`);
+    const result = await reviewMcpProposal(id.trim(), action);
+    this.config = configForSession(await loadConfig(), this.currentSession);
+    this.agent = this.createAgent(this.currentSession);
+    if (result.action === "install")
+      this.commitSystem(`${result.serverName} installed disabled. Add its requested credentials in saved settings before enabling it.`);
+    else if (result.action === "reject") this.commitSystem(`Rejected MCP proposal ${result.name}.`);
+    else if (result.action === "remove") this.commitSystem(`Removed MCP integration ${result.name}.`);
+    else this.commitSystem(`${result.name} ${result.enabled ? "enabled" : "disabled"}.`);
+    this.setStatus(`MCP integration ${result.action}d`);
+  }
+
+  private composePromptContent(value: string): ChatContent {
+    const text = promptTextWithFileContext(value, this.pendingFileContexts);
+    if (this.pendingAttachments.length === 0) return text;
+    return [textPart(text), ...this.pendingAttachments];
+  }
+
+  private async attachWorkspaceContext(kind: "file" | "image", value: string) {
+    const workspaceRoot = await realpath(this.workspace.root);
+    const candidate = path.resolve(workspaceRoot, value);
+    const candidateRelative = path.relative(workspaceRoot, candidate);
+    if (candidateRelative.startsWith("..") || path.isAbsolute(candidateRelative)) {
+      throw new Error("Attachments must stay inside the workspace root.");
+    }
+    const target = await realpath(candidate);
+    const relative = path.relative(workspaceRoot, target);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Attachments must stay inside the workspace root.");
+    const targetStat = await stat(target);
+    if (!targetStat.isFile()) throw new Error("Attachments must be regular files.");
+    if (kind === "file") {
+      if (this.pendingFileContexts.length >= MAX_CONTEXT_FILE_ATTACHMENTS)
+        throw new Error(`At most ${MAX_CONTEXT_FILE_ATTACHMENTS} files can be attached.`);
+      if (targetStat.size > MAX_CONTEXT_FILE_BYTES) throw new Error("Text attachments are limited to 256 KB.");
+      const bytes = await readFile(target);
+      const text = bytes.toString("utf8");
+      if (text.includes("\0")) throw new Error("Only UTF-8 text files can be attached as context.");
+      const truncated = text.length > MAX_CONTEXT_FILE_CHARS;
+      this.pendingFileContexts.push({
+        path: relative,
+        lineCount: countAttachmentLines(truncated ? text.slice(0, MAX_CONTEXT_FILE_CHARS) : text),
+        content: truncated ? text.slice(0, MAX_CONTEXT_FILE_CHARS) : text,
+        truncated
+      });
+    } else {
+      if (this.pendingAttachments.length >= MAX_IMAGE_ATTACHMENTS)
+        throw new Error(`At most ${MAX_IMAGE_ATTACHMENTS} images can be attached.`);
+      if (targetStat.size > MAX_IMAGE_BYTES) throw new Error("Images are limited to 10 MB.");
+      const bytes = await readFile(target);
+      const mimeType = imageMimeTypeForPath(target);
+      if (!mimeType) throw new Error("Images must be PNG, JPEG, WebP, or GIF.");
+      this.pendingAttachments.push({
+        type: "image_url",
+        image_url: { url: `data:${mimeType};base64,${bytes.toString("base64")}`, detail: "auto" },
+        name: path.basename(target),
+        mimeType,
+        size: bytes.length
+      });
+    }
+    this.commitSystem(`Attached ${kind} ${relative} to the next prompt.`);
+    this.setStatus(`${this.pendingAttachmentCount()} attachment${this.pendingAttachmentCount() === 1 ? "" : "s"} ready`);
+  }
+
+  private managePendingAttachments(action: "list" | "clear" | "remove", index?: number) {
+    if (action === "clear") {
+      this.pendingAttachments.length = 0;
+      this.pendingFileContexts.length = 0;
+      this.commitSystem("Cleared pending attachments.");
+    } else if (action === "remove") {
+      if (!index || index > this.pendingAttachmentCount()) throw new Error("Attachment number was not found.");
+      if (index <= this.pendingFileContexts.length) this.pendingFileContexts.splice(index - 1, 1);
+      else this.pendingAttachments.splice(index - this.pendingFileContexts.length - 1, 1);
+      this.commitSystem(`Removed attachment ${index}.`);
+    } else {
+      const files = this.pendingFileContexts.map(
+        (file, index) => `${index + 1}. [File] ${file.path}${file.truncated ? " (truncated)" : ""}`
+      );
+      const images = this.pendingAttachments.map(
+        (part, index) =>
+          `${this.pendingFileContexts.length + index + 1}. [Image] ${part.type === "image_url" ? (part.name ?? "image") : "attachment"}`
+      );
+      this.commitSystem([...files, ...images].join("\n") || "No pending attachments.");
+    }
+    this.setStatus(`${this.pendingAttachmentCount()} attachment${this.pendingAttachmentCount() === 1 ? "" : "s"} ready`);
+  }
+
+  private pendingAttachmentCount() {
+    return this.pendingFileContexts.length + this.pendingAttachments.length;
+  }
+
+  private async reviewPlan(action: "approve" | "revise" | "cancel", taskRunId: string) {
+    const taskRun = this.resolveTaskRunId(this.currentSession, taskRunId);
+    if (!taskRun?.planMode?.enabled || !taskRun.plan) throw new Error("This task run has no captured plan to review.");
+    if (taskRun.status === "running") throw new Error("Wait for the plan run to finish before reviewing it.");
+    const now = new Date().toISOString();
+    taskRun.planReview = {
+      status: action === "approve" ? "approved" : action === "revise" ? "revision_requested" : "cancelled",
+      updatedAt: now
+    };
+    taskRun.updatedAt = now;
+    if (this.currentSession) {
+      this.currentSession.updatedAt = now;
+      await this.store.save(this.currentSession);
+    }
+    this.commitSystem(`Plan ${taskRun.id} ${action === "revise" ? "marked for revision" : `${action}d`}.`);
+    this.setStatus(`Plan ${action}d`);
+  }
+
+  private async applyWorktreeAction(action: Exclude<Extract<TuiSlashCommand, { kind: "worktree" }>["action"], "arm">, taskRunId: string) {
+    const session = this.currentSession;
+    const taskRun = this.resolveTaskRunId(session, taskRunId);
+    if (!session || !taskRun?.worktree?.enabled) throw new Error("This task run does not have a managed worktree.");
+    if (taskRun.status === "running") throw new Error("Wait for the task run to finish before changing its worktree.");
+    const worktree = taskRun.worktree;
+    try {
+      if (action === "status") {
+        worktree.diff = await summarizeTaskWorktree(worktree);
+        worktree.patchPreview = undefined;
+        worktree.error = undefined;
+      } else if (action === "preview") {
+        if (worktree.status !== "ready") throw new Error("Only ready task worktrees can be previewed.");
+        if (worktree.conflict) throw new Error("Resolve or abort the task worktree conflict before previewing.");
+        const result = await previewTaskWorktreePatch(worktree);
+        worktree.diff = result.diff;
+        worktree.patchPreview = result.patchPreview;
+        worktree.error = undefined;
+      } else if (action === "merge") {
+        if (worktree.status !== "ready") throw new Error("Only ready task worktrees can be merged.");
+        if (worktree.conflict) throw new Error("Resolve or abort the task worktree conflict before merging.");
+        const result = await mergeTaskWorktree(worktree, { taskRunId: taskRun.id, verification: taskRun.verification });
+        worktree.status = result.status;
+        worktree.diff = result.diff;
+        worktree.mergeCommit = result.mergeCommit;
+        worktree.mergedAt = result.mergedAt;
+        worktree.conflict = undefined;
+        worktree.patchPreview = undefined;
+        worktree.error = undefined;
+      } else if (action === "sync") {
+        if (worktree.status !== "ready") throw new Error("Only ready task worktrees can be synced.");
+        const result = await syncTaskWorktreeWithOriginal(worktree, { taskRunId: taskRun.id });
+        worktree.diff = result.diff;
+        worktree.conflict = result.conflict;
+        worktree.patchPreview = undefined;
+        worktree.pullRequest = undefined;
+        worktree.error = result.conflict?.message;
+      } else if (action === "continue") {
+        if (worktree.status !== "ready") throw new Error("Only ready task worktrees can continue conflict resolution.");
+        const result = await continueTaskWorktreeConflict(worktree);
+        worktree.diff = result.diff;
+        worktree.conflict = undefined;
+        worktree.patchPreview = undefined;
+        worktree.pullRequest = undefined;
+        worktree.error = undefined;
+      } else if (action === "abort") {
+        if (worktree.status !== "ready") throw new Error("Only ready task worktrees can abort conflict resolution.");
+        const result = await abortTaskWorktreeConflict(worktree);
+        worktree.diff = result.diff;
+        worktree.conflict = undefined;
+        worktree.patchPreview = undefined;
+        worktree.pullRequest = undefined;
+        worktree.error = undefined;
+      } else if (action === "discard") {
+        if (!["ready", "failed"].includes(worktree.status)) throw new Error("Only ready or failed task worktrees can be discarded.");
+        const result = await discardTaskWorktree(worktree);
+        Object.assign(worktree, result);
+        worktree.error = undefined;
+      } else if (action === "cleanup") {
+        const result = await cleanupMergedTaskWorktree(worktree);
+        Object.assign(worktree, result);
+        worktree.error = undefined;
+      } else if (action === "prepare_pr") {
+        if (worktree.conflict) throw new Error("Resolve or abort the task worktree conflict before preparing a PR draft.");
+        const result = await prepareTaskWorktreePullRequest(worktree, {
+          taskRunId: taskRun.id,
+          promptPreview: taskRun.promptPreview,
+          verification: taskRun.verification
+        });
+        worktree.diff = result.diff;
+        worktree.pullRequest = result.pullRequest;
+        worktree.conflict = undefined;
+        worktree.error = undefined;
+      } else if (action === "create_pr") {
+        if (worktree.conflict) throw new Error("Resolve or abort the task worktree conflict before creating a PR.");
+        const result = await createTaskWorktreePullRequest(worktree, { verification: taskRun.verification });
+        worktree.pullRequest = result.pullRequest;
+        worktree.error = undefined;
+      } else if (action === "refresh_pr") {
+        const result = await refreshTaskWorktreePullRequest(worktree);
+        worktree.pullRequest = result.pullRequest;
+        worktree.error = undefined;
+      } else if (action === "checks") {
+        await fetchTaskWorktreePullRequestCheckLogs(taskRun, worktree);
+        worktree.error = undefined;
+      }
+    } catch (error) {
+      worktree.error = error instanceof Error ? error.message : String(error);
+      taskRun.updatedAt = session.updatedAt = new Date().toISOString();
+      await this.store.save(session);
+      throw error;
+    }
+    taskRun.updatedAt = session.updatedAt = new Date().toISOString();
+    await this.store.save(session);
+    this.commitSystem(`Worktree ${taskRun.id}: ${action} complete.`);
+    this.setStatus(`Worktree ${action} complete`);
+  }
+
   private showStatus() {
     this.commitSystem(
       [
@@ -632,12 +1732,87 @@ export class NativeTuiBackend {
         `Model: ${this.config.model}`,
         `Base URL: ${this.config.baseUrl}`,
         `Trust: ${this.config.trustMode}`,
+        `Armed: plan=${this.nextPromptPlanMode ? "review" : this.nextPromptApprovedPlanTaskRunId ? `approved worktree ${shortId(this.nextPromptApprovedPlanTaskRunId)}` : "none"}; loop=${this.nextPromptLoopMaxIterations ?? "off"}; worktree=${this.nextPromptWorktreeMode ? "on" : "off"}`,
+        `Composer: ${this.pendingAttachmentCount()} attachment(s); ${this.promptQueue.length} queued${this.queueStartupBlocked ? " (startup paused; /queue retry)" : ""}`,
         this.lastRunUsage
           ? `Last run tokens: ${this.lastRunUsage.totalTokens} total (${this.lastRunUsage.promptTokens} prompt / ${this.lastRunUsage.completionTokens} completion) over ${this.lastRunUsage.requestCount} request${this.lastRunUsage.requestCount === 1 ? "" : "s"}`
           : "Last run tokens: not reported"
       ].join("\n")
     );
     this.setStatus("Status");
+  }
+
+  private async startNewSession() {
+    this.cancelModelOperation();
+    this.currentSession = undefined;
+    this.promptQueue.length = 0;
+    this.pendingQueuedInput = undefined;
+    this.queueStartupBlocked = false;
+    this.pendingAttachments.length = 0;
+    this.pendingFileContexts.length = 0;
+    this.nextPromptPlanMode = false;
+    this.nextPromptApprovedPlanTaskRunId = undefined;
+    this.nextPromptLoopMaxIterations = undefined;
+    this.nextPromptWorktreeMode = false;
+    this.nextPromptWorktreeContinuation = undefined;
+    try {
+      this.config = configForSession(await loadConfig(), undefined);
+    } catch {
+      // Keep the last effective runtime rather than regressing to constructor-time settings.
+    }
+    this.resetBrowserController();
+    this.agent = this.createAgent();
+    this.currentContextTokens = undefined;
+    this.send({ type: "reset", data: this.buildInitData() });
+    this.setStatus("New session");
+  }
+
+  private async deleteCurrentSession() {
+    if (!this.currentSession) {
+      this.commitSystem("No saved session to delete.");
+      this.setStatus("No session");
+      return;
+    }
+    const id = this.currentSession.id;
+    if (!(await this.confirm(`Delete saved session ${shortId(id)}? This cannot be undone.`))) {
+      this.setStatus("Delete cancelled");
+      return;
+    }
+    await this.store.delete(id);
+    await this.startNewSession();
+    this.commitSystem(`Deleted session ${shortId(id)}.`);
+  }
+
+  private async renameCurrentSession(title: string) {
+    if (!this.currentSession) {
+      this.commitError("Send a prompt before renaming this session.");
+      this.setStatus("No session");
+      return;
+    }
+    const normalized = title.trim().slice(0, 160);
+    if (!normalized) {
+      this.commitError("A session title is required.");
+      this.setStatus("Rename failed");
+      return;
+    }
+    this.currentSession.title = normalized;
+    this.currentSession.updatedAt = new Date().toISOString();
+    await this.store.save(this.currentSession);
+    this.send({ type: "reset", data: this.buildInitData() });
+    this.setStatus("Session renamed");
+  }
+
+  private async pinCurrentSession() {
+    if (!this.currentSession) {
+      this.commitError("Send a prompt before pinning this session.");
+      this.setStatus("No session");
+      return;
+    }
+    this.currentSession.pinnedAt = this.currentSession.pinnedAt ? undefined : new Date().toISOString();
+    this.currentSession.updatedAt = new Date().toISOString();
+    await this.store.save(this.currentSession);
+    this.send({ type: "reset", data: this.buildInitData() });
+    this.setStatus(this.currentSession.pinnedAt ? "Session pinned" : "Session unpinned");
   }
 
   private async showGitDiff() {
@@ -647,6 +1822,85 @@ export class NativeTuiBackend {
     } catch (error) {
       this.commitError(`Unable to summarize git diff: ${error instanceof Error ? error.message : String(error)}`);
       this.setStatus("Diff failed");
+    }
+  }
+
+  private showTaskRuns() {
+    const runs = this.currentSession?.taskRuns ?? [];
+    if (runs.length === 0) {
+      this.commitSystem("No task runs have been recorded in this session yet.");
+      this.setStatus("Task runs");
+      return;
+    }
+    this.send({
+      type: "modal",
+      title: "Task-run evidence",
+      body: [
+        ...runs
+          .slice(-20)
+          .reverse()
+          .map((run) => {
+            const approvals = run.approvals?.length ?? 0;
+            const checkpoint = run.checkpoint
+              ? ` · checkpoint ${run.checkpoint.revertedAt ? "reverted" : `${run.checkpoint.changedPaths.length} paths`}`
+              : "";
+            return [
+              `${run.id}  ${run.status}  ${run.promptPreview}`,
+              `model: ${run.model ?? "unknown"}${run.modelSelectionReason ? ` (${run.modelSelectionReason})` : ""}`,
+              `tools: ${run.tools.length} · artifacts: ${run.artifacts.length} · approvals: ${approvals}${checkpoint}`,
+              run.loop
+                ? `loop: ${run.loop.status} · iteration ${run.loop.iteration}/${run.loop.maxIterations}${run.loop.lastDecision ? ` · ${run.loop.lastDecision}` : ""}`
+                : undefined,
+              run.planMode ? `plan: ${run.planReview?.status ?? "awaiting review"}` : undefined,
+              run.worktree ? `worktree: ${run.worktree.status}${run.worktree.branch ? ` · ${run.worktree.branch}` : ""}` : undefined,
+              run.verification ? `verification: ${run.verification.status}` : undefined,
+              run.error ? `error: ${run.error}` : undefined
+            ]
+              .filter(Boolean)
+              .join("\n");
+          }),
+        ...(this.currentSession?.queuedPrompts?.length
+          ? [
+              "Queued prompts:",
+              ...this.currentSession.queuedPrompts.map(
+                (prompt) => `${prompt.id}  ${prompt.state}  ${chatContentToText(prompt.content).slice(0, 180)}`
+              )
+            ]
+          : [])
+      ].join("\n\n")
+    });
+    this.setStatus("Task runs");
+  }
+
+  private async steerQueuedPrompt(promptId: string) {
+    if (!this.busy || !this.currentSession) {
+      this.commitError("There is no active run to steer.");
+      this.setStatus("Steering unavailable");
+      return;
+    }
+    try {
+      const prompt = markPromptForSteering(this.currentSession, promptId);
+      // Retain the FIFO entry until the Agent reports that it actually consumed
+      // the message. If the turn ends before a safe boundary, it will be run as
+      // the next ordinary prompt; removing it here would strand a `steering`
+      // durable record without any foreground handoff.
+      this.currentSession.updatedAt = new Date().toISOString();
+      await this.store.save(this.currentSession);
+      this.commitSystem(`Queued prompt ${prompt.id} will steer the active run at its next safe model boundary.`);
+      this.setStatus("Steering queued", true);
+    } catch (error) {
+      this.commitError(`Unable to steer queued prompt: ${error instanceof Error ? error.message : String(error)}`);
+      this.setStatus("Steering failed", true);
+    }
+  }
+
+  private dropConsumedQueuedInputs() {
+    const pendingIds = new Set((this.currentSession?.queuedPrompts ?? []).map((prompt) => prompt.id));
+    for (let index = this.promptQueue.length - 1; index >= 0; index -= 1) {
+      const entry = this.promptQueue[index];
+      if (entry?.kind === "prompt" && entry.queuedPromptId && !pendingIds.has(entry.queuedPromptId)) {
+        this.promptQueue.splice(index, 1);
+      }
     }
   }
 
@@ -740,8 +1994,10 @@ export class NativeTuiBackend {
         });
       }
     } finally {
-      this.busy = false;
       this.runAbortController = undefined;
+      // Summary owns the same foreground slot as a prompt. Use the regular handoff so
+      // messages submitted while it was running do not get stranded in the FIFO queue.
+      this.finishForegroundRun();
     }
   }
 
@@ -954,18 +2210,50 @@ export class NativeTuiBackend {
 
   private async resumeSession(sessionId: string) {
     this.cancelModelOperation();
+    const previous = {
+      session: this.currentSession,
+      config: this.config,
+      cwd: this.cwd,
+      workspace: this.workspace,
+      agent: this.agent,
+      browserController: this.browserController,
+      browserSessionKey: this.browserSessionKey
+    };
     try {
       const session = await this.store.load(sessionId);
+      const baseConfig = await loadConfig();
       this.currentSession = session;
       this.resetBrowserController(session.id);
-      this.config = configForSession(this.options.config, session);
+      this.config = configForSession(baseConfig, session);
       this.cwd = session.cwd;
       this.workspace = await detectWorkspace(this.cwd);
       this.agent = this.createAgent(session);
+      this.promptQueue.length = 0;
+      this.pendingQueuedInput = undefined;
+      this.queuedDispatchGeneration += 1;
+      this.queueStartupBlocked = false;
+      this.pendingAttachments.length = 0;
+      this.pendingFileContexts.length = 0;
+      this.nextPromptPlanMode = false;
+      this.nextPromptApprovedPlanTaskRunId = undefined;
+      this.nextPromptLoopMaxIterations = undefined;
+      this.nextPromptWorktreeMode = false;
+      this.nextPromptWorktreeContinuation = undefined;
+      this.restoreDurablePromptQueue();
       this.currentContextTokens = undefined;
       this.send({ type: "reset", data: this.buildInitData() });
       this.setStatus(`Resumed session ${shortId(session.id)}`);
+      if (this.promptQueue.length > 0) {
+        this.finishForegroundRun();
+      }
     } catch (error) {
+      this.currentSession = previous.session;
+      this.config = previous.config;
+      this.cwd = previous.cwd;
+      this.workspace = previous.workspace;
+      this.agent = previous.agent;
+      this.browserController = previous.browserController;
+      this.browserSessionKey = previous.browserSessionKey;
       this.commitError(`Unable to resume session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
       this.setStatus("Resume failed");
     }
@@ -979,7 +2267,9 @@ export class NativeTuiBackend {
         type: "approval",
         id,
         title: request?.summary || "Approval required",
-        message,
+        // The terminal renderer is intentionally compact, but the decision must still
+        // include the structured evidence desktop shows instead of a raw prompt alone.
+        message: request ? formatNativeApprovalEvidence(request, message) : message,
         risky: request?.risky
       });
     });
@@ -990,6 +2280,29 @@ export class NativeTuiBackend {
       resolve(approved);
     }
     this.approvalResolvers.clear();
+  }
+
+  private elicit(request: ElicitationRequest): Promise<ElicitationResponse> {
+    return new Promise<ElicitationResponse>((resolve) => {
+      const id = randomUUID();
+      this.elicitationResolvers.set(id, resolve);
+      this.elicitationRequests.set(id, request);
+      this.send({
+        type: "elicitation",
+        id,
+        title: request.title,
+        reason: request.reason,
+        questions: request.questions.map(nativeElicitationQuestion)
+      });
+    });
+  }
+
+  private resolveAllElicitations() {
+    for (const resolve of this.elicitationResolvers.values()) {
+      resolve({ status: "declined", note: "The terminal UI closed before the questions were answered." });
+    }
+    this.elicitationResolvers.clear();
+    this.elicitationRequests.clear();
   }
 
   private buildInitData(): NativeInitData {
@@ -1055,6 +2368,8 @@ export class NativeTuiBackend {
   private stopRun() {
     this.cancelModelOperation();
     if (this.runAbortController && !this.runAbortController.signal.aborted) {
+      this.resolveAllElicitations();
+      this.resolveAllApprovals(false);
       this.runAbortController.abort(new AgentRunAbortedError());
       this.setStatus("Stopping", true);
       return;
@@ -1063,6 +2378,13 @@ export class NativeTuiBackend {
       const pending = this.pendingQueuedInput;
       this.pendingQueuedInput = undefined;
       this.queuedDispatchGeneration += 1;
+      if (pending.kind === "prompt" && pending.queuedPromptId && this.currentSession) {
+        this.currentSession.queuedPrompts = (this.currentSession.queuedPrompts ?? []).filter(
+          (prompt) => prompt.id !== pending.queuedPromptId
+        );
+        this.currentSession.updatedAt = new Date().toISOString();
+        this.pendingQueueCancellation = this.store.save(this.currentSession);
+      }
       this.busy = false;
       if (this.closing || this.promptQueue.length === 0) {
         this.setStatus(`Queued ${pending.kind === "shell" ? "command" : "prompt"} stopped`);
@@ -1084,6 +2406,10 @@ export class NativeTuiBackend {
         type: "run_failed",
         message: `${label}: ${error instanceof Error ? error.message : String(error)}`
       });
+      if (label.startsWith("Unable to run queued") && this.busy && !this.runAbortController) {
+        this.busy = false;
+        this.finishForegroundRun();
+      }
     });
   }
 
@@ -1095,6 +2421,7 @@ export class NativeTuiBackend {
     this.cancelModelOperation();
     this.stopRun();
     this.resolveAllApprovals(false);
+    this.resolveAllElicitations();
     this.send({ type: "quit" });
   }
 
@@ -1153,26 +2480,117 @@ export class NativeTuiBackend {
 function commandChangesRunState(command: TuiSlashCommand) {
   return (
     command.kind === "compact" ||
+    command.kind === "delete" ||
     command.kind === "model" ||
+    command.kind === "new" ||
+    command.kind === "pin" ||
+    command.kind === "rename" ||
+    command.kind === "undo" ||
     command.kind === "continue" ||
     command.kind === "resume" ||
     command.kind === "summarize" ||
+    command.kind === "plan" ||
+    command.kind === "worktree" ||
+    (command.kind === "integrations" && command.action !== "list") ||
     (command.kind === "sessions" && Boolean(command.pick))
   );
 }
 
-function configForSession(config: AppConfig, session?: AgentSession): AppConfig {
+export function configForSession(config: AppConfig, session?: AgentSession): AppConfig {
   if (!session) {
     return config;
   }
+  const baseUrl = session.baseUrl ?? config.baseUrl;
+  const normalizedBaseUrl = normalizeCapabilityBaseUrl(baseUrl);
+  const selected = session.selectedProviderId
+    ? config.providers.find((candidate) => candidate.id === session.selectedProviderId)
+    : undefined;
+  const provider =
+    selected && normalizeCapabilityBaseUrl(selected.baseUrl) === normalizedBaseUrl
+      ? selected
+      : config.providers.find(
+          (candidate) =>
+            normalizeCapabilityBaseUrl(candidate.baseUrl) === normalizedBaseUrl && (!session.model || candidate.model === session.model)
+        );
   return {
     ...config,
     model: session.model ?? config.model,
-    baseUrl: session.baseUrl ?? config.baseUrl,
-    trustMode: session.trustMode
+    baseUrl,
+    trustMode: session.trustMode,
+    ...(provider
+      ? {
+          apiKey:
+            provider.apiKey ??
+            (normalizeCapabilityBaseUrl(provider.baseUrl) === normalizeCapabilityBaseUrl(config.baseUrl) ? config.apiKey : undefined),
+          toolCalling: provider.toolCalling,
+          imageInput: provider.imageInput,
+          activeProviderId: provider.id
+        }
+      : session.baseUrl && normalizeCapabilityBaseUrl(session.baseUrl) !== normalizeCapabilityBaseUrl(config.baseUrl)
+        ? { apiKey: undefined }
+        : {})
   };
+}
+
+function taskRunStatusForLoop(loop: AgentSession["agentLoop"]): AgentTaskRun["status"] {
+  switch (loop?.status) {
+    case "stopped":
+      return "stopped";
+    case "blocked":
+      return "blocked";
+    case "failed":
+      return "failed";
+    case "max_iterations":
+      return "max_iterations";
+    default:
+      return "completed";
+  }
 }
 
 function shortId(id: string) {
   return id.slice(0, 8);
+}
+
+function nativeElicitationQuestion(question: ElicitationRequest["questions"][number]): NativeElicitationQuestion {
+  return {
+    id: question.id,
+    type: question.type,
+    label: question.label,
+    description: question.description,
+    required: question.required,
+    options: question.options,
+    allow_other: question.allowOther,
+    placeholder: question.placeholder,
+    min: question.min,
+    max: question.max,
+    min_count: question.minCount,
+    max_count: question.maxCount
+  };
+}
+
+function formatNativeApprovalEvidence(request: ApprovalPromptRequest, fallback: string) {
+  const preview = request.changePreview;
+  return [
+    request.label || fallback,
+    `Capability: ${request.capability}`,
+    request.reason ? `Policy: ${request.reason}` : undefined,
+    request.scope
+      ? `Scope: ${request.scope.label}${request.scope.value ? ` — ${request.scope.value}` : ""}${request.scope.detail ? `\n${request.scope.detail}` : ""}`
+      : undefined,
+    preview
+      ? [
+          `Change preview: ${preview.title}${preview.summary ? ` — ${preview.summary}` : ""}`,
+          preview.path ? `Path: ${preview.path}` : undefined,
+          preview.diff ? preview.diff : undefined,
+          preview.content ? preview.content : undefined,
+          preview.original ? `Original:\n${preview.original}` : undefined
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : undefined,
+    request.risky ? "Risk: elevated" : undefined,
+    "\nApprove? Enter/Y = approve · Esc/N = deny"
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }

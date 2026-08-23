@@ -8,7 +8,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ApprovalState, ModalState, ModelPickerState, PickerState};
+use crate::app::{
+    App, ApprovalState, ElicitationState, ModalState, ModelPickerState, PasteReviewState,
+    PickerState,
+};
 use crate::layout::{inset_x, top_breathing_rows};
 use crate::protocol::{ActivityItem, ActivityPhase};
 use crate::theme;
@@ -48,6 +51,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     if let Some(approval) = &app.approval {
         render_approval(frame, content, approval);
+    } else if let Some(elicitation) = &app.elicitation {
+        render_elicitation(frame, content, elicitation);
+    } else if let Some(review) = &app.paste_review {
+        render_paste_review(frame, content, review);
     } else if let Some(picker) = &app.picker {
         render_picker(frame, content, picker);
     } else if let Some(picker) = &app.model_picker {
@@ -71,6 +78,160 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     render_status(frame, status, app);
     render_prompt(frame, prompt, app);
     render_footer(frame, footer);
+}
+
+fn render_paste_review(frame: &mut Frame<'_>, area: Rect, review: &PasteReviewState) {
+    let size = review.value.chars().count();
+    let body = format!(
+        "Large paste detected: {size} characters (about {} tokens).\n\n1  Insert full paste\n2  Insert text truncated to the remaining composer budget\n3 / Esc  Cancel\n\nReviewing this paste prevents accidental context flooding.",
+        size / 4
+    );
+    Paragraph::new(body)
+        .wrap(Wrap { trim: false })
+        .style(theme::base())
+        .render(area, frame.buffer_mut());
+}
+
+fn render_elicitation(frame: &mut Frame<'_>, area: Rect, state: &ElicitationState) {
+    let Some(question) = state.question() else {
+        return;
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            if state.title.is_empty() {
+                "Question"
+            } else {
+                &state.title
+            },
+            theme::accent_bold(),
+        )),
+        Line::from(Span::styled(
+            format!("{} of {}", state.index + 1, state.questions.len()),
+            theme::dim(),
+        )),
+    ];
+    if !state.reason.is_empty() {
+        lines.push(Line::from(Span::styled(&state.reason, theme::muted())));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        &question.label,
+        theme::accent_bold(),
+    )));
+    if !question.description.is_empty() {
+        lines.push(Line::from(Span::styled(
+            &question.description,
+            theme::muted(),
+        )));
+    }
+    match question.kind.as_str() {
+        "select" | "multiselect" => {
+            for (index, option) in question.options.iter().enumerate() {
+                let selected = state
+                    .selected
+                    .get(state.index)
+                    .and_then(|values| values.get(index))
+                    .copied()
+                    .unwrap_or(false);
+                let marker = if question.kind == "multiselect" {
+                    if selected { "[x]" } else { "[ ]" }
+                } else if index == state.option_cursor {
+                    "›  "
+                } else {
+                    "   "
+                };
+                lines.push(Line::from(format!(
+                    "{} {}. {}",
+                    marker,
+                    index + 1,
+                    if option.label.is_empty() {
+                        &option.value
+                    } else {
+                        &option.label
+                    }
+                )));
+                if !option.description.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("     {}", option.description),
+                        theme::dim(),
+                    )));
+                }
+            }
+            if question.allow_other {
+                lines.push(Line::from(Span::styled(
+                    "O  enter another value",
+                    theme::dim(),
+                )));
+            }
+            if state.entering_other {
+                lines.push(Line::from(Span::styled(
+                    format!("Other › {}", state.input),
+                    theme::base(),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                if question.kind == "select" {
+                    "Up/Down + Enter choose · O enters Other · Esc declines"
+                } else {
+                    "Up/Down + Space toggle · Enter submits · Esc declines"
+                },
+                theme::dim(),
+            )));
+        }
+        "images" | "files" => lines.push(Line::from(Span::styled(
+            "Enter absolute paths separated by commas, then Enter · Esc declines",
+            theme::dim(),
+        ))),
+        _ => lines.push(Line::from(Span::styled(
+            "Type an answer, then Enter · Esc declines",
+            theme::dim(),
+        ))),
+    }
+    if !matches!(question.kind.as_str(), "select" | "multiselect") {
+        if !question.placeholder.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("Hint: {}", question.placeholder),
+                theme::dim(),
+            )));
+        }
+        if question.kind == "number" && (question.min.is_some() || question.max.is_some()) {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "Range: {} to {}",
+                    question
+                        .min
+                        .map_or("unbounded".to_owned(), |value| value.to_string()),
+                    question
+                        .max
+                        .map_or("unbounded".to_owned(), |value| value.to_string())
+                ),
+                theme::dim(),
+            )));
+        }
+        if matches!(question.kind.as_str(), "images" | "files") {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "Files: {}–{} absolute existing path(s)",
+                    question.min_count.unwrap_or(usize::from(question.required)),
+                    question.max_count.unwrap_or(10)
+                ),
+                theme::dim(),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("› {}", state.input),
+            theme::base(),
+        )));
+    }
+    if let Some(error) = &state.error {
+        lines.push(Line::from(Span::styled(
+            error,
+            Style::default().fg(theme::ERROR),
+        )));
+    }
+    Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: false })
+        .render(area, frame.buffer_mut());
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {

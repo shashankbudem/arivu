@@ -43,12 +43,36 @@ describe("TUI slash commands", () => {
     });
     expect(parseTuiSlashCommand("/resume abc123")).toEqual({ kind: "resume", sessionId: "abc123" });
     expect(parseTuiSlashCommand("/activity")).toEqual({ kind: "activity" });
-    expect(parseTuiSlashCommand("/tools")).toEqual({ kind: "activity" });
+    expect(parseTuiSlashCommand("/tools")).toEqual({ kind: "tools", action: "list" });
+    expect(parseTuiSlashCommand("/tools disable run")).toEqual({ kind: "tools", action: "disable", name: "run" });
+    expect(parseTuiSlashCommand("/integrations install proposal-1")).toEqual({ kind: "integrations", action: "install", id: "proposal-1" });
+    expect(parseTuiSlashCommand("/mcp enable github")).toEqual({ kind: "integrations", action: "enable", id: "github" });
     expect(parseTuiSlashCommand("/diff")).toEqual({ kind: "diff" });
+    expect(parseTuiSlashCommand("/runs")).toEqual({ kind: "runs" });
+    expect(parseTuiSlashCommand("/undo abc123")).toEqual({ kind: "undo", taskRunId: "abc123" });
+    expect(parseTuiSlashCommand("/queue retry")).toEqual({ kind: "queue", action: "retry" });
     expect(parseTuiSlashCommand("/compact")).toEqual({ kind: "compact" });
     expect(parseTuiSlashCommand("/compact 4")).toEqual({ kind: "compact", recentMessageCount: 4 });
     expect(parseTuiSlashCommand("/model")).toEqual({ kind: "model", model: undefined });
     expect(parseTuiSlashCommand("/model gpt-4.1-mini")).toEqual({ kind: "model", model: "gpt-4.1-mini" });
+    expect(parseTuiSlashCommand("/attach file docs/my notes.txt")).toEqual({
+      kind: "attach",
+      attachmentType: "file",
+      path: "docs/my notes.txt"
+    });
+    expect(parseTuiSlashCommand("/plan")).toEqual({ kind: "plan", action: "arm" });
+    expect(parseTuiSlashCommand("/plan approve abc123")).toEqual({ kind: "plan", action: "approve", taskRunId: "abc123" });
+    expect(parseTuiSlashCommand("/plan run abc123")).toEqual({ kind: "plan", action: "run", taskRunId: "abc123" });
+    expect(parseTuiSlashCommand("/loop 3")).toEqual({ kind: "loop", action: "arm", maxIterations: 3 });
+    expect(parseTuiSlashCommand("/loop stop")).toEqual({ kind: "loop", action: "stop" });
+    expect(parseTuiSlashCommand("/worktree preview abc123")).toEqual({ kind: "worktree", action: "preview", taskRunId: "abc123" });
+    expect(parseTuiSlashCommand("/worktree replay abc123 verify456")).toEqual({
+      kind: "worktree",
+      action: "replay",
+      taskRunId: "abc123",
+      replayOfTaskRunId: "verify456"
+    });
+    expect(parseTuiSlashCommand("/worktree checks abc123")).toEqual({ kind: "worktree", action: "checks", taskRunId: "abc123" });
   });
 
   it("keeps unknown slash commands available for model prompts", () => {

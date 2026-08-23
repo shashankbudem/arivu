@@ -31,11 +31,102 @@ export const NATIVE_TUI_COMMANDS: NativeCommandSpec[] = [
     aliases: []
   },
   {
+    command: "/runs",
+    usage: "/runs",
+    title: "Task-run evidence",
+    description: "Review persisted task status, tools, approvals, artifacts, verification, and checkpoints.",
+    aliases: ["/evidence"]
+  },
+  {
+    command: "/undo",
+    usage: "/undo <task-run-id>",
+    title: "Undo task run",
+    description: "Revert direct-workspace files captured before an eligible task run.",
+    aliases: [],
+    takes_args: true,
+    args_required: true
+  },
+  {
+    command: "/steer",
+    usage: "/steer <queued-prompt-id>",
+    title: "Steer current run",
+    description: "Apply a durable queued prompt at the next safe model boundary.",
+    aliases: [],
+    takes_args: true,
+    args_required: true
+  },
+  {
+    command: "/queue",
+    usage: "/queue retry",
+    title: "Retry queued prompts",
+    description: "Deliberately retry queued prompts after a startup failure.",
+    aliases: [],
+    takes_args: true,
+    args_required: true
+  },
+  {
+    command: "/attach",
+    usage: "/attach <file|image> <workspace-path>",
+    title: "Attach context",
+    description: "Attach a bounded workspace text file or image to the next prompt.",
+    aliases: [],
+    takes_args: true,
+    args_required: true
+  },
+  {
+    command: "/plan",
+    usage: "/plan [approve|revise|cancel|run <run>]",
+    title: "Plan approval",
+    description: "Arm/review a plan, or run an approved plan in a new managed worktree.",
+    aliases: [],
+    takes_args: true
+  },
+  {
+    command: "/loop",
+    usage: "/loop [1-10|stop]",
+    title: "Bounded agent loop",
+    description: "Arm the next prompt for bounded iterations, or stop the current loop.",
+    aliases: [],
+    takes_args: true
+  },
+  {
+    command: "/worktree",
+    usage: "/worktree [run|replay|status|preview|merge|sync|continue|abort|discard|cleanup|prepare_pr|create_pr|refresh_pr|checks <run>]",
+    title: "Managed task worktree",
+    description: "Arm isolated worktree execution or review its lifecycle actions.",
+    aliases: [],
+    takes_args: true
+  },
+  {
+    command: "/attachments",
+    usage: "/attachments [list|clear|remove <number>]",
+    title: "Manage attachments",
+    description: "List, remove, or clear pending prompt attachments.",
+    aliases: [],
+    takes_args: true
+  },
+  {
     command: "/activity",
     usage: "/activity",
     title: "Tool activity",
     description: "Open complete tool arguments, progress, and results.",
-    aliases: ["/tools"]
+    aliases: []
+  },
+  {
+    command: "/tools",
+    usage: "/tools [list|enable|disable <tool>]",
+    title: "Tool availability",
+    description: "Review or persist which agent tools are enabled for future TUI turns.",
+    aliases: [],
+    takes_args: true
+  },
+  {
+    command: "/integrations",
+    usage: "/integrations [list|install|enable|disable|reject|remove <id>]",
+    title: "MCP integrations",
+    description: "Review proposals and manage disabled-by-default MCP integrations.",
+    aliases: ["/mcp"],
+    takes_args: true
   },
   {
     command: "/continue",
@@ -66,6 +157,36 @@ export const NATIVE_TUI_COMMANDS: NativeCommandSpec[] = [
     description: "List or filter saved sessions; Ctrl+S opens the picker.",
     aliases: [],
     takes_args: true
+  },
+  {
+    command: "/new",
+    usage: "/new",
+    title: "New session",
+    description: "Start a fresh session in the current workspace.",
+    aliases: []
+  },
+  {
+    command: "/rename",
+    usage: "/rename <title>",
+    title: "Rename session",
+    description: "Set the active session title.",
+    aliases: [],
+    takes_args: true,
+    args_required: true
+  },
+  {
+    command: "/pin",
+    usage: "/pin",
+    title: "Pin session",
+    description: "Toggle whether the active session is pinned.",
+    aliases: []
+  },
+  {
+    command: "/delete",
+    usage: "/delete",
+    title: "Delete session",
+    description: "Delete the active saved session and start a new one.",
+    aliases: []
   },
   {
     command: "/resume",

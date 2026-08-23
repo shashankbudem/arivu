@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::protocol::{
-    ActivityItem, ActivityPhase, ClientEvent, CommandSpec, EntryKind, InitData, ModelChoice,
-    ServerEvent, SessionChoice, ShellOutputStream, TranscriptEntry,
+    ActivityItem, ActivityPhase, ClientEvent, CommandSpec, ElicitationAnswer, ElicitationQuestion,
+    EntryKind, InitData, ModelChoice, ServerEvent, SessionChoice, ShellOutputStream,
+    TranscriptEntry,
 };
 use crate::slash;
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct ApprovalState {
@@ -24,6 +26,53 @@ pub struct ModalState {
     pub title: String,
     pub body: String,
     pub scroll: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct ElicitationState {
+    pub id: String,
+    pub title: String,
+    pub reason: String,
+    pub questions: Vec<ElicitationQuestion>,
+    pub index: usize,
+    pub input: String,
+    pub selected: Vec<Vec<bool>>,
+    pub option_cursor: usize,
+    pub entering_other: bool,
+    pub answers: Vec<ElicitationAnswer>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasteReviewState {
+    pub value: String,
+    pub truncated: String,
+}
+
+impl ElicitationState {
+    fn new(id: String, title: String, reason: String, questions: Vec<ElicitationQuestion>) -> Self {
+        let selected = questions
+            .iter()
+            .map(|question| vec![false; question.options.len()])
+            .collect();
+        Self {
+            id,
+            title,
+            reason,
+            questions,
+            index: 0,
+            input: String::new(),
+            selected,
+            option_cursor: 0,
+            entering_other: false,
+            answers: Vec::new(),
+            error: None,
+        }
+    }
+
+    pub fn question(&self) -> Option<&ElicitationQuestion> {
+        self.questions.get(self.index)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +118,10 @@ impl ModelPickerState {
 }
 
 const MAX_LIVE_SHELL_OUTPUT_BYTES: usize = 64_000;
+const MAX_ELICITATION_FILE_COUNT: usize = 10;
+const COMPOSER_TOKEN_BUDGET: usize = 8_000;
+const TRUNCATION_NOTICE: &str =
+    "\n\n[Truncated before sending: pasted text exceeded the composer token budget.]";
 const LIVE_SHELL_OUTPUT_MARKER: &str =
     "\n… [live output capped; final result keeps recent output] …\n";
 
@@ -164,6 +217,8 @@ pub struct App {
     pub current_shell: Option<LiveShellState>,
     pub run_started_at: Option<Instant>,
     pub approval: Option<ApprovalState>,
+    pub elicitation: Option<ElicitationState>,
+    pub paste_review: Option<PasteReviewState>,
     pub modal: Option<ModalState>,
     pub picker: Option<PickerState>,
     pub model_picker: Option<ModelPickerState>,
@@ -203,6 +258,8 @@ impl App {
             current_shell: None,
             run_started_at: None,
             approval: None,
+            elicitation: None,
+            paste_review: None,
             modal: None,
             picker: None,
             model_picker: None,
@@ -236,6 +293,8 @@ impl App {
         self.busy = false;
         self.run_started_at = None;
         self.approval = None;
+        self.elicitation = None;
+        self.paste_review = None;
         self.modal = None;
         self.picker = None;
         self.model_picker = None;
@@ -461,6 +520,15 @@ impl App {
                 });
                 self.status = "Waiting for approval".to_owned();
             }
+            ServerEvent::Elicitation {
+                id,
+                title,
+                reason,
+                questions,
+            } => {
+                self.elicitation = Some(ElicitationState::new(id, title, reason, questions));
+                self.status = "Waiting for answers".to_owned();
+            }
             ServerEvent::Modal { title, body } => {
                 self.modal = Some(ModalState {
                     title,
@@ -555,8 +623,29 @@ impl App {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return Vec::new();
         }
+        if self.approval.is_some()
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c'))
+        {
+            let approval = self.approval.take().expect("approval exists");
+            self.status = "Approval denied; stopping".to_owned();
+            let mut events = vec![ClientEvent::ApprovalResponse {
+                id: approval.id,
+                approved: false,
+            }];
+            if self.busy {
+                events.push(ClientEvent::Stop);
+            }
+            return events;
+        }
         if self.approval.is_some() {
             return self.handle_approval_key(key);
+        }
+        if self.elicitation.is_some() {
+            return self.handle_elicitation_key(key);
+        }
+        if self.paste_review.is_some() {
+            return self.handle_paste_review_key(key);
         }
         if self.picker.is_some() {
             return self.handle_picker_key(key);
@@ -684,11 +773,30 @@ impl App {
 
     pub fn handle_paste(&mut self, value: &str) {
         if self.approval.is_none()
+            && self.elicitation.is_none()
+            && self.paste_review.is_none()
             && self.modal.is_none()
             && self.picker.is_none()
             && self.model_picker.is_none()
         {
-            self.insert_text(value);
+            let byte = byte_index(&self.prompt, self.prompt_cursor);
+            let full_prompt = format!("{}{}{}", &self.prompt[..byte], value, &self.prompt[byte..]);
+            if estimate_token_count(&full_prompt) > COMPOSER_TOKEN_BUDGET {
+                let existing = format!("{}{}", &self.prompt[..byte], &self.prompt[byte..]);
+                self.paste_review = Some(PasteReviewState {
+                    value: value.to_owned(),
+                    truncated: truncate_to_token_budget(
+                        value,
+                        COMPOSER_TOKEN_BUDGET.saturating_sub(estimate_token_count(&existing)),
+                    ),
+                });
+                self.status = format!(
+                    "Large paste (≈{} tokens) needs review",
+                    estimate_token_count(value)
+                );
+            } else {
+                self.insert_text(value);
+            }
         }
     }
 
@@ -710,6 +818,277 @@ impl App {
         vec![ClientEvent::ApprovalResponse {
             id: approval.id,
             approved,
+        }]
+    }
+
+    fn handle_paste_review_key(&mut self, key: KeyEvent) -> Vec<ClientEvent> {
+        let choice = match key.code {
+            KeyCode::Char('1') | KeyCode::Enter => Some(true),
+            KeyCode::Char('2') => Some(false),
+            KeyCode::Char('3') | KeyCode::Esc => None,
+            _ => return Vec::new(),
+        };
+        let review = self.paste_review.take().expect("paste review exists");
+        if let Some(full) = choice {
+            let value = if full { review.value } else { review.truncated };
+            self.insert_text(&value);
+            self.status = if full {
+                "Large paste inserted".to_owned()
+            } else {
+                "Large paste inserted (truncated)".to_owned()
+            };
+        } else {
+            self.status = "Large paste cancelled".to_owned();
+        }
+        Vec::new()
+    }
+
+    fn handle_elicitation_key(&mut self, key: KeyEvent) -> Vec<ClientEvent> {
+        if matches!(key.code, KeyCode::Esc)
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c')))
+        {
+            let request = self.elicitation.take().expect("elicitation exists");
+            self.status = "Questions declined".to_owned();
+            return vec![ClientEvent::ElicitationResponse {
+                id: request.id,
+                status: "declined".to_owned(),
+                answers: None,
+            }];
+        }
+        let state = self.elicitation.as_mut().expect("elicitation exists");
+        let Some(question) = state.question().cloned() else {
+            return Vec::new();
+        };
+        state.error = None;
+        match question.kind.as_str() {
+            "select" | "multiselect" if state.entering_other => match key.code {
+                KeyCode::Enter => {
+                    let other = state.input.trim().to_owned();
+                    if other.is_empty() && question.required && question.kind == "select" {
+                        state.error = Some("Enter an Other value, or Esc to decline.".to_owned());
+                    } else if question.kind == "select" {
+                        state.answers.push(ElicitationAnswer {
+                            id: question.id,
+                            value: (!other.is_empty()).then_some(Value::String(other)),
+                            skipped: state.input.trim().is_empty().then_some(true),
+                        });
+                        return self.advance_elicitation();
+                    } else {
+                        state.entering_other = false;
+                    }
+                }
+                KeyCode::Backspace => {
+                    state.input.pop();
+                }
+                KeyCode::Char(character) => state.input.push(character),
+                _ => {}
+            },
+            "select" => match key.code {
+                KeyCode::Char(digit @ '1'..='9') => {
+                    let index = digit as usize - '1' as usize;
+                    if let Some(option) = question.options.get(index) {
+                        state.answers.push(ElicitationAnswer {
+                            id: question.id,
+                            value: Some(Value::String(option.value.clone())),
+                            skipped: None,
+                        });
+                        return self.advance_elicitation();
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    state.option_cursor = state.option_cursor.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    state.option_cursor =
+                        (state.option_cursor + 1).min(question.options.len().saturating_sub(1))
+                }
+                KeyCode::Enter => {
+                    if let Some(option) = question.options.get(state.option_cursor) {
+                        state.answers.push(ElicitationAnswer {
+                            id: question.id,
+                            value: Some(Value::String(option.value.clone())),
+                            skipped: None,
+                        });
+                        return self.advance_elicitation();
+                    }
+                    if !question.required {
+                        state.answers.push(ElicitationAnswer {
+                            id: question.id,
+                            value: None,
+                            skipped: Some(true),
+                        });
+                        return self.advance_elicitation();
+                    }
+                }
+                KeyCode::Char('o' | 'O') if question.allow_other => {
+                    state.entering_other = true;
+                    state.input.clear();
+                }
+                _ => {}
+            },
+            "multiselect" => match key.code {
+                KeyCode::Char(digit @ '1'..='9') => {
+                    let index = digit as usize - '1' as usize;
+                    if let Some(selected) = state
+                        .selected
+                        .get_mut(state.index)
+                        .and_then(|values| values.get_mut(index))
+                    {
+                        *selected = !*selected;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    state.option_cursor = state.option_cursor.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    state.option_cursor =
+                        (state.option_cursor + 1).min(question.options.len().saturating_sub(1))
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(selected) = state
+                        .selected
+                        .get_mut(state.index)
+                        .and_then(|values| values.get_mut(state.option_cursor))
+                    {
+                        *selected = !*selected;
+                    }
+                }
+                KeyCode::Char('o' | 'O') if question.allow_other => {
+                    state.entering_other = true;
+                    state.input.clear();
+                }
+                KeyCode::Enter => {
+                    let mut values = state
+                        .selected
+                        .get(state.index)
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                        .filter_map(|(index, selected)| {
+                            selected
+                                .then(|| {
+                                    question
+                                        .options
+                                        .get(index)
+                                        .map(|option| option.value.clone())
+                                })
+                                .flatten()
+                        })
+                        .collect::<Vec<_>>();
+                    let other = state.input.trim();
+                    if !other.is_empty() {
+                        values.push(other.to_owned());
+                    }
+                    if question.required && values.is_empty() {
+                        state.error =
+                            Some("Select at least one option, or Esc to decline.".to_owned());
+                    } else {
+                        let skipped = values.is_empty();
+                        state.answers.push(ElicitationAnswer {
+                            id: question.id,
+                            value: (!skipped).then(|| {
+                                Value::Array(values.into_iter().map(Value::String).collect())
+                            }),
+                            skipped: skipped.then_some(true),
+                        });
+                        return self.advance_elicitation();
+                    }
+                }
+                _ => {}
+            },
+            _ => match key.code {
+                KeyCode::Enter => {
+                    let raw = state.input.trim().to_owned();
+                    if raw.is_empty() && question.required {
+                        state.error = Some("An answer is required, or Esc to decline.".to_owned());
+                    } else if question.kind == "number"
+                        && !raw.is_empty()
+                        && raw
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|value| value.is_finite())
+                            .is_none()
+                    {
+                        state.error = Some("Enter a finite number.".to_owned());
+                    } else if question.kind == "url" && !raw.is_empty() && !is_valid_http_url(&raw)
+                    {
+                        state.error = Some("Enter an http(s) URL.".to_owned());
+                    } else if question.kind == "number"
+                        && !raw.is_empty()
+                        && question
+                            .min
+                            .is_some_and(|min| raw.parse::<f64>().is_ok_and(|value| value < min))
+                    {
+                        state.error = Some(format!(
+                            "Must be at least {}.",
+                            question.min.unwrap_or_default()
+                        ));
+                    } else if question.kind == "number"
+                        && !raw.is_empty()
+                        && question
+                            .max
+                            .is_some_and(|max| raw.parse::<f64>().is_ok_and(|value| value > max))
+                    {
+                        state.error = Some(format!(
+                            "Must be at most {}.",
+                            question.max.unwrap_or_default()
+                        ));
+                    } else if matches!(question.kind.as_str(), "images" | "files") {
+                        match validate_paths(&raw, &question) {
+                            Ok(paths) => {
+                                state.answers.push(ElicitationAnswer {
+                                    id: question.id,
+                                    value: (!paths.is_empty()).then(|| {
+                                        Value::Array(paths.into_iter().map(Value::String).collect())
+                                    }),
+                                    skipped: raw.trim().is_empty().then_some(true),
+                                });
+                                return self.advance_elicitation();
+                            }
+                            Err(error) => state.error = Some(error),
+                        }
+                    } else {
+                        let value = match question.kind.as_str() {
+                            "number" => raw
+                                .parse::<f64>()
+                                .ok()
+                                .map(|value| serde_json::json!(value)),
+                            _ => (!raw.is_empty()).then_some(Value::String(raw)),
+                        };
+                        state.answers.push(ElicitationAnswer {
+                            id: question.id,
+                            value,
+                            skipped: state.input.trim().is_empty().then_some(true),
+                        });
+                        return self.advance_elicitation();
+                    }
+                }
+                KeyCode::Backspace => {
+                    state.input.pop();
+                }
+                KeyCode::Char(character) => state.input.push(character),
+                _ => {}
+            },
+        }
+        Vec::new()
+    }
+
+    fn advance_elicitation(&mut self) -> Vec<ClientEvent> {
+        let state = self.elicitation.as_mut().expect("elicitation exists");
+        state.index += 1;
+        state.input.clear();
+        state.option_cursor = 0;
+        state.entering_other = false;
+        if state.index < state.questions.len() {
+            return Vec::new();
+        }
+        let state = self.elicitation.take().expect("elicitation exists");
+        self.status = "Answers submitted".to_owned();
+        vec![ClientEvent::ElicitationResponse {
+            id: state.id,
+            status: "answered".to_owned(),
+            answers: Some(state.answers),
         }]
     }
 
@@ -1070,6 +1449,53 @@ fn utf8_prefix_boundary(value: &str, maximum: usize) -> usize {
     end
 }
 
+fn validate_paths(value: &str, question: &ElicitationQuestion) -> Result<Vec<String>, String> {
+    let paths = value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let minimum = question
+        .min_count
+        .unwrap_or(0)
+        .max(usize::from(question.required));
+    let maximum = question
+        .max_count
+        .unwrap_or(MAX_ELICITATION_FILE_COUNT)
+        .min(MAX_ELICITATION_FILE_COUNT);
+    if paths.len() < minimum {
+        return Err(format!("Provide at least {minimum} path(s)."));
+    }
+    if paths.len() > maximum {
+        return Err(format!("Provide at most {maximum} path(s)."));
+    }
+    for path in &paths {
+        let candidate = std::path::Path::new(path);
+        if !candidate.is_absolute() {
+            return Err(format!("Use an absolute path: {path}"));
+        }
+        if !candidate.is_file() {
+            return Err(format!("File not found: {path}"));
+        }
+        if question.kind == "images" {
+            let allowed = candidate
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "webp" | "gif"
+                    )
+                });
+            if !allowed {
+                return Err(format!("Image must be PNG, JPEG, WebP, or GIF: {path}"));
+            }
+        }
+    }
+    Ok(paths)
+}
+
 fn command_matches_prompt(command: &CommandSpec, prompt: &str) -> bool {
     let typed = prompt.split_whitespace().next().unwrap_or_default();
     typed.eq_ignore_ascii_case(
@@ -1090,6 +1516,79 @@ fn byte_index(value: &str, character_index: usize) -> usize {
         .nth(character_index)
         .map(|(index, _)| index)
         .unwrap_or(value.len())
+}
+
+fn estimate_token_count(value: &str) -> usize {
+    let mut total = 0;
+    let mut word = String::new();
+    let mut whitespace = String::new();
+    let flush_word = |word: &mut String, total: &mut usize| {
+        if !word.is_empty() {
+            let chars = word.chars().count();
+            *total += if word.is_ascii() {
+                chars.div_ceil(4).max(1)
+            } else {
+                chars.div_ceil(2).max(1)
+            };
+            word.clear();
+        }
+    };
+    let flush_whitespace = |whitespace: &mut String, total: &mut usize| {
+        if !whitespace.is_empty() {
+            *total += whitespace
+                .chars()
+                .filter(|character| *character == '\n')
+                .count();
+            whitespace.clear();
+        }
+    };
+    for character in value.chars() {
+        if character.is_whitespace() {
+            flush_word(&mut word, &mut total);
+            whitespace.push(character);
+        } else if character.is_alphanumeric() || character == '_' {
+            flush_whitespace(&mut whitespace, &mut total);
+            word.push(character);
+        } else {
+            flush_word(&mut word, &mut total);
+            flush_whitespace(&mut whitespace, &mut total);
+            total += 1;
+        }
+    }
+    flush_word(&mut word, &mut total);
+    flush_whitespace(&mut whitespace, &mut total);
+    total
+}
+
+fn truncate_to_token_budget(value: &str, max_tokens: usize) -> String {
+    if max_tokens == 0 {
+        return String::new();
+    }
+    if estimate_token_count(value) <= max_tokens {
+        return value.to_owned();
+    }
+    let notice_tokens = estimate_token_count(TRUNCATION_NOTICE);
+    let budget = max_tokens.saturating_sub(notice_tokens).max(1);
+    let mut output = String::new();
+    for character in value.chars() {
+        let candidate = format!("{}{}", output, character);
+        if estimate_token_count(&candidate) > budget {
+            break;
+        }
+        output.push(character);
+    }
+    let mut result = format!("{}{}", output.trim_end(), TRUNCATION_NOTICE);
+    while estimate_token_count(&result) > max_tokens && !output.is_empty() {
+        output.pop();
+        result = format!("{}{}", output.trim_end(), TRUNCATION_NOTICE);
+    }
+    result
+}
+
+fn is_valid_http_url(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
+    })
 }
 
 fn short_id(id: &str) -> &str {
@@ -1161,6 +1660,208 @@ mod tests {
             _ => panic!("expected a slash-command submission"),
         }
         assert!(app.prompt.is_empty());
+    }
+
+    #[test]
+    fn typed_elicitation_returns_selected_values_without_touching_the_chat_prompt() {
+        let mut app = app();
+        let _ = app.apply_server_event(ServerEvent::Elicitation {
+            id: "question-1".to_owned(),
+            title: "Deploy".to_owned(),
+            reason: "Choose a target".to_owned(),
+            questions: vec![ElicitationQuestion {
+                id: "target".to_owned(),
+                kind: "select".to_owned(),
+                label: "Where?".to_owned(),
+                description: String::new(),
+                required: true,
+                options: vec![crate::protocol::ElicitationOption {
+                    value: "staging".to_owned(),
+                    label: "Staging".to_owned(),
+                    description: String::new(),
+                }],
+                allow_other: false,
+                placeholder: String::new(),
+                min: None,
+                max: None,
+                min_count: None,
+                max_count: None,
+            }],
+        });
+
+        let events = app.handle_key(key(KeyCode::Char('1')));
+
+        assert!(app.prompt.is_empty());
+        match events.as_slice() {
+            [
+                ClientEvent::ElicitationResponse {
+                    id,
+                    status,
+                    answers: Some(answers),
+                },
+            ] => {
+                assert_eq!(id, "question-1");
+                assert_eq!(status, "answered");
+                assert_eq!(answers[0].id, "target");
+            }
+            _ => panic!("expected an elicitation response"),
+        }
+    }
+
+    #[test]
+    fn elicitation_navigation_reaches_the_twelfth_option_and_validates_number_bounds() {
+        let mut app = app();
+        let options = (1..=12)
+            .map(|index| crate::protocol::ElicitationOption {
+                value: index.to_string(),
+                label: format!("Option {index}"),
+                description: String::new(),
+            })
+            .collect();
+        let _ = app.apply_server_event(ServerEvent::Elicitation {
+            id: "many".to_owned(),
+            title: String::new(),
+            reason: String::new(),
+            questions: vec![ElicitationQuestion {
+                id: "choice".to_owned(),
+                kind: "select".to_owned(),
+                label: "Choose".to_owned(),
+                description: String::new(),
+                required: true,
+                options,
+                allow_other: false,
+                placeholder: String::new(),
+                min: None,
+                max: None,
+                min_count: None,
+                max_count: None,
+            }],
+        });
+        for _ in 0..11 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        let events = app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::ElicitationResponse { answers: Some(answers), .. }] if answers[0].value == Some(Value::String("12".to_owned())))
+        );
+
+        let _ = app.apply_server_event(ServerEvent::Elicitation {
+            id: "number".to_owned(),
+            title: String::new(),
+            reason: String::new(),
+            questions: vec![ElicitationQuestion {
+                id: "count".to_owned(),
+                kind: "number".to_owned(),
+                label: "Count".to_owned(),
+                description: String::new(),
+                required: true,
+                options: vec![],
+                allow_other: false,
+                placeholder: String::new(),
+                min: Some(2.0),
+                max: Some(4.0),
+                min_count: None,
+                max_count: None,
+            }],
+        });
+        app.handle_key(key(KeyCode::Char('1')));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.elicitation.as_ref().is_some_and(|state| {
+            state
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("at least 2"))
+        }));
+    }
+
+    #[test]
+    fn large_paste_requires_an_explicit_full_truncate_or_cancel_choice() {
+        let mut app = app();
+        let paste = "x".repeat(COMPOSER_TOKEN_BUDGET * 4 + 1);
+        app.handle_paste(&paste);
+        assert!(app.paste_review.is_some());
+        app.handle_key(key(KeyCode::Char('2')));
+        assert!(estimate_token_count(&app.prompt) <= COMPOSER_TOKEN_BUDGET);
+        app.handle_paste(&paste);
+        app.handle_key(key(KeyCode::Esc));
+        assert!(estimate_token_count(&app.prompt) <= COMPOSER_TOKEN_BUDGET);
+        app.handle_paste(&paste);
+        app.handle_key(key(KeyCode::Char('1')));
+        assert!(app.prompt.ends_with(&paste));
+    }
+
+    #[test]
+    fn paste_budget_counts_unicode_and_existing_composer_text() {
+        assert_eq!(estimate_token_count("🔵"), 1);
+        assert_eq!(estimate_token_count("éé"), 1);
+        let mut app = app();
+        app.prompt = "x".repeat(COMPOSER_TOKEN_BUDGET * 4);
+        app.prompt_cursor = app.prompt.chars().count();
+        app.handle_paste("🔵");
+        assert!(app.paste_review.is_some());
+        app.handle_key(key(KeyCode::Char('2')));
+        assert!(estimate_token_count(&app.prompt) <= COMPOSER_TOKEN_BUDGET);
+    }
+
+    #[test]
+    fn elicitation_other_value_is_returned_for_select_and_multiselect() {
+        let mut app = app();
+        let question = |id: &str, kind: &str| ElicitationQuestion {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            label: "Choose".to_owned(),
+            description: String::new(),
+            required: false,
+            options: vec![crate::protocol::ElicitationOption {
+                value: "known".to_owned(),
+                label: String::new(),
+                description: String::new(),
+            }],
+            allow_other: true,
+            placeholder: String::new(),
+            min: None,
+            max: None,
+            min_count: None,
+            max_count: None,
+        };
+        let _ = app.apply_server_event(ServerEvent::Elicitation {
+            id: "other".to_owned(),
+            title: String::new(),
+            reason: String::new(),
+            questions: vec![question("select", "select")],
+        });
+        app.handle_key(key(KeyCode::Char('o')));
+        for character in "custom".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        let events = app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::ElicitationResponse { answers: Some(answers), .. }] if answers[0].value == Some(Value::String("custom".to_owned())))
+        );
+        let _ = app.apply_server_event(ServerEvent::Elicitation {
+            id: "other-multi".to_owned(),
+            title: String::new(),
+            reason: String::new(),
+            questions: vec![question("multi", "multiselect")],
+        });
+        app.handle_key(key(KeyCode::Char('o')));
+        for character in "custom".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let events = app.handle_key(key(KeyCode::Enter));
+        match events.as_slice() {
+            [
+                ClientEvent::ElicitationResponse {
+                    answers: Some(answers),
+                    ..
+                },
+            ] => assert_eq!(
+                answers[0].value,
+                Some(Value::Array(vec![Value::String("custom".to_owned())]))
+            ),
+            _ => panic!("expected multiselect Other response"),
+        }
     }
 
     #[test]
@@ -1290,6 +1991,46 @@ mod tests {
         }
         assert!(app.approval.is_none());
         assert!(app.prompt.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_denies_approval_and_stops_the_active_run() {
+        let mut app = app();
+        app.busy = true;
+        app.approval = Some(ApprovalState {
+            id: "approval-1".to_owned(),
+            title: "Run".to_owned(),
+            message: "x".to_owned(),
+            risky: true,
+        });
+        let events = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ClientEvent::ApprovalResponse {
+                    approved: false,
+                    ..
+                },
+                ClientEvent::Stop
+            ]
+        ));
+        assert!(app.approval.is_none());
+    }
+
+    #[test]
+    fn url_validation_requires_http_scheme_and_host() {
+        assert!(is_valid_http_url("https://example.com/path"));
+        assert!(is_valid_http_url("http://[::1]:8080/path"));
+        assert!(!is_valid_http_url("https://"));
+        // Match JavaScript's `new URL`: this normalizes `path` as the host.
+        assert!(is_valid_http_url("https:///path"));
+        // URL path percent escapes are retained by JavaScript, including this form.
+        assert!(is_valid_http_url("https://example.com/%zz"));
+        assert!(!is_valid_http_url("ftp://example.com"));
+        assert!(!is_valid_http_url("https:// bad"));
+        assert!(!is_valid_http_url("https://example.com:abc"));
+        assert!(!is_valid_http_url("https://exa%mple.com"));
+        assert!(!is_valid_http_url("https://[::1"));
     }
 
     #[test]

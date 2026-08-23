@@ -9,11 +9,42 @@ import {
 } from "../sessions/sessionList.js";
 
 export type TuiSlashCommand =
-  | { kind: "activity" | "clear" | "continue" | "diff" | "exit" | "help" | "status" | "summarize" }
+  | { kind: "activity" | "clear" | "continue" | "delete" | "diff" | "exit" | "help" | "new" | "pin" | "runs" | "status" | "summarize" }
+  | { kind: "tools"; action: "list" | "enable" | "disable"; name?: string }
+  | { kind: "integrations"; action: "list" | "install" | "enable" | "disable" | "reject" | "remove"; id?: string }
   | { kind: "compact"; recentMessageCount?: number }
   | { kind: "model"; model?: string }
   | { kind: "sessions"; limit: number; filters?: SessionListFilters; pick?: boolean }
   | { kind: "resume"; sessionId: string }
+  | { kind: "undo"; taskRunId: string }
+  | { kind: "steer"; promptId: string }
+  | { kind: "attach"; attachmentType: "file" | "image"; path: string }
+  | { kind: "attachments"; action: "list" | "clear" | "remove"; index?: number }
+  | { kind: "queue"; action: "retry" }
+  | { kind: "plan"; action: "arm" | "approve" | "revise" | "cancel" | "run"; taskRunId?: string }
+  | { kind: "loop"; action: "arm" | "stop"; maxIterations?: number }
+  | {
+      kind: "worktree";
+      action:
+        | "arm"
+        | "run"
+        | "replay"
+        | "status"
+        | "preview"
+        | "merge"
+        | "sync"
+        | "continue"
+        | "abort"
+        | "discard"
+        | "cleanup"
+        | "prepare_pr"
+        | "create_pr"
+        | "refresh_pr"
+        | "checks";
+      taskRunId?: string;
+      replayOfTaskRunId?: string;
+    }
+  | { kind: "rename"; title: string }
   | { kind: "error"; message: string }
   | { kind: "unknown" };
 
@@ -44,16 +75,122 @@ export function parseTuiSlashCommand(value: string): TuiSlashCommand | undefined
     case "/help":
       return { kind: "help" };
     case "/activity":
-    case "/tools":
       return { kind: "activity" };
+    case "/tools":
+      if (args.length === 0 || args[0] === "list") return { kind: "tools", action: "list" };
+      if (["enable", "disable"].includes(args[0]!) && args.length === 2)
+        return { kind: "tools", action: args[0] as "enable" | "disable", name: args[1] };
+      return { kind: "error", message: "Usage: /tools [list|enable|disable <tool-name>]" };
+    case "/integrations":
+    case "/mcp":
+      if (args.length === 0 || args[0] === "list") return { kind: "integrations", action: "list" };
+      if (["install", "enable", "disable", "reject", "remove"].includes(args[0]!) && args.length === 2)
+        return { kind: "integrations", action: args[0] as "install" | "enable" | "disable" | "reject" | "remove", id: args[1] };
+      return { kind: "error", message: "Usage: /integrations [list|install|enable|disable|reject|remove <id>]" };
     case "/clear":
       return { kind: "clear" };
+    case "/new":
+      return { kind: "new" };
+    case "/delete":
+      return { kind: "delete" };
+    case "/pin":
+      return { kind: "pin" };
+    case "/rename":
+      if (args.length === 0) {
+        return { kind: "error", message: "Usage: /rename <session title>" };
+      }
+      return { kind: "rename", title: args.join(" ") };
     case "/continue":
       return { kind: "continue" };
     case "/status":
       return { kind: "status" };
     case "/diff":
       return { kind: "diff" };
+    case "/runs":
+    case "/evidence":
+      return { kind: "runs" };
+    case "/undo":
+      if (!args[0] || args.length > 1) {
+        return { kind: "error", message: "Usage: /undo <task-run-id>" };
+      }
+      return { kind: "undo", taskRunId: args[0] };
+    case "/steer":
+      if (!args[0] || args.length > 1) {
+        return { kind: "error", message: "Usage: /steer <queued-prompt-id>" };
+      }
+      return { kind: "steer", promptId: args[0] };
+    case "/attach": {
+      const attachmentMatch = /^\/attach\s+(file|image)\s+(.+)$/i.exec(trimmed);
+      if (!attachmentMatch) {
+        return { kind: "error", message: "Usage: /attach <file|image> <workspace-path>" };
+      }
+      return { kind: "attach", attachmentType: attachmentMatch[1]!.toLowerCase() as "file" | "image", path: attachmentMatch[2]!.trim() };
+    }
+    case "/attachments":
+      if (args.length === 0 || args[0] === "list") return { kind: "attachments", action: "list" };
+      if (args[0] === "clear" && args.length === 1) return { kind: "attachments", action: "clear" };
+      if (args[0] === "remove" && args.length === 2 && Number.isInteger(Number(args[1])) && Number(args[1]) > 0) {
+        return { kind: "attachments", action: "remove", index: Number(args[1]) };
+      }
+      return { kind: "error", message: "Usage: /attachments [list|clear|remove <number>]" };
+    case "/queue":
+      if (args[0] === "retry" && args.length === 1) return { kind: "queue", action: "retry" };
+      return { kind: "error", message: "Usage: /queue retry" };
+    case "/plan":
+      if (!args[0]) return { kind: "plan", action: "arm" };
+      if (["approve", "revise", "cancel", "run"].includes(args[0]) && args[1] && args.length === 2) {
+        return { kind: "plan", action: args[0] === "revise" ? "revise" : (args[0] as "approve" | "cancel" | "run"), taskRunId: args[1] };
+      }
+      return { kind: "error", message: "Usage: /plan [approve|revise|cancel|run <task-run-id>]" };
+    case "/loop":
+      if (args[0] === "stop" && args.length === 1) return { kind: "loop", action: "stop" };
+      if (args.length <= 1) {
+        const maxIterations = args[0] ? Number(args[0]) : 5;
+        if (Number.isInteger(maxIterations) && maxIterations >= 1 && maxIterations <= 10)
+          return { kind: "loop", action: "arm", maxIterations };
+      }
+      return { kind: "error", message: "Usage: /loop [1-10|stop]" };
+    case "/worktree":
+      if (!args[0]) return { kind: "worktree", action: "arm" };
+      if (args[0] === "run" && args[1] && args.length === 2) return { kind: "worktree", action: "run", taskRunId: args[1] };
+      if (args[0] === "replay" && args[1] && args[2] && args.length === 3)
+        return { kind: "worktree", action: "replay", taskRunId: args[1], replayOfTaskRunId: args[2] };
+      if (
+        [
+          "status",
+          "preview",
+          "merge",
+          "sync",
+          "continue",
+          "abort",
+          "discard",
+          "cleanup",
+          "prepare_pr",
+          "create_pr",
+          "refresh_pr",
+          "checks"
+        ].includes(args[0]) &&
+        args[1] &&
+        args.length === 2
+      )
+        return {
+          kind: "worktree",
+          action: args[0] as
+            | "status"
+            | "preview"
+            | "merge"
+            | "sync"
+            | "continue"
+            | "abort"
+            | "discard"
+            | "cleanup"
+            | "prepare_pr"
+            | "create_pr"
+            | "refresh_pr"
+            | "checks",
+          taskRunId: args[1]
+        };
+      return { kind: "error", message: "Usage: /worktree [status|preview|merge|sync|continue|abort|discard|cleanup <run>]" };
     case "/compact":
       return parseCompactCommand(args);
     case "/model":

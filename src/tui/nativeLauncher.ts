@@ -4,7 +4,7 @@ import { access } from "node:fs/promises";
 import net, { type Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { NativeClientEvent, NativeServerEvent } from "./nativeProtocol.js";
+import { parseNativeClientEvent, type NativeClientEvent, type NativeServerEvent } from "./nativeProtocol.js";
 
 type NativeTuiProcessOptions = {
   cwd: string;
@@ -58,11 +58,15 @@ export class NativeTuiProcess {
             if (!line) {
               continue;
             }
-            let message: NativeClientEvent;
+            let message: NativeClientEvent | undefined;
             try {
-              message = JSON.parse(line) as NativeClientEvent;
+              message = parseNativeClientEvent(JSON.parse(line));
             } catch (error) {
               socket.destroy(new Error(`Invalid native TUI message: ${error instanceof Error ? error.message : String(error)}`));
+              return;
+            }
+            if (!message) {
+              socket.destroy(new Error("Invalid native TUI message."));
               return;
             }
             if (!authenticated) {

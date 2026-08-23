@@ -2,22 +2,18 @@ import { randomId } from "../../shared/id";
 import { parseMaybeJson } from "../../shared/json";
 import { formatBytes } from "../../format";
 import { promptTextWithFileContext } from "../../../../../src/agent/fileContext";
-
-export const MAX_IMAGE_ATTACHMENTS = 6;
-
-export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-
-export const MAX_CONTEXT_FILE_ATTACHMENTS = 6;
+import {
+  MAX_CONTEXT_FILE_ATTACHMENTS,
+  MAX_IMAGE_ATTACHMENTS,
+  MAX_IMAGE_BYTES,
+  SUPPORTED_IMAGE_MIME_BY_EXTENSION
+} from "../../../../../src/agent/attachmentPolicy";
 
 export const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
-export const SUPPORTED_IMAGE_EXTENSIONS: Record<string, string> = {
-  gif: "image/gif",
-  jpeg: "image/jpeg",
-  jpg: "image/jpeg",
-  png: "image/png",
-  webp: "image/webp"
-};
+export { MAX_CONTEXT_FILE_ATTACHMENTS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES };
+
+export const SUPPORTED_IMAGE_EXTENSIONS = SUPPORTED_IMAGE_MIME_BY_EXTENSION;
 
 export function createPromptContent(text: string, images: ImageAttachment[], files: ContextFileAttachment[] = []): ChatContent {
   const trimmed = promptTextWithFileContext(text, files);

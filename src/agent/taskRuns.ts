@@ -25,7 +25,8 @@ import type {
   AgentTaskRunReportFinding,
   AgentTaskRunVerification,
   AgentTaskRunTestReport,
-  AgentTaskRunStatus
+  AgentTaskRunStatus,
+  ChatMessage
 } from "./types.js";
 
 export { capabilityForToolName } from "./toolCapabilities.js";
@@ -428,6 +429,28 @@ export function recordTaskRunAssistantCompletion(
   run.completion = completion;
   run.updatedAt = now;
   return true;
+}
+
+/**
+ * Capture plan/completion metadata from the latest assistant reply produced
+ * after this run's user message. Both desktop and terminal runtimes call this
+ * at the end of every loop iteration so task-run evidence is identical.
+ */
+export function recordLatestAssistantTaskMetadata(run: AgentTaskRun, messages: ChatMessage[], now = new Date().toISOString()): boolean {
+  for (let index = messages.length - 1; index > run.userMessageIndex; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant") {
+      continue;
+    }
+    if (run.plan?.sourceMessageIndex === index && run.completion?.sourceMessageIndex === index) {
+      return false;
+    }
+    const changedPlan = run.plan?.sourceMessageIndex === index ? false : recordTaskRunAssistantPlan(run, message.content, now, index);
+    const changedCompletion =
+      run.completion?.sourceMessageIndex === index ? false : recordTaskRunAssistantCompletion(run, message.content, now, index);
+    return changedPlan || changedCompletion;
+  }
+  return false;
 }
 
 export function parseAgentTaskRunPlan(
@@ -916,11 +939,7 @@ function browserTaskArtifactFromToolResult(toolCallId: string, result: string, n
 }
 
 /** Screenshot artifact for failure-path captures embedded on browser_task results. */
-function screenshotArtifactFromEmbeddedPath(
-  toolCallId: string,
-  result: string,
-  now: string
-): AgentTaskRunArtifact | undefined {
+function screenshotArtifactFromEmbeddedPath(toolCallId: string, result: string, now: string): AgentTaskRunArtifact | undefined {
   const parsed = parseJsonObject(result);
   if (!parsed) {
     return undefined;
