@@ -19,9 +19,13 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - uses: dtolnay/rust-toolchain@1.92.0
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run native:tui:format:check
+      - run: npm run native:tui:lint
+      - run: npm run native:tui:test
       - run: npm run build
       - run: npm run desktop:build
 

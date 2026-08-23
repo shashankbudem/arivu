@@ -11,11 +11,15 @@ arivu
   -> src/cli.ts
   -> loadConfig()
   -> TuiApp
+  -> NativeTuiBackend (models, tools, sessions, approvals)
+  -> authenticated loopback NDJSON
+  -> native/arivu-tui (Rust + Ratatui + Crossterm)
+  -> xai-ratatui-inline viewport
   -> Agent.run(prompt)
   -> OpenAICompatibleChatClient.complete()
   -> tool execution loop
   -> SessionStore.save()
-  -> TUI render update
+  -> native TUI render update
 ```
 
 Desktop mode:
@@ -44,11 +48,23 @@ arivu "task"
 ## Main modules
 
 - `src/cli.ts`: command parsing, config resolution, TUI vs one-shot dispatch.
-- `src/tui/TuiApp.ts`: blessed-based terminal UI, slash commands, approval modal, status rendering.
-- `desktop/main/main.ts`: Electron lifecycle, IPC handlers, workspace open/create, session history, model listing, desktop agent controller.
-- `desktop/main/browserController.ts`: hidden/background and separate tabbed visible-window isolated Electron browser targets, browser state broadcast, screenshot capture, DOM snapshot, console collection, and browser action helpers.
+- `src/tui/TuiApp.ts`: small launcher for the native terminal UI.
+- `src/tui/NativeTuiBackend.ts`: TypeScript-side agent, tool, Browser Use terminal browser, approval, session, compaction, and slash-command orchestration.
+- `src/tui/nativeLauncher.ts` and `src/tui/nativeProtocol.ts`: authenticated per-launch loopback transport and typed Rust/TypeScript event contract.
+- `src/tui/nativeSessionPresentation.ts`: pure saved-transcript and full-activity reconstruction for the native interface.
+- `src/tui/commands.ts`: shared slash-command parsing plus session and git-diff formatting.
+- `native/arivu-tui/`: native Ratatui/Crossterm input and rendering, Grok-style inline scrollback, activity/session/approval overlays, and fuzzy slash completion.
+- `desktop/main/main.ts`: Electron composition root. It creates the main window and long-lived services, wires lifecycle events, and delegates IPC, navigation, smoke, and benchmark behavior.
+- `desktop/main/desktopController.ts`: stateful desktop-agent orchestration for workspaces, sessions, task runs, models, tools, policies, and queued prompts.
+- `desktop/main/desktopIpc.ts`: trusted renderer IPC registration and payload routing.
+- `desktop/main/configBridge.ts`, `desktopSessionRuntime.ts`, `desktopAttachments.ts`, `desktopInteractionBroker.ts`, `workspacePolicyFile.ts`, `workspaceScaffold.ts`, `taskRunEvidence.ts`, and `toolPresentation.ts`: focused main-process domain adapters and helpers.
+- `desktop/main/desktopSmoke.ts` and `desktopBenchmark.ts`: desktop QA and benchmark harnesses kept out of production bootstrap flow.
+- `desktop/main/browserController.ts`: stateful coordinator for hidden/background and separate tabbed visible-window browser targets.
+- `desktop/main/browserPages.ts`, `browserInPageScripts.ts`, `browserCapture.ts`, `browserUtilities.ts`, `browserTypes.ts`, and `browserSessionPersistence.ts`: generated browser surfaces, page scripts, screenshot lifecycle, state conversion, shared internal contracts, and session persistence.
 - `desktop/main/preload.ts`: context-isolated renderer API.
-- `desktop/renderer/src/App.tsx`: React desktop workspace UI, compact header/sidebar chrome, resizable/collapsible side panels, expandable project chat groups, standalone chats, history browser, prompt `+` menu, browser-window launcher, direct composer model switcher, composer slash-command menu, searchable model dialog, chat search, inline tools drawer, token-aware multimodal/file-context composer, compact-context control, failed-prompt retry/edit/copy state, Activity task-run audit copy controls, theme/UI concept controls, settings, approvals, Markdown/Shiki code rendering.
+- `desktop/renderer/src/App.tsx`: renderer composition root. It owns cross-feature state, IPC/event wiring, and top-level layout while delegating feature UI and presentation logic.
+- `desktop/renderer/src/features/`: cohesive renderer features for activity, approvals, chat, composer, history, models, onboarding, sessions, settings, workspaces, and task worktrees.
+- `desktop/renderer/src/shared/`: dependency-light pure renderer utilities for identifiers, type guards, JSON, text, and diff handling.
 - `desktop/renderer/src/tokenBudget.ts`: local token estimate and truncation helper for pasted composer text.
 - `src/agent/Agent.ts`: model/tool loop and session lifecycle.
 - `src/agent/content.ts`: shared text/image chat content types and text-projection helpers.
@@ -60,12 +76,14 @@ arivu "task"
 - `src/agent/taskRuns.ts`: durable per-prompt run helpers for status, capability, tool-call, and artifact tracking.
 - `src/agent/taskWorktree.ts`: git worktree creation, changed-file summary, bounded patch preview, sync/conflict resolution, merge/discard/cleanup, and model instruction helpers for isolated task execution.
 - `src/tools/registry.ts`: tool definitions and execution.
-- `src/tools/browserControl.ts`: shared browser tool contract and URL/mode helpers used by the desktop-backed browser tools.
+- `src/tools/browserControl.ts`: shared browser tool contract and URL/mode helpers used by desktop and terminal browser controllers.
+- `src/browser/browserUseCliController.ts`: direct Browser Use CLI/CDP adapter for native TUI and one-shot CLI sessions.
 - `src/tools/mcp.ts`: MCP stdio client helpers for configured servers.
 - `src/tools/pathSafety.ts`: workspace path containment.
 - `src/tools/fileState.ts`: read-before-write state tracking.
 - `src/tools/patch.ts`: unified diff parsing/application.
-- `src/tools/webSearch.ts`: Tavily-first web search helper with Bing/Bing News RSS fallback.
+- `src/tools/webSearch.ts`: provider adapters for Tavily, Brave Search, Exa, Serper, and Bing/Bing News RSS.
+- `src/tools/webSearchProvider.ts`: shared web-search provider kinds, defaults, and key requirements.
 - `src/permissions/capabilityPolicy.ts`, `src/permissions/approvalScope.ts`, `src/permissions/scopePolicy.ts`, and `src/permissions/ApprovalManager.ts`: capability-to-policy mapping, compact target-scope extraction, workspace scope-rule enforcement, trust-mode allow/prompt/deny decisions, and approval prompts.
 - `src/sessions/SessionStore.ts`: JSON session persistence.
 - `src/config.ts`: saved config, env overrides, config/data paths.
@@ -81,7 +99,7 @@ The loop has a fixed max depth of 500 tool-call turns. This permits long autonom
 
 Skills are stored outside workspaces under the app data directory's `skills/` folder, or under `ARIVU_SKILLS_HOME` when set. The desktop composer can queue skills from the prompt `+` menu or `/skills`; queued skill names are sent with the prompt payload, and the agent saves each selected `SKILL.md` as a hidden `Skill loaded into chat` system message so it remains in that chat's context. If a user explicitly names `$skill-name`, the agent attaches that skill's `SKILL.md` as a transient system message before that model turn. For inferred skill use, the model sees the global skill index and can call `read_skill`.
 
-For current/recent information requests, the agent allows one `web_search` call, then withholds only that tool and adds a transient instruction to answer from the retrieved results. Other tools remain available so a coding task can continue reading, editing, or verifying after a search. If a model still emits a tool call that was not advertised for that step, the agent ignores it and treats the message as the final answer. Failed runs roll back unsaved in-memory messages so desktop retries do not inherit partial tool transcripts. Before every provider call, the agent estimates the outbound message payload and transiently compacts oversized requests, including large browser/tool observations, without rewriting the saved transcript. Request-only compaction pins the latest user request with a larger cap so the task stays visible even after many tool calls; pinned multimodal prompts preserve `image_url` parts and cap text parts. Context-length provider errors are retried once with more aggressive truncation.
+For current/recent information requests, the agent allows one `web_search` call, then withholds only that tool and adds a transient instruction to answer from the retrieved results. Other tools remain available so a coding task can continue reading, editing, or verifying after a search. If a model still emits a tool call that was not advertised for that step, the agent ignores it and treats the message as the final answer. Failed or stopped runs preserve completed messages and repair interrupted tool protocol so a later continuation can use the real partial-work evidence. Before every provider call, the agent estimates the outbound working-context payload and transiently compacts oversized requests, including large browser/tool observations, without rewriting the saved transcript. Request-only compaction pins the latest user request with a larger cap so the task stays visible even after many tool calls; pinned multimodal prompts preserve `image_url` parts and cap text parts. Context-length provider errors are retried once with more aggressive truncation.
 
 The OpenAI-compatible client streams with `stream: true` when streaming is requested, and omits `stream` for batch/fallback requests instead of sending `stream: false`. Text+image user messages are serialized as chat completion content parts; local-only image metadata is stripped before the provider request. Provider `imageInput: "disabled"` fails multimodal requests before a network call, so text-only endpoints do not receive image data by accident. Assistant tool-call messages with no text are serialized as `content: null` instead of an empty string, while blank assistant history messages without tool calls are omitted before provider requests. Provider `toolCalling` mode controls tool schemas: `auto` sends schemas and retries in Markdown if the endpoint rejects tool payloads, `enabled` sends schemas and surfaces tool-schema errors, and `disabled` immediately sends Markdown/no-tools requests with prior tool protocol converted into plain transcript text. The retry path also handles NVIDIA-style JSON decode errors and empty assistant tool-call content errors. When an auto-mode provider proves incompatible by rejecting tool schemas or image content parts, the client emits a provider capability observation. Desktop persists that observation onto the selected saved provider as `disabled`; explicit `enabled` settings are left alone. Settings doctor uses the same observation path when its forced tool-calling probe proves tools are unsupported.
 
@@ -101,7 +119,9 @@ Settings uses `agent:listTaskWorktrees` to build a session-backed inventory of r
 
 Settings also calls `policy:list` to render the capability policy matrix from `src/permissions/capabilityPolicy.ts`. The matrix uses the same `evaluateCapabilityPolicy` decisions that `ApprovalManager` and the Tools drawer use, includes shared examples/risk/default-posture metadata, applies any stricter overrides saved for the current workspace root, and highlights the currently selected trust mode so policy explanation stays tied to enforcement. Workspace override rows show their current inherited or stricter effect, but can only save `prompt` or `deny`. Preset buttons use `src/permissions/workspacePolicyPresets.ts` to populate default, review-first, local-only, and locked-down workspace policy combinations. Named profiles are saved in config under `workspacePolicyProfiles`, normalized through `src/permissions/workspacePolicyProfiles.ts`, and can apply reusable override/scope-rule bundles to the current workspace policy editor. Workspace policy JSON uses `src/permissions/workspacePolicyTransfer.ts` to copy/apply normalized override and scope-rule bundles with an explicit `arivu.workspacePolicy` envelope. The main process also exposes `policy:readWorkspaceBundle`, which reads a bounded `.arivu/workspace-policy.json` file from the detected workspace root, validates it through `src/permissions/workspacePolicyBundles.ts`, and lets Settings apply it into the same unsaved policy editor state. Settings saves workspace policy overrides and scope rules back to config as absolute-root keyed entries; runtime approval managers load those rules from the detected session workspace before executing tools. Scope rules currently enforce blocked path prefixes, network destination-domain allowlists, MCP server allowlists, and browser target-class allowlists. Settings summarizes active scope rules, and the Tools drawer receives the same scoped registry plus per-tool scope labels so affected tool rows show path/domain/MCP/browser restrictions. Activity rows reuse the shared tool-name capability classifier and the saved approval audit trail to show each tool call's policy capability, effect, trust mode, override, target scope, and reason. When a restored transcript row has no task-run approval record, the renderer labels the capability as inferred from the tool name.
 
-The desktop `context:compact` IPC action compacts the active saved session without calling a model. It preserves normal system prompts, replaces older non-system messages with a hidden system compaction note, converts retained tool calls/results into plain transcript text, saves the session, and returns updated state to the renderer. Terminal surfaces use the same `src/agent/contextCompaction.ts` helper: `arivu compact <session-id>` compacts any saved session with optional `--recent`, `--entry-limit`, and `--dry-run` controls, while TUI `/compact [n]` compacts the active saved session and rebuilds the in-memory agent from the compacted transcript.
+Session `messages` are the canonical, user-visible transcript. Compaction never replaces that array. Instead, Arivu stores a versioned `contextCompaction` checkpoint containing the summary, reduced recent tail, source-message boundary, source type, and timestamp. Every model request projects the current system instructions, that checkpoint, and messages appended after its boundary into a smaller working context. Repeated compaction folds the previous checkpoint into a new one while the full transcript remains available for UI history, search, task-run anchors, and reopening.
+
+The desktop `context:compact` IPC action derives a deterministic checkpoint without calling a model; `context:summarize` asks the selected model for the checkpoint summary. Terminal surfaces use the same `src/agent/contextCompaction.ts` projection: `arivu compact <session-id>` and TUI `/compact [n]` reduce only what future model requests read. The desktop `/session` view reports working-context tokens/messages separately from saved-history messages. `SessionStore` validates snapshots, serializes writes per session, uses fsync-backed atomic replacement, keeps the previous valid snapshot as `.bak`, and can list/recover oversized valid backups without hiding the chat.
 
 Desktop composer slash commands are handled in the renderer before a prompt is sent to the model. `/compact` calls the existing compact-context IPC flow when the active chat is eligible, `/session` renders local chat/provider/context details without creating a model turn, `/tools` opens the same tool drawer used by the prompt `+` menu, `/skills` opens the skill loader, `/files` opens the workspace file-context picker, and `/browser` opens or focuses the separate browser window. Unknown slash commands are kept in the composer and surfaced as local UI errors instead of being sent as prompts.
 
@@ -132,14 +152,15 @@ The current tool set is:
 - `read_skill`
 - `mcp_list_tools`
 - `mcp_call_tool`
-- `browser_state` (desktop only)
-- `browser_select_tab` (desktop only)
-- `browser_open` (desktop only)
-- `browser_screenshot` (desktop only)
-- `browser_snapshot` (desktop only)
-- `browser_console` (desktop only)
-- `browser_click` (desktop only)
-- `browser_type` (desktop only)
+- `browser_state` (desktop and Browser Use terminal sessions)
+- `browser_select_tab` (desktop and Browser Use terminal sessions)
+- `browser_open` (desktop and Browser Use terminal sessions)
+- `browser_screenshot` (desktop and Browser Use terminal sessions)
+- `browser_snapshot` (desktop and Browser Use terminal sessions)
+- `browser_console` (desktop and Browser Use terminal sessions)
+- `browser_click` (desktop and Browser Use terminal sessions)
+- `browser_type` (desktop and Browser Use terminal sessions)
+- `browser_task` (desktop only)
 - `apply_patch`
 - `write_file`
 - `run`
@@ -147,7 +168,7 @@ The current tool set is:
 
 The `run` tool accepts either a structured `argv` vector or a shell `command` string. Argv mode executes with `execa(file, args, { shell: false })` and is preferred for simple commands because arguments are passed literally. Shell mode executes with `execa(command, { shell: true })` for pipelines, redirects, and compound commands. Both modes run with `cwd` set to the active workspace root, pass through trust-mode approval before execution, accept a bounded `timeoutMs`, and preserve parser-derived risk plus timeout metadata on command artifacts. Destructive-command detection still applies in trusted mode.
 
-`web_search` sends public search queries to Tavily when a Tavily API key is configured. It uses `basic` search depth and compact result output by default. If no Tavily key is available, it falls back to keyless Bing RSS search. News-like fallback queries are routed to Bing News RSS, stale generated years are refreshed to the current UTC month/year, and Bing News redirect links are decoded before being shown to the model. Search queries should not include secrets, private code, or personal data.
+`web_search` resolves one active profile from `webSearchProviders` and supports Tavily, Brave Search, Exa, Serper, and keyless Bing RSS. Profiles hold an editable compatible endpoint and their own API key; approval uses the selected endpoint. The same resolved profile is copied into each browser task's authenticated loopback registration, so the in-page `search_web` route never receives credentials in page JavaScript and cannot drift from the main agent's selection. News-like Bing queries route to Bing News RSS, refresh stale generated years, and decode Bing redirect links. Search queries should not include secrets, private code, or personal data.
 
 `current_datetime` reads local system clock/locale information. `current_location` returns approximate timezone-derived location context only; it does not use GPS, IP lookup, browser geolocation, or any network lookup.
 
@@ -155,7 +176,9 @@ The `run` tool accepts either a structured `argv` vector or a shell `command` st
 
 `mcp_list_tools` and `mcp_call_tool` connect to configured MCP servers using the official TypeScript SDK's stdio client transport. Each call opens a short-lived client, connects, performs the list/call request with a timeout, formats MCP content blocks into text, and closes the client.
 
-Browser tools are registered only when the desktop main process provides a `BrowserToolController`. `browser_state` returns active mode, active visible tab id, visible tab URL/title/loading/freshness metadata, and the background target so model turns can refresh tab awareness before answering current-browser questions. `browser_select_tab` switches the active visible tab by `tabId`. `browser_open` normalizes localhost-style URLs, direct HTTP/HTTPS/file URLs, and likely hostnames; plain non-URL text becomes a Google search URL. It opens the hidden isolated browser target by default, or the separate visible window when `mode: "visible"` is supplied. In visible mode, `browser_open` can create a new tab with `newTab: true` or target a known tab with `tabId`; follow-up screenshot/snapshot/console/click/type tools also accept `tabId` and otherwise use the active visible tab. `browser_snapshot` returns compact page text and key interactable elements, `browser_console` returns collected console entries, `browser_screenshot` writes a temporary PNG, `browser_click`/`browser_type` operate by selector or visible label text, and `browser_click_at` clicks exact screenshot/CSS coordinates when selectors fail. Browser state/select/open/screenshot/snapshot/console/click/type actions route through the capability policy table and workspace scope rules; default trust modes allow isolated browser control without approval, while workspace overrides can prompt/block and browser target-class allowlists can restrict hidden/background, visible, local, file, or public browser targets.
+Browser tools are registered only when the active host provides a `BrowserToolController`. On desktop, `browser_state` returns active mode, active visible tab id, visible tab URL/title/loading/freshness metadata, and the background target so model turns can refresh tab awareness before answering current-browser questions. `browser_select_tab` switches the active visible tab by `tabId`. `browser_open` normalizes localhost-style URLs, direct HTTP/HTTPS/file URLs, and likely hostnames; plain non-URL text becomes a Google search URL. It opens the hidden isolated browser target by default, or the separate visible window when `mode: "visible"` is supplied. In visible mode, `browser_open` can create a new tab with `newTab: true` or target a known tab with `tabId`; follow-up screenshot/snapshot/console/click/type tools also accept `tabId` and otherwise use the active visible tab. `browser_snapshot` returns compact page text and key interactable elements, `browser_console` returns collected console entries, `browser_screenshot` writes a temporary PNG, `browser_click`/`browser_type` operate by selector or visible label text, and `browser_click_at` clicks exact screenshot/CSS coordinates when selectors fail. Browser state/select/open/screenshot/snapshot/console/click/type actions route through the capability policy table and workspace scope rules; default trust modes allow isolated browser control without approval, while workspace overrides can prompt/block and browser target-class allowlists can restrict hidden/background, visible, local, file, or public browser targets.
+
+Native TUI and one-shot CLI hosts supply `BrowserUseCliController` instead. It sends direct Browser Use Python-helper calls to an external Chrome/CDP session, keeps a compact stable Browser Use session name, and maps a fresh accessibility snapshot into temporary element indexes for direct click/type/select actions. Terminal `browser_open` defaults to visible semantics and creates an agent tab when no tab is selected, preserving the user's current tab. Terminal sessions enable the direct manual primitives and intentionally do not register `browser_task`, so Arivu never nests Browser Use's autonomous agent inside its own model loop. Screenshots are temporary PNGs; Browser Use console history is not retained.
 
 ## Desktop IPC
 
@@ -185,7 +208,7 @@ Config is stored outside target workspaces:
 
 Sessions live under the app data directory in `sessions/`. The desktop sidebar groups project sessions under expandable project rows, shows unassigned sessions in the top-level Chats section, and the History view lists saved sessions across workspaces.
 
-Model and web-search environment variables are merged with saved config. Non-empty env vars override saved config. `ARIVU_*` env vars are preferred, with matching legacy `SHANKINSTER_*` env vars still accepted as fallbacks. The Tavily key is resolved from `ARIVU_TAVILY_API_KEY`, then legacy `SHANKINSTER_TAVILY_API_KEY`, then `TAVILY_API_KEY`, then saved `tavilyApiKey`.
+Model and web-search environment variables are merged with saved config. Non-empty env vars override saved config. `ARIVU_*` env vars are preferred, with matching legacy `SHANKINSTER_*` env vars still accepted as fallbacks. A Tavily key is resolved from `ARIVU_TAVILY_API_KEY`, then legacy `SHANKINSTER_TAVILY_API_KEY`, then `TAVILY_API_KEY`, then saved `tavilyApiKey`, and is overlaid onto or migrated into a Tavily provider profile without replacing an explicit active search-provider selection.
 
 During the rebrand migration, Arivu copies missing files from the legacy `shankinster` config/data directories into the new `arivu` directories. Existing Arivu files are never overwritten.
 

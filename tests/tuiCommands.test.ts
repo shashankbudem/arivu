@@ -4,14 +4,8 @@ import path from "node:path";
 import { execa } from "execa";
 import { describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/agent/types.js";
-import {
-  formatTuiGitDiffSummary,
-  formatTuiSessionList,
-  formatTuiSessionPickerItems,
-  loadTuiGitDiffSummary,
-  parseTuiSlashCommand,
-  resolveTuiPaneScrollShortcut
-} from "../src/tui/TuiApp.js";
+import { formatTuiGitDiffSummary, formatTuiSessionList, loadTuiGitDiffSummary, parseTuiSlashCommand } from "../src/tui/TuiApp.js";
+import { NATIVE_TUI_HELP } from "../src/tui/nativeCommands.js";
 import {
   detachSessionFromProject,
   filterSessions,
@@ -21,13 +15,8 @@ import {
 } from "../src/sessions/sessionList.js";
 
 describe("TUI slash commands", () => {
-  it("maps pane scroll shortcuts", () => {
-    expect(resolveTuiPaneScrollShortcut("pageup")).toEqual({ target: "focused", action: "page-up" });
-    expect(resolveTuiPaneScrollShortcut("PgDn")).toEqual({ target: "focused", action: "page-down" });
-    expect(resolveTuiPaneScrollShortcut("Shift-PageUp")).toEqual({ target: "activity", action: "page-up" });
-    expect(resolveTuiPaneScrollShortcut("C-home")).toEqual({ target: "focused", action: "top" });
-    expect(resolveTuiPaneScrollShortcut("Ctrl-Shift-End")).toEqual({ target: "activity", action: "bottom" });
-    expect(resolveTuiPaneScrollShortcut("C-x")).toBeNull();
+  it("documents the explicit local shell escape", () => {
+    expect(NATIVE_TUI_HELP).toContain("! <command>    run a local shell command in the current directory");
   });
 
   it("parses session listing and resume commands", () => {
@@ -53,9 +42,13 @@ describe("TUI slash commands", () => {
       }
     });
     expect(parseTuiSlashCommand("/resume abc123")).toEqual({ kind: "resume", sessionId: "abc123" });
+    expect(parseTuiSlashCommand("/activity")).toEqual({ kind: "activity" });
+    expect(parseTuiSlashCommand("/tools")).toEqual({ kind: "activity" });
     expect(parseTuiSlashCommand("/diff")).toEqual({ kind: "diff" });
     expect(parseTuiSlashCommand("/compact")).toEqual({ kind: "compact" });
     expect(parseTuiSlashCommand("/compact 4")).toEqual({ kind: "compact", recentMessageCount: 4 });
+    expect(parseTuiSlashCommand("/model")).toEqual({ kind: "model", model: undefined });
+    expect(parseTuiSlashCommand("/model gpt-4.1-mini")).toEqual({ kind: "model", model: "gpt-4.1-mini" });
   });
 
   it("keeps unknown slash commands available for model prompts", () => {
@@ -82,6 +75,7 @@ describe("TUI slash commands", () => {
       kind: "error",
       message: "Usage: /compact [positive-recent-message-count]"
     });
+    expect(parseTuiSlashCommand("/model one two")).toEqual({ kind: "error", message: "Usage: /model [model-id]" });
   });
 
   it("formats recent sessions with resume guidance", () => {
@@ -192,33 +186,6 @@ describe("TUI slash commands", () => {
       cwd: "/tmp/arivu/just-chats",
       projectRoot: null
     });
-  });
-
-  it("formats session picker rows with status context", () => {
-    const items = formatTuiSessionPickerItems([
-      {
-        id: "pinned",
-        title: "Pinned work",
-        pinnedAt: "2026-01-02T00:00:00.000Z",
-        cwd: "/tmp/arivu",
-        projectRoot: "/tmp/arivu",
-        trustMode: "ask",
-        messages: [{ role: "user", content: "fallback work" }],
-        createdAt: "2026-01-02T00:00:00.000Z",
-        updatedAt: "2026-01-02T00:00:00.000Z"
-      },
-      {
-        id: "loose",
-        cwd: "/tmp/notes",
-        trustMode: "ask",
-        messages: [{ role: "user", content: "loose work" }],
-        createdAt: "2026-01-01T00:00:00.000Z",
-        updatedAt: "2026-01-01T00:00:00.000Z"
-      }
-    ]);
-
-    expect(items[0]).toBe("1.  pinned  2026-01-02T00:00:00Z  arivu  {yellow-fg}pinned{/yellow-fg}  Pinned work");
-    expect(items[1]).toBe("2.  loose  2026-01-01T00:00:00Z  notes  {gray-fg}unpinned{/gray-fg}  loose work");
   });
 
   it("formats a filtered empty session list", () => {

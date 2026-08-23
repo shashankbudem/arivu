@@ -5,13 +5,18 @@ import path from "node:path";
 import { z } from "zod";
 import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "./permissions/scopePolicy.js";
 import { normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
+import {
+  defaultWebSearchProvider,
+  WEB_SEARCH_PROVIDER_KINDS,
+  type WebSearchProviderProfile
+} from "./tools/webSearchProvider.js";
 
 export { normalizeWorkspacePolicyProfileName, normalizeWorkspacePolicyProfiles } from "./permissions/workspacePolicyProfiles.js";
 
 const APP_SLUG = "arivu";
 const LEGACY_APP_SLUG = "shankinster";
 
-const TrustModeSchema = z.enum(["ask", "readonly", "trusted"]);
+const TrustModeSchema = z.enum(["ask", "readonly", "trusted", "bypass"]);
 const WorkspacePolicyCapabilitySchema = z.enum([
   "read_repo",
   "write_workspace",
@@ -68,6 +73,14 @@ const LlmProviderSchema = z.object({
   apiKey: z.string().optional()
 });
 
+const WebSearchProviderSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  kind: z.enum(WEB_SEARCH_PROVIDER_KINDS),
+  baseUrl: z.string().url(),
+  apiKey: z.string().optional()
+});
+
 const BrowserTaskModelCandidateSchema = z.object({
   providerId: z.string().min(1).optional(),
   baseUrl: z.string().url().optional(),
@@ -85,6 +98,14 @@ const BrowserTaskModelSchema = BrowserTaskModelCandidateSchema.extend({
   fallbackModels: z.array(BrowserTaskModelCandidateSchema).max(5).optional()
 });
 
+const BrowserVisualGroundingSchema = z.object({
+  providerId: z.string().min(1).optional(),
+  baseUrl: z.string().url().optional(),
+  model: z.string().min(1).default("nvidia/LocateAnything-3B"),
+  apiKey: z.string().optional(),
+  timeoutMs: z.number().int().min(1_000).max(600_000).optional()
+});
+
 const WorkspaceCapabilityPolicySchema = z.object({
   overrides: z.record(WorkspacePolicyCapabilitySchema, CapabilityPolicyOverrideSchema).default({}),
   scopeRules: WorkspaceScopePolicyRulesSchema.default({})
@@ -92,17 +113,27 @@ const WorkspaceCapabilityPolicySchema = z.object({
 
 const ConfigSchema = z.object({
   apiKey: z.string().optional(),
+  /** Legacy Tavily-only field retained for config/env migration. */
   tavilyApiKey: z.string().optional(),
   baseUrl: z.string().url().default("https://api.openai.com/v1"),
   model: z.string().default("gpt-4.1"),
   toolCalling: ProviderToolCallingSchema.default("auto"),
   imageInput: ProviderImageInputSchema.default("auto"),
+  /** Pause between successive main chat-model provider calls in one agent run; 0 disables it. */
+  chatModelRequestDelayMs: z.number().int().min(0).max(120_000).default(10_000),
   requestTimeoutMs: z.number().int().min(1_000).max(600_000).optional(),
   contextWindowTokens: ContextWindowTokensSchema.optional(),
   activeProviderId: z.string().optional(),
   providers: z.array(LlmProviderSchema).default([]),
+  activeWebSearchProviderId: z.string().optional(),
+  webSearchProviders: z.array(WebSearchProviderSchema).default([]),
   browserTaskModel: BrowserTaskModelSchema.optional(),
+  browserVisualGrounding: BrowserVisualGroundingSchema.optional(),
   disabledTools: z.array(z.string()).default([]),
+  /** Appended to the built-in system prompt on every run, in every session. Use for standing
+   *  instructions (e.g. "route browser actions through the pinchtab MCP server") that the
+   *  built-in prompt doesn't know about and that shouldn't have to be re-pasted per chat. */
+  customSystemPrompt: z.string().optional(),
   trustMode: TrustModeSchema.default("ask"),
   mcpServers: z.record(McpServerSchema).default({}),
   toolProposals: z.array(McpToolProposalSchema).max(20).default([]),
@@ -112,7 +143,9 @@ const ConfigSchema = z.object({
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
 export type LlmProviderProfile = z.infer<typeof LlmProviderSchema>;
+export type { WebSearchProviderProfile };
 export type BrowserTaskModelConfigProfile = z.infer<typeof BrowserTaskModelSchema>;
+export type BrowserVisualGroundingConfigProfile = z.infer<typeof BrowserVisualGroundingSchema>;
 export type McpToolProposal = z.infer<typeof McpToolProposalSchema>;
 
 export function resolveModelListEndpoint(
@@ -149,7 +182,10 @@ export type WorkspaceCapabilityPolicyOverrides = Partial<Record<WorkspacePolicyC
 export type WorkspaceCapabilityPolicyScopeRules = WorkspaceScopePolicyRules;
 export type WorkspaceCapabilityPolicy = z.infer<typeof WorkspaceCapabilityPolicySchema>;
 export type WorkspacePolicyProfiles = Record<string, WorkspaceCapabilityPolicy>;
-export type ConfigKey = Exclude<keyof AppConfig, "mcpServers" | "providers" | "activeProviderId">;
+export type ConfigKey = Exclude<
+  keyof AppConfig,
+  "mcpServers" | "providers" | "activeProviderId" | "webSearchProviders" | "activeWebSearchProviderId"
+>;
 export const REDACTED_SECRET_VALUE = "********";
 
 export function appEnv(name: string) {
@@ -232,6 +268,10 @@ export function redactConfigForDisplay(config: Partial<AppConfig>): Partial<AppC
       ...provider,
       apiKey: redactSecret(provider.apiKey)
     })),
+    webSearchProviders: config.webSearchProviders?.map((provider) => ({
+      ...provider,
+      apiKey: redactSecret(provider.apiKey)
+    })),
     browserTaskModel: config.browserTaskModel
       ? {
           ...config.browserTaskModel,
@@ -242,6 +282,12 @@ export function redactConfigForDisplay(config: Partial<AppConfig>): Partial<AppC
           }))
         }
       : config.browserTaskModel,
+    browserVisualGrounding: config.browserVisualGrounding
+      ? {
+          ...config.browserVisualGrounding,
+          apiKey: redactSecret(config.browserVisualGrounding.apiKey)
+        }
+      : config.browserVisualGrounding,
     mcpServers: config.mcpServers ? redactMcpServers(config.mcpServers) : config.mcpServers
   };
 }
@@ -352,10 +398,87 @@ export function workspaceScopeRulesForRoot(config: AppConfig, workspaceRoot: str
 }
 
 function normalizeLoadedConfig(config: AppConfig): AppConfig {
+  const webSearch = normalizeLoadedWebSearchProviders(config);
   return {
     ...config,
+    ...webSearch,
     workspacePolicyProfiles: normalizeWorkspacePolicyProfiles(config.workspacePolicyProfiles)
   };
+}
+
+export function resolveWebSearchProvider(
+  config: Pick<AppConfig, "webSearchProviders" | "activeWebSearchProviderId" | "tavilyApiKey">
+): WebSearchProviderProfile {
+  const active = config.activeWebSearchProviderId
+    ? config.webSearchProviders.find((provider) => provider.id === config.activeWebSearchProviderId)
+    : undefined;
+  if (active) {
+    return active;
+  }
+  if (config.webSearchProviders[0]) {
+    return config.webSearchProviders[0];
+  }
+  if (config.tavilyApiKey?.trim()) {
+    return {
+      ...defaultWebSearchProvider("tavily"),
+      apiKey: config.tavilyApiKey.trim()
+    };
+  }
+  return defaultWebSearchProvider("bing");
+}
+
+function normalizeLoadedWebSearchProviders(
+  config: Pick<AppConfig, "webSearchProviders" | "activeWebSearchProviderId" | "tavilyApiKey">
+): Pick<AppConfig, "webSearchProviders" | "activeWebSearchProviderId"> {
+  const legacyTavilyKey = config.tavilyApiKey?.trim();
+  let providers = config.webSearchProviders.map((provider) => ({
+    ...provider,
+    id: provider.id.trim(),
+    name: provider.name.trim(),
+    baseUrl: provider.baseUrl.trim(),
+    ...(provider.apiKey?.trim() ? { apiKey: provider.apiKey.trim() } : {})
+  }));
+
+  let migratedTavilyId: string | undefined;
+  if (legacyTavilyKey) {
+    const tavilyIndex = providers.findIndex((provider) => provider.kind === "tavily");
+    if (tavilyIndex >= 0) {
+      const provider = providers[tavilyIndex]!;
+      migratedTavilyId = provider.id;
+      providers = providers.map((entry, index) => (index === tavilyIndex ? { ...entry, apiKey: legacyTavilyKey } : entry));
+    } else {
+      migratedTavilyId = uniqueWebSearchProviderId("tavily", providers);
+      providers = [...providers, { ...defaultWebSearchProvider("tavily", migratedTavilyId), apiKey: legacyTavilyKey }];
+    }
+  }
+
+  if (providers.length === 0) {
+    providers = [defaultWebSearchProvider("bing")];
+  }
+
+  const requestedActiveId = config.activeWebSearchProviderId?.trim();
+  const activeWebSearchProviderId =
+    (requestedActiveId && providers.some((provider) => provider.id === requestedActiveId) ? requestedActiveId : undefined) ??
+    migratedTavilyId ??
+    providers[0]!.id;
+
+  return {
+    webSearchProviders: providers,
+    activeWebSearchProviderId
+  };
+}
+
+function uniqueWebSearchProviderId(baseId: string, providers: WebSearchProviderProfile[]) {
+  const used = new Set(providers.map((provider) => provider.id));
+  if (!used.has(baseId)) {
+    return baseId;
+  }
+  for (let index = 2; ; index += 1) {
+    const candidate = `${baseId}-${index}`;
+    if (!used.has(candidate)) {
+      return candidate;
+    }
+  }
 }
 
 function normalizeConfigPatch(config: Partial<AppConfig>): Partial<AppConfig> {

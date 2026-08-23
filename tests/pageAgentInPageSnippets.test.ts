@@ -3,17 +3,150 @@ import {
   ANNOTATE_CUSTOM_CONTROLS_SNIPPET,
   ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS,
   BACKFILL_REFLECTION_SNIPPET,
+  BUILD_ACTIONS_SNIPPET,
   BUILD_TRACE_SNIPPET,
   CAP_PAGE_CONTENT_SNIPPET,
+  CREATE_SCREENSHOT_RECOVERY_SNIPPET,
   INSTALL_AGENT_VISUAL_THEME_SNIPPET,
   INSTALL_SERVICE_NOW_VARIABLE_TYPE_GUARD_SNIPPET,
-  INSTALL_UNRELATED_CHECKBOX_LABEL_GUARD_SNIPPET
+  INSTALL_UNRELATED_CHECKBOX_LABEL_GUARD_SNIPPET,
+  UPDATE_PRESENCE_CHIP_SNIPPET
 } from "../desktop/main/pageAgentInPageSnippets.js";
 
 // The snippets ship as raw JS source strings injected into the page context.
 // Evaluate them the same way the page would to test the code that actually runs.
 function evalSnippet<T>(source: string): T {
   return new Function(`return ${source}`)() as T;
+}
+
+// The suite runs in the node environment (no jsdom), so UPDATE_PRESENCE_CHIP_SNIPPET — which
+// renders real DOM and wires click handlers — gets a small faithful DOM implementing exactly the
+// surface it touches: element tree, className/classList, attributes, textContent, and click
+// dispatch. Enough to run the panel end-to-end and assert its expand/collapse behavior.
+type FakeEventLike = { preventDefault(): void; stopPropagation(): void };
+
+class FakeElement {
+  tag: string;
+  id = "";
+  className = "";
+  type = "";
+  disabled = false;
+  hidden = false;
+  isConnected = true;
+  scrollTop = 0;
+  scrollLeft = 0;
+  scrollHeight = 0;
+  clientHeight = 0;
+  children: FakeElement[] = [];
+  parentNode: FakeElement | null = null;
+  __arivuExpandedTaskIds?: Record<string, unknown>;
+  private text = "";
+  private attrs = new Map<string, string>();
+  private listeners = new Map<string, ((event: FakeEventLike) => void)[]>();
+  classList = {
+    toggle: (token: string, force?: boolean): boolean => {
+      const tokens = new Set(this.className.split(/\s+/).filter(Boolean));
+      const shouldHave = force === undefined ? !tokens.has(token) : force;
+      if (shouldHave) tokens.add(token);
+      else tokens.delete(token);
+      this.className = [...tokens].join(" ");
+      return shouldHave;
+    }
+  };
+  constructor(tag: string) {
+    this.tag = tag;
+  }
+  get firstChild(): FakeElement | null {
+    return this.children[0] ?? null;
+  }
+  get textContent(): string {
+    return this.text;
+  }
+  set textContent(value: string) {
+    this.text = String(value ?? "");
+    this.children = [];
+  }
+  appendChild(child: FakeElement): FakeElement {
+    child.parentNode?.removeChild(child);
+    this.children.push(child);
+    child.parentNode = this;
+    return child;
+  }
+  removeChild(child: FakeElement): FakeElement {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    child.parentNode = null;
+    return child;
+  }
+  remove(): void {
+    this.parentNode?.removeChild(this);
+  }
+  setAttribute(key: string, value: string): void {
+    this.attrs.set(key, String(value));
+  }
+  getAttribute(key: string): string | null {
+    return this.attrs.has(key) ? (this.attrs.get(key) as string) : null;
+  }
+  addEventListener(event: string, handler: (event: FakeEventLike) => void): void {
+    const list = this.listeners.get(event) ?? [];
+    list.push(handler);
+    this.listeners.set(event, list);
+  }
+  dispatch(event: string): void {
+    for (const handler of [...(this.listeners.get(event) ?? [])]) {
+      handler({ preventDefault() {}, stopPropagation() {} });
+    }
+  }
+  private hasClass(token: string): boolean {
+    return this.className.split(/\s+/).includes(token);
+  }
+  querySelector(selector: string): FakeElement | null {
+    const token = selector.replace(/^\./, "");
+    const search = (node: FakeElement): FakeElement | null => {
+      for (const child of node.children) {
+        if (child.hasClass(token)) return child;
+        const nested = search(child);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    return search(this);
+  }
+  querySelectorAll(selector: string): FakeElement[] {
+    const token = selector.replace(/^\./, "");
+    const out: FakeElement[] = [];
+    const walk = (node: FakeElement): void => {
+      for (const child of node.children) {
+        if (child.hasClass(token)) out.push(child);
+        walk(child);
+      }
+    };
+    walk(this);
+    return out;
+  }
+}
+
+function makePresenceDom() {
+  const head = new FakeElement("head");
+  const body = new FakeElement("body");
+  const documentElement = new FakeElement("html");
+  const findById = (root: FakeElement, id: string): FakeElement | null => {
+    if (root.id === id) return root;
+    for (const child of root.children) {
+      const found = findById(child, id);
+      if (found) return found;
+    }
+    return null;
+  };
+  const document = {
+    head,
+    body,
+    documentElement,
+    createElement: (tag: string) => new FakeElement(tag),
+    getElementById: (id: string) => findById(head, id) ?? findById(body, id) ?? findById(documentElement, id)
+  };
+  const window = { __arivuPageAgentPresenceCommand: undefined as unknown };
+  return { document, window };
 }
 
 describe("ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS", () => {
@@ -41,6 +174,157 @@ describe("ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS", () => {
   it("reminds the DOM model to submit and safely clear ServiceNow list searches", () => {
     expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("not applied until Enter");
     expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain('"All" breadcrumb');
+  });
+
+  it("reserves screenshot inspection for last-resort recovery instead of routine actions", () => {
+    expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("inspect_screenshot");
+    expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("last-resort recovery");
+    expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("about to give up or report the task failed");
+    expect(ARIVU_PAGE_AGENT_SYSTEM_INSTRUCTIONS).toContain("not routine verification");
+  });
+});
+
+type ScreenshotRecovery = {
+  capture(reason?: string, signal?: AbortSignal): Promise<string>;
+  transformRequestBody(body: Record<string, unknown>): Record<string, unknown>;
+  afterStep(agent: { pushObservation(content: string): void }, history: Array<Record<string, unknown>>): Promise<void>;
+  hasPendingImage(): boolean;
+};
+
+describe("CREATE_SCREENSHOT_RECOVERY_SNIPPET", () => {
+  const createRecovery = evalSnippet<(options: Record<string, unknown>) => ScreenshotRecovery>(CREATE_SCREENSHOT_RECOVERY_SNIPPET);
+
+  function failedStep(goal: string, index: number, rawRequest?: unknown) {
+    return {
+      type: "step",
+      reflection: {
+        evaluation_previous_goal: "The click failed and the page did not change.",
+        next_goal: goal
+      },
+      action: {
+        name: "click_element_by_index",
+        input: { index },
+        output: "Element click failed."
+      },
+      rawRequest
+    };
+  }
+
+  it("automatically queues pixels only after a repeated no-progress episode crosses the time threshold", async () => {
+    let timestamp = 0;
+    const fetchScreenshot = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            queued: true,
+            width: 1280,
+            height: 720
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    const observations: string[] = [];
+    const recovery = createRecovery({
+      endpoint: "http://127.0.0.1/__arivu_screenshot",
+      token: "task-token",
+      thresholdMs: 100,
+      cooldownMs: 1_000,
+      minimumRepeats: 3,
+      now: () => timestamp,
+      fetch: fetchScreenshot
+    });
+    const history: Array<Record<string, unknown>> = [];
+
+    history.push(failedStep("Click Save", 7));
+    await recovery.afterStep({ pushObservation: (content) => observations.push(content) }, history);
+    timestamp = 60;
+    history.push(failedStep("Click Save", 8));
+    await recovery.afterStep({ pushObservation: (content) => observations.push(content) }, history);
+    expect(fetchScreenshot).not.toHaveBeenCalled();
+
+    timestamp = 120;
+    history.push(failedStep("Click Save", 9));
+    await recovery.afterStep({ pushObservation: (content) => observations.push(content) }, history);
+
+    expect(fetchScreenshot).toHaveBeenCalledTimes(1);
+    expect(recovery.hasPendingImage()).toBe(true);
+    expect(observations.at(-1)).toContain("prolonged no-progress loop");
+
+    const body = recovery.transformRequestBody({
+      messages: [{ role: "user", content: "Current DOM state" }]
+    }) as { messages: Array<{ content: Array<Record<string, unknown>> }> };
+    expect(body.messages[0].content).toEqual([
+      { type: "text", text: "Current DOM state" },
+      { type: "image_url", image_url: { url: "arivu-recovery-screenshot://pending" } }
+    ]);
+
+    timestamp = 121;
+    const nextStep = failedStep("Try a visually identified control", 10, body);
+    history.push(nextStep);
+    await recovery.afterStep({ pushObservation: (content) => observations.push(content) }, history);
+    expect(nextStep.rawRequest).toBeUndefined();
+    expect(recovery.hasPendingImage()).toBe(false);
+    expect(fetchScreenshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not capture merely because a multi-step task is long", async () => {
+    let timestamp = 0;
+    const fetchScreenshot = vi.fn();
+    const recovery = createRecovery({
+      endpoint: "http://127.0.0.1/__arivu_screenshot",
+      token: "task-token",
+      thresholdMs: 10,
+      cooldownMs: 0,
+      minimumRepeats: 3,
+      now: () => timestamp,
+      fetch: fetchScreenshot
+    });
+    const history: Array<Record<string, unknown>> = [];
+    for (const goal of ["Fill name", "Fill description", "Choose category", "Submit"]) {
+      history.push(failedStep(goal, history.length + 1));
+      timestamp += 1_000;
+      await recovery.afterStep({ pushObservation: () => undefined }, history);
+    }
+    expect(fetchScreenshot).not.toHaveBeenCalled();
+  });
+
+  it("auto-captures sooner when the same exact DOM action fails twice", async () => {
+    let timestamp = 0;
+    const fetchScreenshot = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            queued: true,
+            width: 800,
+            height: 600
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    );
+    const observations: string[] = [];
+    const recovery = createRecovery({
+      endpoint: "http://127.0.0.1/__arivu_screenshot",
+      token: "task-token",
+      thresholdMs: 90_000,
+      cooldownMs: 0,
+      minimumRepeats: 3,
+      now: () => timestamp,
+      fetch: fetchScreenshot
+    });
+    const history: Array<Record<string, unknown>> = [];
+
+    history.push(failedStep("Click Save", 7));
+    await recovery.afterStep({ pushObservation: (content) => observations.push(content) }, history);
+    expect(fetchScreenshot).not.toHaveBeenCalled();
+
+    // Same index/action, past the failed-action threshold (min(90s, 15s)) but well under the
+    // full three-repeat stuck threshold — should still trigger vision recovery.
+    timestamp = 15_000;
+    history.push(failedStep("Click Save", 7));
+    await recovery.afterStep({ pushObservation: (content) => observations.push(content) }, history);
+
+    expect(fetchScreenshot).toHaveBeenCalledTimes(1);
+    expect(observations.at(-1)).toContain("prolonged no-progress loop");
   });
 });
 
@@ -999,6 +1283,153 @@ describe("BUILD_TRACE_SNIPPET", () => {
     const trace = buildTrace(history);
     expect(trace.entries).toHaveLength(1);
     expect(trace.entries[0].length).toBeLessThanOrEqual(220);
+  });
+});
+
+describe("BUILD_ACTIONS_SNIPPET", () => {
+  const buildActions = evalSnippet<
+    (
+      history: unknown[],
+      offset?: number,
+      startStep?: number
+    ) => Array<{
+      stepIndex: number;
+      name: string;
+      input?: string;
+      output?: string;
+      evaluation?: string;
+      memory?: string;
+      goal?: string;
+    }>
+  >(BUILD_ACTIONS_SNIPPET);
+
+  it("retains every action field with cumulative step numbers", () => {
+    const actions = buildActions(
+      [
+        {
+          type: "step",
+          stepIndex: 0,
+          action: { name: "input_text", input: { index: 7, text: "Maintain Items" }, output: "Entered the filter." },
+          reflection: {
+            evaluation_previous_goal: "The filter was populated.",
+            memory: "The catalog list is open.",
+            next_goal: "Submit the search."
+          }
+        },
+        {
+          type: "step",
+          stepIndex: 1,
+          action: { name: "send_keys", input: { keys: "ENTER" }, output: "Submitted." },
+          reflection: { next_goal: "(not recorded)" }
+        }
+      ],
+      4
+    );
+
+    expect(actions).toEqual([
+      {
+        stepIndex: 5,
+        name: "input_text",
+        input: '{"index":7,"text":"Maintain Items"}',
+        output: "Entered the filter.",
+        evaluation: "The filter was populated.",
+        memory: "The catalog list is open.",
+        goal: "Submit the search."
+      },
+      {
+        stepIndex: 6,
+        name: "send_keys",
+        input: '{"keys":"ENTER"}',
+        output: "Submitted."
+      }
+    ]);
+  });
+
+  it("returns only newly completed steps when polling incrementally", () => {
+    const history = Array.from({ length: 3 }, (_, index) => ({
+      type: "step",
+      stepIndex: index,
+      action: { name: `action_${index + 1}`, output: `result ${index + 1}` },
+      reflection: {}
+    }));
+
+    expect(buildActions(history, 0, 2)).toEqual([{ stepIndex: 3, name: "action_3", output: "result 3" }]);
+  });
+});
+
+describe("UPDATE_PRESENCE_CHIP_SNIPPET", () => {
+  it("ships compact interactive controls and expandable terminal-task details", () => {
+    expect(evalSnippet<(tasks: unknown[]) => void>(UPDATE_PRESENCE_CHIP_SNIPPET)).toBeTypeOf("function");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("pointer-events:auto");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain('"Pause"');
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain('"Resume"');
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain('"Stop"');
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain('summary.setAttribute("aria-expanded"');
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("var open = !terminal");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("body.hidden = !open");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("Evaluation");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("Memory");
+  });
+
+  it("preserves the user's activity-list scroll position across live rerenders", () => {
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("preservedScrollTop");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("previousListElement.scrollTop");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("listElement.scrollTop = Math.min(preservedScrollTop, maximumScrollTop)");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET).toContain("listElement.scrollLeft = preservedScrollLeft");
+    expect(UPDATE_PRESENCE_CHIP_SNIPPET.lastIndexOf("listElement.scrollTop = Math.min")).toBeGreaterThan(
+      UPDATE_PRESENCE_CHIP_SNIPPET.lastIndexOf("parent.appendChild(chip)")
+    );
+  });
+
+  it("builds a terminal task's timeline only on expand and keeps it open across rerenders", () => {
+    const { document, window } = makePresenceDom();
+    vi.stubGlobal("document", document);
+    vi.stubGlobal("window", window);
+    try {
+      const update = evalSnippet<(tasks: unknown[]) => void>(UPDATE_PRESENCE_CHIP_SNIPPET);
+      const tasks = [
+        {
+          id: "task-1-abc",
+          instruction: "search the catalog",
+          status: "done",
+          actions: [{ stepIndex: 1, name: "click_element_by_index", output: "Clicked.", goal: "open the form" }]
+        }
+      ];
+      update(tasks);
+
+      const chip = document.getElementById("arivu-agent-presence-chip");
+      expect(chip).not.toBeNull();
+      const row = chip!.querySelector(".arivu-agent-presence-chip-task")!;
+      const summary = row.querySelector(".arivu-agent-presence-chip-summary")!;
+      const bodyEl = row.querySelector(".arivu-agent-presence-chip-body")!;
+
+      // A terminal task auto-collapses: hidden body, aria-expanded false, and — because the
+      // timeline is built lazily — no action cards materialized yet.
+      expect(row.className).toContain("terminal");
+      expect(row.className).not.toContain("open");
+      expect(bodyEl.hidden).toBe(true);
+      expect(summary.getAttribute("aria-expanded")).toBe("false");
+      expect(row.querySelector(".arivu-agent-presence-chip-timeline")).toBeNull();
+
+      // Expanding builds the timeline on demand and reveals the body.
+      summary.dispatch("click");
+      expect(row.className).toContain("open");
+      expect(bodyEl.hidden).toBe(false);
+      expect(summary.getAttribute("aria-expanded")).toBe("true");
+      expect(row.querySelector(".arivu-agent-presence-chip-timeline")).not.toBeNull();
+      expect(row.querySelectorAll(".arivu-agent-presence-chip-action").length).toBe(1);
+
+      // A live rerender (same tasks, e.g. the next poll tick) must keep the user's expanded task
+      // open rather than snapping it back to collapsed.
+      update(tasks);
+      const rowAfter = document.getElementById("arivu-agent-presence-chip")!.querySelector(".arivu-agent-presence-chip-task")!;
+      const bodyAfter = rowAfter.querySelector(".arivu-agent-presence-chip-body")!;
+      expect(rowAfter.className).toContain("open");
+      expect(bodyAfter.hidden).toBe(false);
+      expect(rowAfter.querySelector(".arivu-agent-presence-chip-timeline")).not.toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

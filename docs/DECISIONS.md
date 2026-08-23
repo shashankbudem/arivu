@@ -22,6 +22,14 @@ Reason: small dependency, direct terminal primitives, enough for conversation/ac
 
 Tradeoff: less modern component ergonomics than Ink/React.
 
+## 2026-07-31: Replace Blessed with Grok Build's native TUI stack
+
+Decision: replace the Blessed renderer with a native Rust frontend using Ratatui 0.29, Crossterm 0.28, and Grok Build's `xai-ratatui-inline` engine pinned to revision `dd04f397b1d02f2272b092555669dfba1f01bc85`. Keep Arivu's TypeScript agent/runtime behind an authenticated per-launch loopback protocol.
+
+Reason: the full-screen Blessed surface did not match Grok Build's compact terminal behavior. The native inline viewport lets finalized output become ordinary terminal scrollback while preserving Arivu's existing providers, tools, browser tasks, approvals, sessions, and context logic.
+
+Tradeoff: source builds now require Rust 1.92+, and release packaging must ship a native binary for each supported platform and architecture.
+
 ## 2026-06-04: Desktop-first app direction
 
 Decision: add an Electron + React desktop app while keeping CLI/TUI surfaces.
@@ -287,6 +295,12 @@ Reason: sending large pasted text through the model just to count tokens would a
 Decision: add `web_search` as a local function tool, prefer Tavily when configured, and keep Bing RSS as a no-key fallback.
 
 Reason: Tavily is better suited for agent web search and the user already has credits. The implementation remains a local tool rather than an MCP server to match the current tool registry architecture.
+
+## 2026-07-25: One managed web-search provider for every agent surface
+
+Decision: replace the Tavily-only Settings field with named Tavily, Brave Search, Exa, Serper, and Bing RSS profiles plus one active selection. Pass the resolved profile to both `web_search` and the browser-task proxy. Keep the legacy Tavily config/env fields only as an automatic migration source.
+
+Reason: search credentials, endpoints, approval destinations, diagnostics, and page-agent behavior must switch together. A shared active profile avoids the main agent and browser agent silently using different search services, while a keyless Bing profile preserves offline-friendly setup.
 
 ## 2026-06-06: NVIDIA-compatible chat fallback shape
 
@@ -617,3 +631,27 @@ Reason: users can manually open, close, or switch visible browser tabs outside t
 Decision: when a model returns an assistant message with no tool calls and no non-whitespace content, the agent treats the run as failed and rolls the session back to the pre-run state instead of saving an empty completed assistant turn.
 
 Reason: several OpenAI-compatible models can produce an empty final assistant message after a tool call. Saving that as completed hides the real failure, leaves the user with no Retry affordance on a failed prompt, and can pollute future provider requests with useless blank history.
+
+## 2026-07-24: Compaction is a derived working-context checkpoint
+
+Decision: `session.messages` is the canonical full transcript and compaction never replaces it. Local, model-generated, and automatic compaction store a versioned `contextCompaction` checkpoint separately. Future requests project current system instructions, the checkpoint summary/recent tail, and post-checkpoint messages into the model's working context. The UI continues to read the canonical transcript and reports saved-history size separately from working-context size.
+
+Reason: model context is a bounded, lossy cache; chat history is user-owned durable data. Treating one array as both caused older user turns to disappear after compaction, broke stable task-run anchors, and made chat discovery depend on information that compaction could remove. Separating the source of truth from its reduced projection preserves history while still bounding provider requests.
+
+Tradeoff: session files continue growing with the full transcript. Large files remain visible through list-only body trimming, image payloads stay content-addressed outside JSON, and atomic writes plus the previous valid `.bak` snapshot protect against interrupted saves.
+
+## 2026-07-29: Renderer modules follow feature ownership
+
+Decision: keep `desktop/renderer/src/App.tsx` as the renderer composition root for cross-feature state, IPC/event wiring, and top-level layout. Cohesive UI and presentation/model logic live under `desktop/renderer/src/features/`, while dependency-light pure utilities shared across features live under `desktop/renderer/src/shared/`. Dependencies flow from the composition root into features and shared/domain modules; features do not import `App.tsx`.
+
+Reason: the previous renderer put unrelated settings, activity, chat, history, worktree, and composer concerns in one file, making changes harder to review and test safely. Feature ownership gives each concern a stable home without introducing a second state framework or changing Electron's security boundary.
+
+Tradeoff: some cross-feature state and handlers remain in `App.tsx` because moving them prematurely would create prop indirection without clearer ownership. The next decomposition phase should split Electron lifecycle/IPC/config/window bootstrap out of `desktop/main/main.ts`, then split browser window, tab, session, and state responsibilities out of `desktop/main/browserController.ts`.
+
+## 2026-07-29: Electron main is a composition root
+
+Decision: keep `desktop/main/main.ts` limited to Electron lifecycle and dependency wiring. Stateful desktop-agent behavior lives in `desktopController.ts`; trusted IPC registration, config projection, session helpers, attachments, user interactions, workspace utilities, evidence handling, QA, benchmarks, and navigation each have explicit module owners. The browser controller remains the state coordinator while generated pages, in-page scripts, capture lifecycle, state/type conversion, and session persistence live in focused `browser*` modules.
+
+Reason: lifecycle code, agent state, settings normalization, browser scripts, and smoke-test machinery previously shared two very large files. Separating those responsibilities makes security boundaries visible, lets pure behavior be tested without launching Electron, and prevents QA-only code from obscuring production startup.
+
+Tradeoff: `desktopController.ts` and the stateful portion of `browserController.ts` remain substantial because their methods share live session/window state. A later refactor can introduce session, task-worktree, browser-tab, and browser-shell state services, but only with explicit transition tests; splitting those methods by file alone would hide coupling rather than remove it.

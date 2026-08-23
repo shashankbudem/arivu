@@ -153,7 +153,15 @@ export class RuntimeControlService implements RuntimeControl {
 }
 
 function browserModelCandidates(primary: BrowserTaskModelConfig): BrowserModelCandidate[] {
-  const models = [withoutFallbacks(primary), ...(primary.fallbacks ?? []).map(withoutFallbacks)];
+  const models = [
+    withoutFallbacks(primary),
+    ...(primary.fallbacks ?? []).map((fallback) => ({
+      ...withoutFallbacks(fallback),
+      // Visual grounding is a browser capability, not a reasoning-model candidate. Keep the
+      // dedicated LocateAnything endpoint when the user switches to a fallback LLM at runtime.
+      visualGrounding: fallback.visualGrounding ?? primary.visualGrounding
+    }))
+  ];
   const seen = new Set<string>();
   const candidates: BrowserModelCandidate[] = [];
   for (const model of models) {

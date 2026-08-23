@@ -7,6 +7,7 @@ import type { ApprovalManager } from "../permissions/ApprovalManager.js";
 import { analyzeArgvCommand, analyzeShellCommand } from "../permissions/destructive.js";
 import { normalizeWorkspaceScopePolicyRules, type WorkspaceScopePolicyRules } from "../permissions/scopePolicy.js";
 import { appDataDir, type AppConfig } from "../config.js";
+import { defaultWebSearchProvider, type WebSearchProviderProfile } from "./webSearchProvider.js";
 import { resolveCommandExecutionProfile } from "../execution/profile.js";
 import { discoverSkills, formatSkillList, readSkill } from "../agent/skills.js";
 import type { ToolSchema } from "../agent/types.js";
@@ -99,12 +100,18 @@ import type { RuntimeControl } from "./runtimeControl.js";
 type ToolContext = {
   workspaceRoot: string;
   approvals: ApprovalManager;
-  tavilyApiKey?: string;
+  webSearchProvider?: WebSearchProviderProfile;
   mcpServers?: AppConfig["mcpServers"];
   scopePolicyRules?: WorkspaceScopePolicyRules;
   browser?: BrowserToolController;
   browserTaskModel?: BrowserTaskModelConfig;
   runtimeControl?: RuntimeControl;
+  /**
+   * Expose direct snapshot/click/type browser primitives. The desktop host keeps these
+   * disabled by default in favor of its delegated browser_task; terminal Browser Use
+   * sessions opt in because Arivu itself owns the reasoning loop there.
+   */
+  manualBrowserTools?: boolean;
   onBrowserTaskProgress?: (progress: { stepIndex: number; summary: string; evaluation?: string; memory?: string }) => void;
   directEditReview?: boolean;
   /**
@@ -167,6 +174,7 @@ export function createToolRegistry(context: ToolContext) {
   const scopePolicyRules = normalizeWorkspaceScopePolicyRules(context.scopePolicyRules);
   const scopedMcpServers = mcpServersForScope(context.mcpServers, scopePolicyRules);
   const directEditReview = context.directEditReview ?? true;
+  const manualBrowserToolsEnabled = context.manualBrowserTools ?? MANUAL_BROWSER_TOOLS_ENABLED;
 
   const register = (tool: ToolDefinition) => tools.set(tool.schema.name, tool);
 
@@ -447,17 +455,18 @@ export function createToolRegistry(context: ToolContext) {
       await context.approvals.require({
         type: "network",
         summary: "web_search",
-        destination: context.tavilyApiKey ? "https://api.tavily.com/search" : "https://www.bing.com/search",
+        destination: (context.webSearchProvider ?? defaultWebSearchProvider("bing")).baseUrl,
         query: parsed.query,
         destructive: true
       });
-      const results = await searchWeb(parsed.query, parsed.maxResults, { tavilyApiKey: context.tavilyApiKey });
+      const results = await searchWeb(parsed.query, parsed.maxResults, { provider: context.webSearchProvider });
       return formatWebSearchResults(parsed.query, results);
     }
   });
 
   const browser = context.browser;
   if (browser) {
+    const directBrowserSession = manualBrowserToolsEnabled && !context.browserTaskModel && !context.runtimeControl;
     register({
       schema: {
         name: "browser_state",
@@ -482,8 +491,9 @@ export function createToolRegistry(context: ToolContext) {
     register({
       schema: {
         name: "browser_select_tab",
-        description:
-          "Set the agent's target tab by tabId: later browser tools without an explicit tabId act on it. Does not change which tab the user sees — the user's view and focus are never taken by agent actions. Use browser_state first to discover tab ids.",
+        description: directBrowserSession
+          ? "Select the external Chrome tab targeted by later Browser Use actions. Use browser_state first to discover tab ids."
+          : "Set the agent's target tab by tabId: later browser tools without an explicit tabId act on it. Does not change which tab the user sees — the user's view and focus are never taken by agent actions. Use browser_state first to discover tab ids.",
         parameters: objectSchema({
           tabId: { type: "string", description: "Visible browser tab id from browser_state." }
         })
@@ -505,8 +515,9 @@ export function createToolRegistry(context: ToolContext) {
     register({
       schema: {
         name: "browser_open",
-        description:
-          'Open a URL or search text in Arivu\'s isolated browser. Defaults to hidden background mode. When continuing a visible page, explicitly pass mode="visible" and its tabId from browser_state; omitting mode opens the hidden browser. In visible mode, pass newTab to create a new browser tab or tabId to target an existing tab.',
+        description: directBrowserSession
+          ? "Open a URL or search text in the external Chrome session controlled through Browser Use. Defaults to visible mode. Agent navigation without tabId opens a new tab instead of overwriting an existing page; use browser_state and browser_select_tab to continue a known tab."
+          : 'Open a URL or search text in Arivu\'s isolated browser. Defaults to hidden background mode. When continuing a visible page, explicitly pass mode="visible" and its tabId from browser_state; omitting mode opens the hidden browser. In visible mode, pass newTab to create a new browser tab or tabId to target an existing tab.',
         parameters: objectSchema({
           url: {
             type: "string",
@@ -516,8 +527,9 @@ export function createToolRegistry(context: ToolContext) {
           mode: {
             type: "string",
             enum: ["visible", "background"],
-            description:
-              "Optional browser mode. Defaults to hidden background mode; always pass visible when continuing an existing visible tab."
+            description: directBrowserSession
+              ? "Optional browser mode. Defaults to the external Chrome session's active visible mode."
+              : "Optional browser mode. Defaults to hidden background mode; always pass visible when continuing an existing visible tab."
           },
           tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the agent's target tab." },
           newTab: {
@@ -537,7 +549,7 @@ export function createToolRegistry(context: ToolContext) {
           })
           .parse(args);
         const url = await normalizeSafeBrowserToolUrl(context.workspaceRoot, normalizeBrowserUrl(parsed.url));
-        const mode = parsed.mode ?? hiddenAgentBrowserMode();
+        const mode = browserActionMode(browser, parsed.mode);
         await context.approvals.require({
           type: "browser",
           action: "open",
@@ -923,113 +935,115 @@ export function createToolRegistry(context: ToolContext) {
       }
     });
 
-    register({
-      schema: {
-        name: "browser_task",
-        description:
-          "Use it when you need to click, scroll, type, select, or focus elements on the page (including inside same-origin iframes), or execute JavaScript (opt-in via allowJavaScript). Delegates to an autonomous in-page agent that observes and acts on Arivu's isolated browser until done, instead of you driving snapshot/click/type rounds yourself. It also has its own web search tool it can reach for unprompted when it is stuck on an unfamiliar interaction. Best for single-page or short navigation tasks; it cannot open OS file dialogs, follow links that open a new tab, or answer follow-up questions mid-task. The result carries the task's success flag, its data answer, a step-by-step trace of what the in-page agent did, the final url/title, and a snapshotAfter indexed page snapshot — read trace and snapshotAfter to confirm the outcome instead of firing a separate browser_screenshot, which you only need when you require the actual pixels. On failure, read the trace (and proxyDiagnostics) to see where it went wrong before re-running with a clearer instruction. If the trace shows the same interaction failing repeatedly against an unfamiliar site/control, consider a web_search yourself for how it actually works before re-running, instead of repeating the same instruction. Provider rate limits and rejected request parameters are already retried automatically inside the tool — never re-run to work around them — and stopReason \"infrastructure\" means the model endpoint itself is failing and retries are paused: report it to the user or switch the browser-task model instead of re-running.",
-        parameters: objectSchema({
-          instruction: { type: "string", description: "Natural-language description of the task to complete on the current page." },
-          mode: {
-            type: "string",
-            enum: ["visible", "background"],
-            description: "Optional browser mode. Defaults to the active browser mode."
-          },
-          tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
-          maxSteps: {
-            type: "number",
-            description:
-              "Maximum number of agent loops, from 1 to 200. Defaults to 100. Values below 20 are raised to 20 — a single form-field interaction routinely takes several loops (observe, act, re-observe after the page re-renders), and a tight budget makes the in-page agent rush and misreport success rather than actually finishing sooner."
-          },
-          timeoutMs: {
-            type: "number",
-            description:
-              "Wall-clock ceiling in milliseconds, from 5000 to 14400000. Defaults to 4200000. Values below 600000 are raised to 600000 because the browser agent is deliberately rate-paced and provider calls can take minutes; fast tasks still return immediately when complete."
-          },
-          allowedDomains: {
-            type: "array",
-            items: { type: "string" },
-            description: "Optional hostnames the task may navigate to. Defaults to the current page's own hostname."
-          },
-          allowJavaScript: {
-            type: "boolean",
-            description:
-              "Allow the in-page agent to execute arbitrary JavaScript on the page via its own execute_javascript action. Off by default; enable it when click/scroll/type/select cannot express what the task needs (reading a value the DOM doesn't expose, a hidden control, a custom widget), or when a re-run of the same instruction stalled or repeated the same failed interaction. May bypass this page's usual guardrails, so only turn it on for that run, not by default."
-          },
-          allowSensitiveActions: {
-            type: "boolean",
-            description:
-              "By default the in-page agent pauses when the page contains sensitive confirmation language (payment, order, account change). Set true ONLY after the user has explicitly confirmed the sensitive action in this conversation; never set it preemptively."
+    if (context.browserTaskModel || context.runtimeControl) {
+      register({
+        schema: {
+          name: "browser_task",
+          description:
+            "Use it when you need to click, scroll, type, select, or focus elements on the page (including inside same-origin iframes), or execute JavaScript (opt-in via allowJavaScript). Delegates to an autonomous in-page agent that observes and acts on Arivu's isolated browser until done, instead of you driving snapshot/click/type rounds yourself. It also has its own web search tool it can reach for unprompted when it is stuck on an unfamiliar interaction. Best for single-page or short navigation tasks; it cannot open OS file dialogs, follow links that open a new tab, or answer follow-up questions mid-task. The result carries the task's success flag, its data answer, a step-by-step trace of what the in-page agent did, the final url/title, and a snapshotAfter indexed page snapshot — read trace and snapshotAfter to confirm the outcome instead of firing a separate browser_screenshot, which you only need when you require the actual pixels. On failure, read the trace (and proxyDiagnostics) to see where it went wrong before re-running with a clearer instruction. If the trace shows the same interaction failing repeatedly against an unfamiliar site/control, consider a web_search yourself for how it actually works before re-running, instead of repeating the same instruction. Provider rate limits and rejected request parameters are already retried automatically inside the tool — never re-run to work around them — and stopReason \"infrastructure\" means the model endpoint itself is failing and retries are paused: report it to the user or switch the browser-task model instead of re-running.",
+          parameters: objectSchema({
+            instruction: { type: "string", description: "Natural-language description of the task to complete on the current page." },
+            mode: {
+              type: "string",
+              enum: ["visible", "background"],
+              description: "Optional browser mode. Defaults to the active browser mode."
+            },
+            tabId: { type: "string", description: "Optional visible browser tab id. Defaults to the active visible tab." },
+            maxSteps: {
+              type: "number",
+              description:
+                "Maximum number of agent loops, from 1 to 200. Defaults to 100. Values below 20 are raised to 20 — a single form-field interaction routinely takes several loops (observe, act, re-observe after the page re-renders), and a tight budget makes the in-page agent rush and misreport success rather than actually finishing sooner."
+            },
+            timeoutMs: {
+              type: "number",
+              description:
+                "Wall-clock ceiling in milliseconds, from 5000 to 14400000. Defaults to 4200000. Values below 600000 are raised to 600000 because the browser agent is deliberately rate-paced and provider calls can take minutes; fast tasks still return immediately when complete."
+            },
+            allowedDomains: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional hostnames the task may navigate to. Defaults to the current page's own hostname."
+            },
+            allowJavaScript: {
+              type: "boolean",
+              description:
+                "Allow the in-page agent to execute arbitrary JavaScript on the page via its own execute_javascript action. Off by default; enable it when click/scroll/type/select cannot express what the task needs (reading a value the DOM doesn't expose, a hidden control, a custom widget), or when a re-run of the same instruction stalled or repeated the same failed interaction. May bypass this page's usual guardrails, so only turn it on for that run, not by default."
+            },
+            allowSensitiveActions: {
+              type: "boolean",
+              description:
+                "By default the in-page agent pauses when the page contains sensitive confirmation language (payment, order, account change). Set true ONLY after the user has explicitly confirmed the sensitive action in this conversation; never set it preemptively."
+            }
+          })
+        },
+        async execute(args) {
+          const rawParsed = z
+            .object({
+              instruction: z.string().trim().min(1),
+              mode: z.enum(["visible", "background"]).optional(),
+              tabId: z.string().trim().min(1).optional(),
+              maxSteps: optionalModelInteger(1, 200),
+              timeoutMs: optionalModelInteger(5_000, 14_400_000),
+              allowedDomains: z.array(z.string().trim().min(1)).optional(),
+              allowJavaScript: z.boolean().optional(),
+              allowSensitiveActions: z.boolean().optional()
+            })
+            .parse(args);
+          const repaired = recoverLeakedBrowserTaskMode(rawParsed.instruction, rawParsed.mode);
+          const parsed = {
+            ...rawParsed,
+            instruction: repaired.instruction,
+            mode: repaired.mode
+          };
+          const browserTaskModel = context.runtimeControl?.currentBrowserTaskModel() ?? context.browserTaskModel;
+          if (!browserTaskModel) {
+            throw new Error("browser_task has no model configured for this run.");
           }
-        })
-      },
-      async execute(args) {
-        const rawParsed = z
-          .object({
-            instruction: z.string().trim().min(1),
-            mode: z.enum(["visible", "background"]).optional(),
-            tabId: z.string().trim().min(1).optional(),
-            maxSteps: optionalModelInteger(1, 200),
-            timeoutMs: optionalModelInteger(5_000, 14_400_000),
-            allowedDomains: z.array(z.string().trim().min(1)).optional(),
-            allowJavaScript: z.boolean().optional(),
-            allowSensitiveActions: z.boolean().optional()
-          })
-          .parse(args);
-        const repaired = recoverLeakedBrowserTaskMode(rawParsed.instruction, rawParsed.mode);
-        const parsed = {
-          ...rawParsed,
-          instruction: repaired.instruction,
-          mode: repaired.mode
-        };
-        const browserTaskModel = context.runtimeControl?.currentBrowserTaskModel() ?? context.browserTaskModel;
-        if (!browserTaskModel) {
-          throw new Error("browser_task has no model configured for this run.");
-        }
-        if (browserTaskInstructionAttemptsDirectUrlNavigation(parsed.instruction)) {
-          throw new Error(
-            "browser_task cannot navigate to an explicit URL or control the address bar. Use browser_open with the correct mode/tabId only when the exact URL came from current browser evidence; never guess or construct an endpoint. Otherwise call browser_state and navigate through an exact visible link, tab, Back control, or related-list New button."
-          );
-        }
-        if (browserTaskInstructionContradictsMrvsChildCreation(parsed.instruction)) {
-          throw new Error(
-            "browser_task instruction contradicts MRVS child creation: do not create a catalog-item variable whose Type is Multi Row Variable Set. Open the existing Variable Set record, use its Variables related-list New button, and create the child with its requested own Type while keeping that Variable Set as the parent."
-          );
-        }
-        const mode = browserActionMode(browser, parsed.mode);
-        if (mode === "visible" && parsed.tabId === "background") {
-          throw new Error('browser_task cannot use tabId "background" in visible mode. Omit tabId to use the active visible tab.');
-        }
-        if (mode === "background" && parsed.tabId && parsed.tabId !== "background") {
-          throw new Error("browser_task cannot target a visible tab id in background mode. Omit tabId or switch to visible mode.");
-        }
-        const timeoutMs = parsed.timeoutMs === undefined ? undefined : Math.max(parsed.timeoutMs, MIN_DELEGATED_BROWSER_TASK_TIMEOUT_MS);
-        const maxSteps = parsed.maxSteps === undefined ? undefined : Math.max(parsed.maxSteps, MIN_DELEGATED_BROWSER_TASK_MAX_STEPS);
-        await context.approvals.require({
-          type: "browser",
-          action: "task",
-          target: parsed.instruction,
-          url: browserTargetUrl(browser, mode, parsed.tabId),
-          mode,
-          destructive: true
-        });
-        return formatBrowserToolResult(
-          "task",
-          await browser.task({
-            ...parsed,
-            timeoutMs,
-            maxSteps,
+          if (browserTaskInstructionAttemptsDirectUrlNavigation(parsed.instruction)) {
+            throw new Error(
+              "browser_task cannot navigate to an explicit URL or control the address bar. Use browser_open with the correct mode/tabId only when the exact URL came from current browser evidence; never guess or construct an endpoint. Otherwise call browser_state and navigate through an exact visible link, tab, Back control, or related-list New button."
+            );
+          }
+          if (browserTaskInstructionContradictsMrvsChildCreation(parsed.instruction)) {
+            throw new Error(
+              "browser_task instruction contradicts MRVS child creation: do not create a catalog-item variable whose Type is Multi Row Variable Set. Open the existing Variable Set record, use its Variables related-list New button, and create the child with its requested own Type while keeping that Variable Set as the parent."
+            );
+          }
+          const mode = browserActionMode(browser, parsed.mode);
+          if (mode === "visible" && parsed.tabId === "background") {
+            throw new Error('browser_task cannot use tabId "background" in visible mode. Omit tabId to use the active visible tab.');
+          }
+          if (mode === "background" && parsed.tabId && parsed.tabId !== "background") {
+            throw new Error("browser_task cannot target a visible tab id in background mode. Omit tabId or switch to visible mode.");
+          }
+          const timeoutMs = parsed.timeoutMs === undefined ? undefined : Math.max(parsed.timeoutMs, MIN_DELEGATED_BROWSER_TASK_TIMEOUT_MS);
+          const maxSteps = parsed.maxSteps === undefined ? undefined : Math.max(parsed.maxSteps, MIN_DELEGATED_BROWSER_TASK_MAX_STEPS);
+          await context.approvals.require({
+            type: "browser",
+            action: "task",
+            target: parsed.instruction,
+            url: browserTargetUrl(browser, mode, parsed.tabId),
             mode,
-            modelConfig: browserTaskModel,
-            tavilyApiKey: context.tavilyApiKey,
-            signal: context.signal,
-            onProgress: context.onBrowserTaskProgress
-          })
-        );
-      }
-    });
+            destructive: true
+          });
+          return formatBrowserToolResult(
+            "task",
+            await browser.task({
+              ...parsed,
+              timeoutMs,
+              maxSteps,
+              mode,
+              modelConfig: browserTaskModel,
+              webSearchProvider: context.webSearchProvider,
+              signal: context.signal,
+              onProgress: context.onBrowserTaskProgress
+            })
+          );
+        }
+      });
+    }
 
-    if (!MANUAL_BROWSER_TOOLS_ENABLED) {
+    if (!manualBrowserToolsEnabled) {
       for (const name of MANUAL_BROWSER_TOOL_NAMES) {
         tools.delete(name);
       }

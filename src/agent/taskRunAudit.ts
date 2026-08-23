@@ -8,6 +8,7 @@ import type {
   AgentTaskRunVerificationStatus,
   AgentTaskRunWorktreeStatus
 } from "./types.js";
+import type { TrustMode } from "../permissions/types.js";
 
 const MAX_INLINE_TEXT = 220;
 const MAX_ARGUMENT_TEXT = 600;
@@ -155,7 +156,7 @@ function toolPolicyLine(run: AgentTaskRun, tool: AgentTaskRun["tools"][number]) 
   const details = [
     approvalStatusLabel(approval.status),
     approval.effect,
-    approval.trustMode,
+    approvalModeLabel(approval.trustMode),
     approval.override ? `workspace override ${approval.override}` : undefined,
     approval.risky ? "risky" : undefined,
     approvalScopeSummary(approval.scope)
@@ -200,7 +201,7 @@ function approvalLines(run: AgentTaskRun) {
         approvalStatusLabel(approval.status),
         capabilityLabel(approval.capability),
         approval.actionType,
-        approval.trustMode,
+        approvalModeLabel(approval.trustMode),
         approval.effect,
         approval.override ? `override ${approval.override}` : undefined,
         approval.risky ? "risky" : undefined,
@@ -486,6 +487,19 @@ function approvalStatusLabel(status: AgentTaskRunApprovalStatus) {
       return "Denied";
     case "blocked":
       return "Blocked";
+  }
+}
+
+function approvalModeLabel(mode: TrustMode) {
+  switch (mode) {
+    case "ask":
+      return "Manual";
+    case "trusted":
+      return "Auto";
+    case "bypass":
+      return "Bypass";
+    case "readonly":
+      return "Readonly";
   }
 }
 

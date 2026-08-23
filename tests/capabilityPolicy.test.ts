@@ -3,7 +3,7 @@ import { capabilityForApprovalAction, describeCapabilityPolicies, evaluateCapabi
 
 describe("capability policy", () => {
   it("allows local read-style capabilities in every trust mode", () => {
-    for (const trustMode of ["readonly", "ask", "trusted"] as const) {
+    for (const trustMode of ["readonly", "ask", "trusted", "bypass"] as const) {
       expect(evaluateCapabilityPolicy(trustMode, "read_repo").effect).toBe("allow");
       expect(evaluateCapabilityPolicy(trustMode, "local_context").effect).toBe("allow");
       expect(evaluateCapabilityPolicy(trustMode, "skill_context").effect).toBe("allow");
@@ -25,6 +25,15 @@ describe("capability policy", () => {
     expect(evaluateCapabilityPolicy("trusted", "browser_control", { risky: true }).effect).toBe("allow");
     expect(evaluateCapabilityPolicy("trusted", "run_command").effect).toBe("prompt");
     expect(evaluateCapabilityPolicy("trusted", "mcp_call").effect).toBe("prompt");
+  });
+
+  it("allows every capability in bypass mode without approval prompts", () => {
+    for (const capability of ["write_workspace", "run_command", "network_fetch", "browser_control", "mcp_call", "unknown"] as const) {
+      expect(evaluateCapabilityPolicy("bypass", capability).effect).toBe("allow");
+      expect(evaluateCapabilityPolicy("bypass", capability, { risky: true }).effect).toBe("allow");
+    }
+    expect(evaluateCapabilityPolicy("bypass", "run_command", { overrides: { run_command: "prompt" } }).effect).toBe("allow");
+    expect(evaluateCapabilityPolicy("bypass", "run_command", { overrides: { run_command: "deny" } }).effect).toBe("deny");
   });
 
   it("applies workspace overrides only when they tighten the built-in policy", () => {
@@ -60,10 +69,11 @@ describe("capability policy", () => {
     expect(writePolicy?.examples).toContain("apply_patch");
     expect(writePolicy?.risk).toContain("mutate project files");
     expect(writePolicy?.defaultPosture).toContain("Blocked in readonly");
-    expect(writePolicy?.modes.map((mode) => mode.trustMode)).toEqual(["readonly", "ask", "trusted"]);
+    expect(writePolicy?.modes.map((mode) => mode.trustMode)).toEqual(["readonly", "ask", "trusted", "bypass"]);
     expect(writePolicy?.modes.find((mode) => mode.trustMode === "readonly")?.effect).toBe("deny");
     expect(writePolicy?.modes.find((mode) => mode.trustMode === "trusted")?.effect).toBe("allow");
     expect(writePolicy?.modes.find((mode) => mode.trustMode === "trusted")?.riskyEffect).toBe("prompt");
+    expect(writePolicy?.modes.find((mode) => mode.trustMode === "bypass")?.effect).toBe("allow");
   });
 
   it("describes workspace overrides in the policy matrix", () => {

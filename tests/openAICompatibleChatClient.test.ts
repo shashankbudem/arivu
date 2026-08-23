@@ -37,7 +37,7 @@ describe("OpenAICompatibleChatClient", () => {
       }
     });
     const request: ChatRequest = {
-      messages: [{ role: "user", content: "read the file" }],
+      messages: [{ role: "user", content: "read the file", createdAt: "2026-07-27T12:00:00.000Z" }],
       tools: [
         {
           name: "read",
@@ -53,6 +53,7 @@ describe("OpenAICompatibleChatClient", () => {
     expect(bodies[0]?.tools).toBeTruthy();
     expect(bodies[1]?.tools).toBeUndefined();
     expect(JSON.stringify(bodies[1]?.messages)).toContain("Tool calling is unavailable");
+    expect(JSON.stringify(bodies)).not.toContain("createdAt");
     expect(observations).toMatchObject([
       {
         capability: "toolCalling",
@@ -479,6 +480,49 @@ describe("OpenAICompatibleChatClient", () => {
     ]);
   });
 
+  it("combines all system instructions into one leading message for strict chat templates", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "Ready."
+            }
+          }
+        ]
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "http://127.0.0.1:8080/v1",
+      model: "local-model",
+      trustMode: "ask"
+    });
+
+    await client.complete({
+      messages: [
+        { role: "system", content: "Base instructions." },
+        { role: "user", content: "First question" },
+        { role: "system", content: "Compaction summary." },
+        { role: "assistant", content: "First answer" },
+        { role: "system", content: "Loop instruction." },
+        { role: "user", content: "Continue" }
+      ],
+      tools: []
+    });
+
+    expect(body?.messages).toEqual([
+      { role: "system", content: "Base instructions.\n\nCompaction summary.\n\nLoop instruction." },
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "Continue" }
+    ]);
+  });
+
   it("omits empty assistant history messages from no-tools requests", async () => {
     let body: Record<string, unknown> | undefined;
     vi.stubGlobal("fetch", async (_input: string, init?: RequestInit) => {
@@ -646,6 +690,80 @@ describe("OpenAICompatibleChatClient", () => {
     expect(streamed.join("")).toBe("India announced the squad. Fixtures are updated.");
     expect(response?.message.content).toBe(streamed.join(""));
     expect(streamed.join("")).not.toContain("【");
+  });
+
+  it("fails a streaming request on a non-retryable status without a second non-streaming attempt", async () => {
+    // Regression: a permanent 400 (e.g. context overflow) used to fall back to a full non-streaming
+    // request that failed identically, doubling the cost and latency before the same error surfaced.
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response('{"error":{"message":"maximum context length exceeded","code":400}}', {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask",
+      maxRequestRetries: 0
+    });
+
+    await expect(client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow(
+      "Model request failed (400)"
+    );
+    expect(calls).toBe(1);
+  });
+
+  it("leaves code and space-significant text untouched when there are no citation markers", async () => {
+    // Regression: the old citation cleaner globally rewrote "[space] before punctuation" and collapsed
+    // blank lines, corrupting "cond ? a : b" into "cond? a: b" and dropping blank lines inside code.
+    const code = "function pick(cond) {\n  return cond ? a : b;\n\n  // trailing note ;\n}";
+    vi.stubGlobal("fetch", async () => {
+      const events = [{ choices: [{ delta: { content: code } }] }].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+      return new Response(`${events}data: [DONE]\n\n`, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    });
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.stream?.({ messages: [{ role: "user", content: "write code" }], tools: [] });
+    expect(response?.message.content).toBe(code);
+  });
+
+  it("treats empty tool-call arguments as an empty object instead of a raw empty string", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "",
+              // Providers send "" for zero-arg tools; it must parse to {} so the tool actually runs.
+              tool_calls: [{ id: "c1", type: "function", function: { name: "browser_state", arguments: "" } }]
+            },
+            finish_reason: "tool_calls"
+          }
+        ]
+      })
+    );
+
+    const client = new OpenAICompatibleChatClient({
+      apiKey: "test-key",
+      baseUrl: "https://api.example.test/v1",
+      model: "test-model",
+      trustMode: "ask"
+    });
+
+    const response = await client.complete({ messages: [{ role: "user", content: "state" }], tools: [] });
+    expect(response.message.toolCalls?.[0]).toEqual({ id: "c1", name: "browser_state", arguments: {} });
   });
 
   it("recovers a provider-unparsed textual tool call from complete() content", async () => {
@@ -992,9 +1110,56 @@ describe("OpenAICompatibleChatClient", () => {
     });
 
     await expect(client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow(
-      "Model response stream timed out after 25ms."
+      "Model response stream stalled: no data for 25ms."
     );
     expect(cancelled).toBe(true);
+  });
+
+  it("does not abort a slow but steady stream that outlives the idle timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const idleMs = 25;
+      const chunks = [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "one " } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "two " } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "three" } }] })}\n\n`,
+        "data: [DONE]\n\n"
+      ];
+      const encoder = new TextEncoder();
+      vi.stubGlobal("fetch", async () => {
+        let index = 0;
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (index >= chunks.length) {
+              controller.close();
+              return;
+            }
+            // Each chunk arrives just under the idle window; cumulatively the stream runs well past
+            // it, so a whole-stream cap would have killed it — an idle timeout must not.
+            await new Promise<void>((resolve) => setTimeout(resolve, idleMs - 5));
+            controller.enqueue(encoder.encode(chunks[index]!));
+            index += 1;
+          }
+        });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      });
+
+      const client = new OpenAICompatibleChatClient({
+        apiKey: "test-key",
+        baseUrl: "https://api.example.test/v1",
+        model: "test-model",
+        trustMode: "ask",
+        requestTimeoutMs: idleMs,
+        maxRequestRetries: 0
+      });
+
+      const pending = client.stream?.({ messages: [{ role: "user", content: "hi" }], tools: [] });
+      await vi.runAllTimersAsync();
+      const response = await pending;
+      expect(String(response?.message.content)).toBe("one two three");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("cancels a response stream when the caller aborts after headers arrive", async () => {

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import http from "node:http";
 import { Readable } from "node:stream";
 import { searchWeb } from "../../src/tools/webSearch.js";
+import type { WebSearchProviderProfile } from "../../src/tools/webSearchProvider.js";
 
 /**
  * Loopback-only reverse proxy that lets an injected page-agent instance call the real LLM
@@ -14,12 +15,32 @@ type ProxyRegistration = {
   realBaseUrl: string;
   realApiKey?: string;
   /** Forwarded to searchWeb() for the in-page search_web tool; undefined falls back to Bing. */
-  tavilyApiKey?: string;
+  webSearchProvider?: WebSearchProviderProfile;
+  /** Captures the current browser-task viewport without exposing Electron to page JavaScript. */
+  captureScreenshot?: () => Promise<BrowserTaskScreenshot>;
+  /** Grounds one uniquely described GUI control and clicks it in the captured viewport. */
+  visualClick?: (target: string, signal: AbortSignal) => Promise<BrowserTaskVisualClickResult>;
+  pendingScreenshot?: BrowserTaskScreenshot;
   expiresAt: number;
   requestTimeoutMs: number;
   requestCount: number;
   diagnostics: BrowserTaskProxyDiagnostic[];
   unsupportedParams: Set<string>;
+  imageInputsUnsupported: boolean;
+};
+
+export type BrowserTaskScreenshot = {
+  image: string;
+  width: number;
+  height: number;
+};
+
+export type BrowserTaskVisualClickResult = {
+  target: string;
+  x: number;
+  y: number;
+  model: string;
+  matched?: unknown;
 };
 
 export type BrowserTaskProxyDiagnostic = {
@@ -54,7 +75,7 @@ const UPSTREAM_RETRY_MAX_DELAY_MS = 30_000;
 // browser-agent step until the entire browser_task wall-clock budget expires. NIM completions
 // observed in production can legitimately take over a minute, so keep this generous while
 // still giving the proxy a finite recovery boundary.
-const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 360_000;
 const UPSTREAM_NETWORK_RETRY_LIMIT = 1;
 // The in-page client patches requests with vendor-specific parameters (e.g. `thinking` to
 // disable reasoning for deepseek/glm/kimi). OpenAI-compatible gateways vary: the vendor's own
@@ -72,6 +93,11 @@ const MAX_BUFFERED_BODY_BYTES = 20 * 1024 * 1024;
 // built, so it can never interact with that path's retry/backoff/param-stripping state.
 const SEARCH_PATH = "/__arivu_search";
 const MAX_SEARCH_QUERY_LENGTH = 300;
+const SCREENSHOT_PATH = "/__arivu_screenshot";
+const VISUAL_CLICK_PATH = "/__arivu_visual_click";
+const PENDING_SCREENSHOT_URL = "arivu-recovery-screenshot://pending";
+const MAX_VISUAL_CLICK_BODY_BYTES = 8 * 1024;
+const MAX_VISUAL_CLICK_TARGET_CHARS = 500;
 
 const TOKEN_SWEEP_INTERVAL_MS = 30_000;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -132,7 +158,9 @@ export async function ensureBrowserTaskProxy(): Promise<{ port: number }> {
 export async function registerBrowserTaskProxyEntry(options: {
   realBaseUrl: string;
   realApiKey?: string;
-  tavilyApiKey?: string;
+  webSearchProvider?: WebSearchProviderProfile;
+  captureScreenshot?: () => Promise<BrowserTaskScreenshot>;
+  visualClick?: (target: string, signal: AbortSignal) => Promise<BrowserTaskVisualClickResult>;
   ttlMs: number;
   /** Test/diagnostic override; production callers use the bounded default above. */
   requestTimeoutMs?: number;
@@ -142,12 +170,15 @@ export async function registerBrowserTaskProxyEntry(options: {
   registrations.set(token, {
     realBaseUrl: options.realBaseUrl.replace(/\/+$/, ""),
     realApiKey: options.realApiKey,
-    tavilyApiKey: options.tavilyApiKey,
+    webSearchProvider: options.webSearchProvider,
+    captureScreenshot: options.captureScreenshot,
+    visualClick: options.visualClick,
     expiresAt: Date.now() + options.ttlMs,
     requestTimeoutMs: Math.max(1, options.requestTimeoutMs ?? DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS),
     requestCount: 0,
     diagnostics: [],
-    unsupportedParams: new Set()
+    unsupportedParams: new Set(),
+    imageInputsUnsupported: false
   });
   return { token, proxyBaseUrl: `http://127.0.0.1:${port}` };
 }
@@ -197,7 +228,7 @@ async function handleSearchRequest(req: http.IncomingMessage, res: http.ServerRe
     }
     const requestedResults = Number(url.searchParams.get("n"));
     const maxResults = Number.isFinite(requestedResults) ? Math.min(10, Math.max(1, Math.round(requestedResults))) : 5;
-    const results = await searchWeb(query, maxResults, { tavilyApiKey: registration.tavilyApiKey });
+    const results = await searchWeb(query, maxResults, { provider: registration.webSearchProvider });
     const body = JSON.stringify({
       query,
       results: results.map((result) => ({ title: result.title, url: result.url, snippet: result.snippet }))
@@ -207,6 +238,98 @@ async function handleSearchRequest(req: http.IncomingMessage, res: http.ServerRe
     res
       .writeHead(502, { "content-type": "application/json", ...corsHeaders(req) })
       .end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
+async function handleScreenshotRequest(req: http.IncomingMessage, res: http.ServerResponse, registration: ProxyRegistration) {
+  if (!registration.captureScreenshot) {
+    res
+      .writeHead(503, { "content-type": "application/json", ...corsHeaders(req) })
+      .end(JSON.stringify({ error: "Screenshot capture is unavailable for this browser task." }));
+    return;
+  }
+  try {
+    const screenshot = await registration.captureScreenshot();
+    if (
+      typeof screenshot.image !== "string" ||
+      !/^data:image\/(?:png|jpeg);base64,/.test(screenshot.image) ||
+      screenshot.width <= 0 ||
+      screenshot.height <= 0
+    ) {
+      throw new Error("Screenshot capture returned invalid image data.");
+    }
+    // Keep pixels in the trusted main process. The page receives only dimensions and inserts
+    // an opaque placeholder into its next model request; the proxy replaces that placeholder
+    // after the request has left the page.
+    registration.pendingScreenshot = screenshot;
+    res
+      .writeHead(200, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        ...corsHeaders(req)
+      })
+      .end(JSON.stringify({ queued: true, width: screenshot.width, height: screenshot.height }));
+  } catch (error) {
+    res
+      .writeHead(502, { "content-type": "application/json", ...corsHeaders(req) })
+      .end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
+async function handleVisualClickRequest(req: http.IncomingMessage, res: http.ServerResponse, registration: ProxyRegistration) {
+  if (!registration.visualClick) {
+    res
+      .writeHead(503, { "content-type": "application/json", ...corsHeaders(req) })
+      .end(JSON.stringify({ error: "LocateAnything visual grounding is not configured for this browser task." }));
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse((await readRequestBody(req, MAX_VISUAL_CLICK_BODY_BYTES)).toString("utf8"));
+  } catch {
+    res
+      .writeHead(400, { "content-type": "application/json", ...corsHeaders(req) })
+      .end(JSON.stringify({ error: "Visual click request must contain a small JSON body." }));
+    return;
+  }
+  const target =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof (parsed as Record<string, unknown>).target === "string"
+      ? String((parsed as Record<string, unknown>).target)
+          .replace(/\s+/g, " ")
+          .trim()
+      : "";
+  if (!target || target.length > MAX_VISUAL_CLICK_TARGET_CHARS) {
+    res
+      .writeHead(400, { "content-type": "application/json", ...corsHeaders(req) })
+      .end(JSON.stringify({ error: `target must contain 1..${MAX_VISUAL_CLICK_TARGET_CHARS} characters.` }));
+    return;
+  }
+
+  const controller = new AbortController();
+  const abortForClosedDownstream = () => controller.abort(new Error("Visual click caller disconnected."));
+  res.once("close", abortForClosedDownstream);
+  try {
+    const result = await registration.visualClick(target, controller.signal);
+    if (res.destroyed || res.writableEnded || res.socket?.destroyed) {
+      return;
+    }
+    res
+      .writeHead(200, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        ...corsHeaders(req)
+      })
+      .end(JSON.stringify({ ok: true, ...result }));
+  } catch (error) {
+    if (res.destroyed || res.writableEnded || res.socket?.destroyed) {
+      return;
+    }
+    res
+      .writeHead(502, { "content-type": "application/json", ...corsHeaders(req) })
+      .end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+  } finally {
+    res.off("close", abortForClosedDownstream);
   }
 }
 
@@ -251,6 +374,14 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
       await handleSearchRequest(req, res, registration);
       return;
     }
+    if (req.method === "POST" && safeRequestPath(req.url) === SCREENSHOT_PATH) {
+      await handleScreenshotRequest(req, res, registration);
+      return;
+    }
+    if (req.method === "POST" && safeRequestPath(req.url) === VISUAL_CLICK_PATH) {
+      await handleVisualClickRequest(req, res, registration);
+      return;
+    }
 
     startedAt = Date.now();
     attempt = ++registration.requestCount;
@@ -284,10 +415,21 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
     if (requestBody && registration.unsupportedParams.size > 0) {
       requestBody = stripNamedParams(requestBody, registration.unsupportedParams).body ?? requestBody;
     }
+    if (requestBody && registration.pendingScreenshot) {
+      const injected = injectPendingScreenshot(requestBody, registration.pendingScreenshot);
+      if (injected.body) {
+        requestBody = injected.body;
+        registration.pendingScreenshot = undefined;
+      }
+    }
+    if (requestBody && registration.imageInputsUnsupported) {
+      requestBody = stripImageInputs(requestBody).body ?? requestBody;
+    }
 
     let upstreamResponse: Response;
     let consumedErrorBody: string | undefined;
     let paramStripRetries = 0;
+    let imageCompatibilityRetries = 0;
     for (let upstreamRetry = 0; ; upstreamRetry++) {
       consumedErrorBody = undefined;
       const controller = new AbortController();
@@ -356,9 +498,28 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
           paramStripRetries += 1;
         }
       }
+      let strippedImages = 0;
+      const imageRejection =
+        upstreamResponse.status === 400 && requestBody && imageCompatibilityRetries < 1 && consumedErrorBody !== undefined
+          ? classifyImageRejection(consumedErrorBody)
+          : undefined;
+      if (imageRejection && requestBody) {
+        const stripped = stripImageInputs(requestBody);
+        if (stripped.body) {
+          strippedImages = stripped.count;
+          requestBody = stripped.body;
+          // Only a genuine capability gap is permanent; a per-image (size/decode) rejection must
+          // not disable vision for the rest of the task, so leave the flag untouched there.
+          if (imageRejection === "capability") {
+            registration.imageInputsUnsupported = true;
+          }
+          imageCompatibilityRetries += 1;
+        }
+      }
       const willStripRetry = strippedParams.length > 0;
+      const willImageCompatibilityRetry = strippedImages > 0;
       const willBackoffRetry = RETRYABLE_UPSTREAM_STATUSES.has(upstreamResponse.status) && upstreamRetry < UPSTREAM_RETRY_LIMIT;
-      const willRetry = willStripRetry || willBackoffRetry;
+      const willRetry = willStripRetry || willImageCompatibilityRetry || willBackoffRetry;
       recordDiagnostic(registration, {
         attempt,
         timestamp: new Date().toISOString(),
@@ -371,13 +532,15 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
           ? undefined
           : willStripRetry
             ? `provider rejected parameter(s) ${strippedParams.join(", ")}; retrying without them`
-            : `${upstreamResponse.statusText || "upstream error"}${upstreamRetry > 0 ? ` (retry ${upstreamRetry} of ${UPSTREAM_RETRY_LIMIT})` : ""}`,
+            : willImageCompatibilityRetry
+              ? "provider rejected screenshot image input; retrying with a text-only recovery notice"
+              : `${upstreamResponse.statusText || "upstream error"}${upstreamRetry > 0 ? ` (retry ${upstreamRetry} of ${UPSTREAM_RETRY_LIMIT})` : ""}`,
         willRetry: willRetry || undefined
       });
       if (!willRetry) {
         break;
       }
-      if (!willStripRetry) {
+      if (!willStripRetry && !willImageCompatibilityRetry) {
         // Discard the error body before retrying so the connection can be reused.
         await upstreamResponse.body?.cancel().catch(() => undefined);
         const delayMs = Math.min(
@@ -493,6 +656,128 @@ function stripNamedParams(requestBody: Buffer, names: Iterable<string>): { param
     delete record[name];
   }
   return { params: present, body: Buffer.from(JSON.stringify(record)) };
+}
+
+type ImageRejectionKind = "capability" | "per-image";
+
+/**
+ * Classifies a 400 that mentions image input:
+ *  - "capability": the provider/model does not accept image input at all. This is deterministic,
+ *    so the caller latches imageInputsUnsupported and strips images for the rest of the task.
+ *  - "per-image": THIS image was rejected for a transient reason (too large, bad dimensions,
+ *    decode/download failure). A smaller/valid screenshot would still be accepted, so the caller
+ *    strips only this request and must NOT latch — otherwise one oversized capture permanently
+ *    blinds recovery on a fully vision-capable provider.
+ *  - undefined: not an image-related rejection.
+ */
+function classifyImageRejection(errorBody: string): ImageRejectionKind | undefined {
+  const mentionsImage = /\b(image_url|image input|input image|vision|multimodal|data url|base64 image)\b/i.test(errorBody);
+  if (!mentionsImage) {
+    return undefined;
+  }
+  // Per-image problems (size, resolution, decode/download) are not a capability gap — treat these
+  // first so a message that says both "invalid" and "too large" is classified as per-image.
+  const perImageIssue =
+    /\b(too large|exceeds|maximum|max(?:imum)? size|payload|too big|dimension|width|height|resolution|pixels?|aspect|decode|download|fetch|corrupt|malformed|truncated|timed out)\b/i.test(
+      errorBody
+    );
+  if (perImageIssue) {
+    return "per-image";
+  }
+  const rejectsCapability =
+    /\b(unsupported|not supported|does not support|invalid|not allowed|text[- ]only|unknown content type|no (?:vision|image))\b/i.test(
+      errorBody
+    );
+  return rejectsCapability ? "capability" : undefined;
+}
+
+/**
+ * Removes image_url parts after an upstream model explicitly rejects vision input. The
+ * replacement notice is placed in the same user message, so PageAgent can recover without
+ * believing it saw pixels that the selected provider actually discarded.
+ */
+function stripImageInputs(requestBody: Buffer): { count: number; body?: Buffer } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(requestBody.toString("utf8"));
+  } catch {
+    return { count: 0 };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { count: 0 };
+  }
+  const record = parsed as Record<string, unknown>;
+  if (!Array.isArray(record.messages)) {
+    return { count: 0 };
+  }
+  let count = 0;
+  for (const message of record.messages) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      continue;
+    }
+    const messageRecord = message as Record<string, unknown>;
+    if (!Array.isArray(messageRecord.content)) {
+      continue;
+    }
+    const retained = messageRecord.content.filter((part) => {
+      const isImage =
+        Boolean(part) && typeof part === "object" && !Array.isArray(part) && (part as Record<string, unknown>).type === "image_url";
+      if (isImage) {
+        count += 1;
+      }
+      return !isImage;
+    });
+    if (retained.length !== messageRecord.content.length) {
+      retained.push({
+        type: "text",
+        text: "[System observation: Arivu captured a recovery screenshot, but the selected browser model/provider rejected image input. Continue from browser_state and other tools; do not claim to have seen the image.]"
+      });
+      messageRecord.content = retained;
+    }
+  }
+  return count > 0 ? { count, body: Buffer.from(JSON.stringify(record)) } : { count: 0 };
+}
+
+function injectPendingScreenshot(requestBody: Buffer, screenshot: BrowserTaskScreenshot): { count: number; body?: Buffer } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(requestBody.toString("utf8"));
+  } catch {
+    return { count: 0 };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { count: 0 };
+  }
+  const record = parsed as Record<string, unknown>;
+  if (!Array.isArray(record.messages)) {
+    return { count: 0 };
+  }
+  let count = 0;
+  for (const message of record.messages) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      continue;
+    }
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (const part of content) {
+      if (!part || typeof part !== "object" || Array.isArray(part)) {
+        continue;
+      }
+      const partRecord = part as Record<string, unknown>;
+      const imageUrl = partRecord.image_url;
+      if (partRecord.type !== "image_url" || !imageUrl || typeof imageUrl !== "object" || Array.isArray(imageUrl)) {
+        continue;
+      }
+      const imageUrlRecord = imageUrl as Record<string, unknown>;
+      if (imageUrlRecord.url === PENDING_SCREENSHOT_URL) {
+        imageUrlRecord.url = screenshot.image;
+        count += 1;
+      }
+    }
+  }
+  return count > 0 ? { count, body: Buffer.from(JSON.stringify(record)) } : { count: 0 };
 }
 
 /** Parses Retry-After as delta-seconds or an HTTP date; undefined when absent or invalid. */

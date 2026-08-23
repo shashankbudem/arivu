@@ -13,6 +13,7 @@ import {
   normalizeWorkspacePolicyProfiles,
   redactConfigForDisplay,
   resolveModelListEndpoint,
+  resolveWebSearchProvider,
   saveConfig,
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot
@@ -70,7 +71,16 @@ describe("config", () => {
       model: "gpt-4.1",
       toolCalling: "auto",
       imageInput: "auto",
-      trustMode: "ask"
+      chatModelRequestDelayMs: 10_000,
+      trustMode: "ask",
+      activeWebSearchProviderId: "bing",
+      webSearchProviders: [
+        {
+          id: "bing",
+          kind: "bing",
+          baseUrl: "https://www.bing.com/search"
+        }
+      ]
     });
   });
 
@@ -80,6 +90,47 @@ describe("config", () => {
     await saveConfig({ disabledTools: ["run", "write_file"] });
 
     await expect(loadConfig()).resolves.toMatchObject({ disabledTools: ["run", "write_file"] });
+  });
+
+  it("defaults, persists, and bounds the main chat-model request delay", async () => {
+    await expect(loadConfig({ includeEnv: false })).resolves.toMatchObject({ chatModelRequestDelayMs: 10_000 });
+
+    await saveConfig({ chatModelRequestDelayMs: 0 });
+    await expect(loadConfig({ includeEnv: false })).resolves.toMatchObject({ chatModelRequestDelayMs: 0 });
+
+    await saveConfig({ chatModelRequestDelayMs: 12_500 });
+    await expect(loadConfig({ includeEnv: false })).resolves.toMatchObject({ chatModelRequestDelayMs: 12_500 });
+
+    await expect(saveConfig({ chatModelRequestDelayMs: -1 })).rejects.toThrow();
+    await expect(saveConfig({ chatModelRequestDelayMs: 120_001 })).rejects.toThrow();
+    await expect(saveConfig({ chatModelRequestDelayMs: 1.5 })).rejects.toThrow();
+
+    await mkdir(appConfigDir(), { recursive: true });
+    await writeFile(configPath(), JSON.stringify({ model: "legacy-model" }), "utf8");
+    await expect(loadConfig({ includeEnv: false })).resolves.toMatchObject({
+      model: "legacy-model",
+      chatModelRequestDelayMs: 10_000
+    });
+  });
+
+  it("persists a dedicated LocateAnything visual-grounding profile", async () => {
+    await saveConfig({
+      browserVisualGrounding: {
+        providerId: "locate-anything",
+        model: "nvidia/LocateAnything-3B",
+        timeoutMs: 90_000,
+        apiKey: "grounding-secret"
+      }
+    });
+
+    await expect(loadConfig({ includeEnv: false })).resolves.toMatchObject({
+      browserVisualGrounding: {
+        providerId: "locate-anything",
+        model: "nvidia/LocateAnything-3B",
+        timeoutMs: 90_000,
+        apiKey: "grounding-secret"
+      }
+    });
   });
 
   it("defaults tool proposals to an empty list and persists review-only proposals", async () => {
@@ -136,6 +187,7 @@ describe("config", () => {
       apiKey: "chat-secret",
       toolCalling: "auto",
       imageInput: "auto",
+      chatModelRequestDelayMs: 10_000,
       activeProviderId: "chat",
       providers: [
         {
@@ -154,6 +206,15 @@ describe("config", () => {
           apiKey: "browser-secret",
           toolCalling: "auto",
           imageInput: "auto"
+        }
+      ],
+      activeWebSearchProviderId: "bing",
+      webSearchProviders: [
+        {
+          id: "bing",
+          name: "Bing RSS",
+          kind: "bing",
+          baseUrl: "https://www.bing.com/search"
         }
       ],
       trustMode: "ask",
@@ -204,6 +265,20 @@ describe("config", () => {
           apiKey: "provider-key"
         }
       ],
+      webSearchProviders: [
+        {
+          id: "exa",
+          name: "Exa",
+          kind: "exa",
+          baseUrl: "https://api.exa.ai/search",
+          apiKey: "search-key"
+        }
+      ],
+      browserVisualGrounding: {
+        baseUrl: "https://grounding.example/v1",
+        model: "nvidia/LocateAnything-3B",
+        apiKey: "grounding-key"
+      },
       mcpServers: {
         docs: {
           command: "server",
@@ -217,6 +292,8 @@ describe("config", () => {
     expect(display.apiKey).toBe(REDACTED_SECRET_VALUE);
     expect(display.tavilyApiKey).toBe(REDACTED_SECRET_VALUE);
     expect(display.providers?.[0]?.apiKey).toBe(REDACTED_SECRET_VALUE);
+    expect(display.webSearchProviders?.[0]?.apiKey).toBe(REDACTED_SECRET_VALUE);
+    expect(display.browserVisualGrounding?.apiKey).toBe(REDACTED_SECRET_VALUE);
     expect(display.mcpServers?.docs?.env.TOKEN).toBe(REDACTED_SECRET_VALUE);
 
     expect(
@@ -260,7 +337,19 @@ describe("config", () => {
 
   it("loads Tavily API key from env", async () => {
     process.env.ARIVU_TAVILY_API_KEY = "tvly-test";
-    await expect(loadConfig()).resolves.toMatchObject({ tavilyApiKey: "tvly-test" });
+    const config = await loadConfig();
+    expect(config).toMatchObject({
+      tavilyApiKey: "tvly-test",
+      activeWebSearchProviderId: "tavily",
+      webSearchProviders: [
+        {
+          id: "tavily",
+          kind: "tavily",
+          apiKey: "tvly-test"
+        }
+      ]
+    });
+    expect(resolveWebSearchProvider(config).kind).toBe("tavily");
   });
 
   it("accepts legacy Shankinster env vars as fallbacks", async () => {
@@ -277,7 +366,36 @@ describe("config", () => {
 
   it("reuses standard Tavily API key env var", async () => {
     process.env.TAVILY_API_KEY = "tvly-standard";
-    await expect(loadConfig()).resolves.toMatchObject({ tavilyApiKey: "tvly-standard" });
+    await expect(loadConfig()).resolves.toMatchObject({
+      tavilyApiKey: "tvly-standard",
+      webSearchProviders: [{ kind: "tavily", apiKey: "tvly-standard" }]
+    });
+  });
+
+  it("keeps an explicitly selected search provider while overlaying a legacy Tavily env key", async () => {
+    await saveConfig({
+      activeWebSearchProviderId: "exa",
+      webSearchProviders: [
+        {
+          id: "exa",
+          name: "Exa",
+          kind: "exa",
+          baseUrl: "https://api.exa.ai/search",
+          apiKey: "exa-key"
+        }
+      ]
+    });
+    process.env.ARIVU_TAVILY_API_KEY = "tvly-env";
+
+    const config = await loadConfig();
+    expect(config.activeWebSearchProviderId).toBe("exa");
+    expect(config.webSearchProviders).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "exa", apiKey: "exa-key" }),
+        expect.objectContaining({ kind: "tavily", apiKey: "tvly-env" })
+      ])
+    );
+    expect(resolveWebSearchProvider(config)).toMatchObject({ id: "exa", kind: "exa" });
   });
 
   it("persists provider capability flags", async () => {

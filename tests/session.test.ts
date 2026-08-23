@@ -15,6 +15,81 @@ describe("session store", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  it("retains message timestamps and gives legacy transcripts stable session-anchored times", async () => {
+    const store = new SessionStore(tempDir);
+    await writeFile(
+      path.join(tempDir, "legacy-times.json"),
+      JSON.stringify({
+        id: "legacy-times",
+        cwd: "/tmp/project",
+        trustMode: "ask",
+        messages: [
+          { role: "user", content: "first" },
+          { role: "assistant", content: "second" },
+          { role: "user", content: "third", createdAt: "2026-01-01T00:00:45.000Z" }
+        ],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:01:00.000Z"
+      }),
+      "utf8"
+    );
+
+    const legacy = await store.load("legacy-times");
+    expect(legacy.messages.map((message) => message.createdAt)).toEqual([
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:30.000Z",
+      "2026-01-01T00:00:45.000Z"
+    ]);
+    await store.save(legacy);
+    const persisted = JSON.parse(await readFile(path.join(tempDir, "legacy-times.json"), "utf8"));
+    expect(persisted.messages.map((message: { createdAt?: string }) => message.createdAt)).toEqual(
+      legacy.messages.map((message) => message.createdAt)
+    );
+  });
+
+  it("persists queued and steering messages with the chat", async () => {
+    const store = new SessionStore(tempDir);
+    await store.save({
+      id: "queued-chat",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      queuedPrompts: [
+        {
+          id: "queued-1",
+          content: "Run this after the current request.",
+          skillNames: ["review"],
+          state: "queued",
+          createdAt: "2026-01-01T00:00:10.000Z"
+        },
+        {
+          id: "steer-1",
+          content: "Apply this on the next model turn.",
+          state: "steering",
+          createdAt: "2026-01-01T00:00:20.000Z"
+        }
+      ],
+      messages: [{ role: "user", content: "Start the task." }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:20.000Z"
+    });
+
+    await expect(store.load("queued-chat")).resolves.toMatchObject({
+      queuedPrompts: [
+        {
+          id: "queued-1",
+          content: "Run this after the current request.",
+          skillNames: ["review"],
+          state: "queued"
+        },
+        {
+          id: "steer-1",
+          content: "Apply this on the next model turn.",
+          state: "steering"
+        }
+      ]
+    });
+  });
+
   it("saves and loads a session", async () => {
     const store = new SessionStore(tempDir);
     await store.save({
@@ -417,6 +492,84 @@ describe("session store", () => {
     await expect(store.list()).resolves.toMatchObject([{ id: "newer" }, { id: "older" }]);
   });
 
+  it("freezes a permanent title from the first user message so compaction cannot blank the list", async () => {
+    const store = new SessionStore(tempDir);
+    await store.save({
+      id: "service-now-run",
+      cwd: "/tmp/just-chats",
+      trustMode: "trusted",
+      messages: [
+        {
+          role: "user",
+          content: "Complete ALL 10 TODOs below in this single run. Use browser_task on the active visible ServiceNow tab."
+        }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    const loaded = await store.load("service-now-run");
+    expect(loaded.title).toBe("Complete ALL 10 TODOs below in this single run. Use browser_task on");
+
+    // Simulate compaction dropping the original user message while keeping the frozen title.
+    loaded.messages = [
+      { role: "system", content: "Conversation summary (model-generated) to reduce context size." },
+      { role: "assistant", content: "Continuing from the summary." }
+    ];
+    await store.save(loaded);
+    const afterCompact = await store.load("service-now-run");
+    expect(afterCompact.title).toBe("Complete ALL 10 TODOs below in this single run. Use browser_task on");
+    expect(afterCompact.messages.some((message) => message.role === "user")).toBe(false);
+  });
+
+  it("freezes a title from taskRuns.promptPreview when user messages were already compacted away", async () => {
+    const store = new SessionStore(tempDir);
+    await store.save({
+      id: "compacted-run",
+      cwd: "/tmp/just-chats",
+      trustMode: "trusted",
+      messages: [
+        { role: "system", content: "Conversation summary..." },
+        { role: "assistant", content: "Working on variables." }
+      ],
+      taskRuns: [
+        {
+          id: "run-1",
+          userMessageIndex: 1,
+          promptPreview: "Complete ALL 10 TODOs below in this single run. Use browser_task.",
+          status: "running",
+          capabilities: [],
+          approvals: [],
+          tools: [],
+          artifacts: [],
+          startedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    const loaded = await store.load("compacted-run");
+    expect(loaded.title).toBe("Complete ALL 10 TODOs below in this single run. Use browser_task.");
+  });
+
+  it("does not overwrite a manually renamed chat title on save", async () => {
+    const store = new SessionStore(tempDir);
+    await store.save({
+      id: "renamed",
+      title: "My ServiceNow catalog build",
+      cwd: "/tmp/just-chats",
+      trustMode: "ask",
+      messages: [{ role: "user", content: "Complete ALL 10 TODOs below in this single run." }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    const loaded = await store.load("renamed");
+    expect(loaded.title).toBe("My ServiceNow catalog build");
+  });
+
   it("lists pinned sessions before newer unpinned sessions", async () => {
     const store = new SessionStore(tempDir);
     await store.save({
@@ -439,6 +592,39 @@ describe("session store", () => {
     });
 
     await expect(store.list()).resolves.toMatchObject([{ id: "pinned", title: "Pinned task" }, { id: "newer" }]);
+  });
+
+  it("keeps an oversized session visible in the list with its bodies trimmed instead of hiding it", async () => {
+    const store = new SessionStore(tempDir);
+    // A long transcript (full tool outputs kept) can cross the 2MB list cap. It must not vanish from
+    // the sidebar — it should still be listed (with message bodies trimmed to bound memory) and open
+    // in full via load().
+    const hugeContent = "x".repeat(3 * 1024 * 1024);
+    await store.save({
+      id: "huge",
+      cwd: "/tmp/project",
+      trustMode: "ask",
+      messages: [
+        { role: "user", content: "kick off a long task" },
+        { role: "assistant", content: hugeContent }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    });
+
+    const listed = await store.list();
+    const huge = listed.find((session) => session.id === "huge");
+    expect(huge).toBeDefined();
+    // Bodies were stripped for the list, but the message roles (and thus the count) survive.
+    expect(huge?.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(huge?.messages.every((message) => message.content === "")).toBe(true);
+    // The full transcript is intact on disk and opens normally.
+    await expect(store.load("huge")).resolves.toMatchObject({
+      messages: [
+        { role: "user", content: "kick off a long task" },
+        { role: "assistant", content: hugeContent }
+      ]
+    });
   });
 
   it("loads legacy task runs without approval records", async () => {
@@ -664,6 +850,34 @@ describe("session store", () => {
     expect(healed.messages).toMatchObject([{ content: "previous good state" }]);
   });
 
+  it("keeps a large chat visible by recovering and trimming an equally large backup", async () => {
+    const store = new SessionStore(tempDir);
+    const largeBody = "x".repeat(3 * 1024 * 1024);
+    const base = {
+      id: "large-recoverable",
+      cwd: "/tmp/project",
+      trustMode: "ask" as const,
+      messages: [
+        { role: "user" as const, content: "keep this large chat" },
+        { role: "assistant" as const, content: largeBody }
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    };
+    await store.save(base);
+    await store.save({ ...base, updatedAt: "2026-01-02T00:00:00.000Z" });
+    await writeFile(path.join(tempDir, "large-recoverable.json"), "{", "utf8");
+
+    const restartedStore = new SessionStore(tempDir);
+    const listed = await restartedStore.list();
+    const recovered = listed.find((session) => session.id === "large-recoverable");
+    expect(recovered?.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(recovered?.messages.every((message) => message.content === "")).toBe(true);
+    await expect(restartedStore.load("large-recoverable")).resolves.toMatchObject({
+      messages: [{ content: "keep this large chat" }, { content: largeBody }]
+    });
+  });
+
   it("serializes rapid saves so the last requested snapshot wins", async () => {
     const store = new SessionStore(tempDir);
     const saves = Array.from({ length: 20 }, (_, index) =>
@@ -721,6 +935,23 @@ describe("session store", () => {
       id: "with-image",
       cwd: "/tmp/project",
       trustMode: "ask",
+      contextCompaction: {
+        version: 1,
+        source: "model",
+        compactedAt: "2026-01-01T00:00:00.000Z",
+        compactedMessageCount: 0,
+        sourceNonSystemMessageCount: 1,
+        messages: [
+          { role: "system", content: "Conversation summary (model-generated) to reduce context size." },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "look at this" },
+              { type: "image_url", image_url: { url: dataUrl, detail: "low" }, name: "shot.png", mimeType: "image/png", size: bytes.length }
+            ]
+          }
+        ]
+      },
       messages: [
         {
           role: "user",
@@ -744,6 +975,11 @@ describe("session store", () => {
       ? loaded.messages[0].content.find((part) => part.type === "image_url")
       : undefined;
     expect(imagePart && imagePart.type === "image_url" ? imagePart.image_url.url : "").toBe(dataUrl);
+    const checkpointImageContent = loaded.contextCompaction?.messages[1]?.content;
+    const checkpointImagePart = Array.isArray(checkpointImageContent)
+      ? checkpointImageContent.find((part) => part.type === "image_url")
+      : undefined;
+    expect(checkpointImagePart && checkpointImagePart.type === "image_url" ? checkpointImagePart.image_url.url : "").toBe(dataUrl);
 
     await store.delete("with-image");
     await expect(readFile(path.join(tempDir, "attachments", "with-image"))).rejects.toThrow();

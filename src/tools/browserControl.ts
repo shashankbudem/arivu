@@ -1,3 +1,5 @@
+import type { WebSearchProviderProfile } from "./webSearchProvider.js";
+
 export type BrowserMode = "visible" | "background";
 
 export type BrowserState = {
@@ -70,11 +72,26 @@ export type BrowserTaskModelConfig = {
   maxSteps?: number;
   stepDelayMs?: number;
   /**
+   * Optional dedicated GUI-grounding endpoint. It is intentionally separate from the
+   * browser-task reasoning model: LocateAnything returns coordinates, not the next agent
+   * action, and is only invoked by the visual fallback tool.
+   */
+  visualGrounding?: BrowserVisualGroundingConfig;
+  /**
    * Tried in order, each a full candidate in its own right, when this model's circuit opens
    * with no progress made yet. A fallback's own `.fallbacks` (there shouldn't be any) is
    * ignored — rotation is a flat list, not a tree.
    */
   fallbacks?: BrowserTaskModelConfig[];
+};
+
+export type BrowserVisualGroundingConfig = {
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+  providerId?: string;
+  providerName?: string;
+  timeoutMs?: number;
 };
 
 export type BrowserToolController = {
@@ -129,8 +146,8 @@ export type BrowserToolController = {
     allowedDomains?: string[];
     allowJavaScript?: boolean;
     allowSensitiveActions?: boolean;
-    /** Forwarded to the in-page search_web tool's fallback provider; undefined uses Bing. */
-    tavilyApiKey?: string;
+    /** Forwarded to the in-page search_web tool; undefined uses keyless Bing RSS. */
+    webSearchProvider?: WebSearchProviderProfile;
     modelConfig: BrowserTaskModelConfig;
     signal?: AbortSignal;
     onProgress?: (progress: { stepIndex: number; summary: string; evaluation?: string; memory?: string }) => void;

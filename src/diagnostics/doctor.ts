@@ -1,4 +1,6 @@
-import type { AppConfig, ProviderCapabilityName } from "../config.js";
+import { resolveWebSearchProvider, type AppConfig, type ProviderCapabilityName } from "../config.js";
+import { searchWeb } from "../tools/webSearch.js";
+import { webSearchProviderRequiresApiKey } from "../tools/webSearchProvider.js";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -35,7 +37,8 @@ type DoctorOptions = {
 const MAX_DIAGNOSTIC_BODY_BYTES = 64 * 1024;
 const DIAGNOSTIC_FETCH_TIMEOUT_MS = 15_000;
 
-type DoctorConfig = Pick<AppConfig, "apiKey" | "tavilyApiKey" | "baseUrl" | "model" | "trustMode"> &
+type DoctorConfig = Pick<AppConfig, "apiKey" | "baseUrl" | "model" | "trustMode"> &
+  Partial<Pick<AppConfig, "tavilyApiKey" | "webSearchProviders" | "activeWebSearchProviderId">> &
   Partial<Pick<AppConfig, "toolCalling">> &
   Partial<Pick<AppConfig, "mcpServers">>;
 
@@ -85,7 +88,7 @@ export async function runDoctor(config: DoctorConfig, options: DoctorOptions = {
     }
   }
 
-  checks.push(await checkTavily(config, fetcher));
+  checks.push(await checkWebSearch(config, fetcher));
 
   return {
     generatedAt: new Date().toISOString(),
@@ -251,37 +254,25 @@ async function checkToolCalling(
   };
 }
 
-async function checkTavily(config: DoctorConfig, fetcher: FetchLike): Promise<DoctorCheck> {
-  const apiKey = config.tavilyApiKey?.trim();
-  if (!apiKey) {
-    return check("tavily", "Tavily", "skip", "No Tavily API key is configured.");
+async function checkWebSearch(config: DoctorConfig, fetcher: FetchLike): Promise<DoctorCheck> {
+  const provider = resolveWebSearchProvider({
+    webSearchProviders: config.webSearchProviders ?? [],
+    activeWebSearchProviderId: config.activeWebSearchProviderId,
+    tavilyApiKey: config.tavilyApiKey
+  });
+  const label = `Web search (${provider.name})`;
+  if (provider.kind === "bing") {
+    return check("web-search", label, "skip", "Bing RSS is keyless; no credential check is needed.");
+  }
+  if (webSearchProviderRequiresApiKey(provider.kind) && !provider.apiKey?.trim()) {
+    return check("web-search", label, "skip", `No API key is configured for ${provider.name}.`);
   }
 
   try {
-    const response = await fetchWithTimeout(fetcher, "https://api.tavily.com/search", {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "User-Agent": "arivu/0.1 doctor"
-      },
-      body: JSON.stringify({
-        query: "OpenAI",
-        search_depth: "basic",
-        max_results: 1,
-        include_answer: false,
-        include_raw_content: false,
-        include_images: false,
-        include_usage: true
-      })
-    });
-    const text = await readResponseText(response);
-    return response.ok
-      ? check("tavily", "Tavily", "pass", "Tavily search endpoint accepted the key.")
-      : check("tavily", "Tavily", "fail", `Tavily request failed (${response.status}).`, truncate(text, 500));
+    await searchWeb("OpenAI", 1, { provider, fetcher });
+    return check("web-search", label, "pass", `${provider.name} accepted a search request.`);
   } catch (error) {
-    return check("tavily", "Tavily", "fail", formatError(error));
+    return check("web-search", label, "fail", formatError(error));
   }
 }
 

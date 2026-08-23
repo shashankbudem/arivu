@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { compactMessagesForModelRequest, compactSessionMessages } from "../src/agent/contextCompaction.js";
+import {
+  MODEL_SUMMARY_PREFIX,
+  applyContextCompactionCheckpoint,
+  applyModelSummary,
+  compactMessagesForModelRequest,
+  compactSessionMessages,
+  contextMessagesForSession,
+  messagesToSummarize,
+  remapTaskRunUserMessageIndexes
+} from "../src/agent/contextCompaction.js";
 import type { ChatMessage } from "../src/agent/types.js";
 
 describe("context compaction", () => {
@@ -347,5 +356,186 @@ describe("context compaction", () => {
     });
     expect(pinnedParts.find((part) => part.type === "text")?.text).toContain("Please inspect this screenshot.");
     expect(pinnedParts.find((part) => part.type === "text")?.text.length).toBeLessThanOrEqual(80);
+  });
+
+  it("feeds a prior model summary back into the next summarization slice (no second-summary amnesia)", () => {
+    // A prior model-generated summary is older context. If messagesToSummarize omitted it, the
+    // second summary would silently forget everything the first one covered.
+    const messages: ChatMessage[] = [
+      { role: "system", content: "system prompt" },
+      {
+        role: "system",
+        content: `${MODEL_SUMMARY_PREFIX}\nSummarized at: t0\nSummarized messages: 4\n\nEarlier work: created the parser.`
+      },
+      { role: "user", content: "older question" },
+      { role: "assistant", content: "older answer" },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ];
+
+    const older = messagesToSummarize(messages, 2);
+    // The prior summary rides along so the model rewrites it into the new summary.
+    expect(older.some((message) => message.role === "system" && String(message.content).startsWith(MODEL_SUMMARY_PREFIX))).toBe(true);
+    expect(older.map((message) => String(message.content))).toContain("older question");
+    // The recent turns are still excluded from the slice to summarize.
+    expect(older.map((message) => String(message.content))).not.toContain("recent question");
+
+    // applyModelSummary then drops the old summary from the kept set (the new one incorporates it),
+    // leaving exactly one summary in the transcript.
+    const applied = applyModelSummary(messages, "Combined: parser created; older question answered.", { recentMessageCount: 2 });
+    const summaries = applied.messages.filter(
+      (message) => message.role === "system" && String(message.content).startsWith(MODEL_SUMMARY_PREFIX)
+    );
+    expect(summaries).toHaveLength(1);
+    expect(String(summaries[0]?.content)).toContain("Combined: parser created");
+  });
+
+  it("keeps the canonical transcript intact and uses a separate compacted working context", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "older question" },
+      { role: "assistant", content: "older answer" },
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ];
+    const session = { messages };
+    const transcriptBefore = structuredClone(messages);
+    const compactedAt = new Date("2026-07-24T00:00:00.000Z");
+
+    const result = compactSessionMessages(contextMessagesForSession(session), {
+      recentMessageCount: 2,
+      now: compactedAt
+    });
+    applyContextCompactionCheckpoint(session, result, "deterministic", compactedAt);
+
+    expect(session.messages).toEqual(transcriptBefore);
+    const working = contextMessagesForSession(session);
+    expect(working.map((message) => String(message.content))).not.toContain("older question");
+    expect(
+      String(working.find((message) => message.role === "system" && String(message.content).startsWith("Context compacted"))?.content)
+    ).toContain("User: older question");
+    expect(working.slice(-2)).toEqual([
+      { role: "user", content: "recent question" },
+      { role: "assistant", content: "recent answer" }
+    ]);
+
+    session.messages.push({ role: "user", content: "new question after compaction" });
+    expect(contextMessagesForSession(session).at(-1)).toEqual({ role: "user", content: "new question after compaction" });
+    expect(session.messages).toHaveLength(transcriptBefore.length + 1);
+  });
+
+  it("reprojects current system instructions instead of freezing stale copies in the checkpoint", () => {
+    const systemMessage: ChatMessage = { role: "system", content: "system prompt v1" };
+    const session = {
+      messages: [
+        systemMessage,
+        { role: "user", content: "old" },
+        { role: "assistant", content: "old reply" },
+        { role: "user", content: "recent" },
+        { role: "assistant", content: "recent reply" }
+      ] satisfies ChatMessage[]
+    };
+    const result = compactSessionMessages(session.messages, { recentMessageCount: 2 });
+    applyContextCompactionCheckpoint(session, result, "deterministic");
+
+    systemMessage.content = "system prompt v2";
+    session.messages.push({ role: "system", content: "new recovery guidance" });
+    const working = contextMessagesForSession(session);
+    const workingText = working.map((message) => String(message.content));
+
+    expect(workingText).toContain("system prompt v2");
+    expect(workingText).not.toContain("system prompt v1");
+    expect(workingText).toContain("new recovery guidance");
+    expect(working.filter((message) => String(message.content).startsWith("Context compacted locally"))).toHaveLength(1);
+  });
+
+  it("folds the prior checkpoint into a later checkpoint without deleting either era from saved history", () => {
+    const session = {
+      messages: [
+        { role: "user", content: "era one question" },
+        { role: "assistant", content: "era one answer" },
+        { role: "user", content: "era one recent" },
+        { role: "assistant", content: "era one recent answer" }
+      ] satisfies ChatMessage[]
+    };
+    const first = compactSessionMessages(contextMessagesForSession(session), { recentMessageCount: 2 });
+    applyContextCompactionCheckpoint(session, first, "deterministic");
+
+    session.messages.push(
+      { role: "user", content: "era two question" },
+      { role: "assistant", content: "era two answer" },
+      { role: "user", content: "era two recent" },
+      { role: "assistant", content: "era two recent answer" }
+    );
+    const second = compactSessionMessages(contextMessagesForSession(session), { recentMessageCount: 2 });
+    applyContextCompactionCheckpoint(session, second, "deterministic");
+
+    expect(session.messages.map((message) => String(message.content))).toContain("era one question");
+    expect(session.messages.map((message) => String(message.content))).toContain("era two question");
+    const working = contextMessagesForSession(session);
+    expect(working.filter((message) => String(message.content).startsWith("Context compacted locally"))).toHaveLength(1);
+    expect(working.map((message) => String(message.content)).join("\n")).toContain("Prior compacted context");
+    expect(working.slice(-2)).toEqual([
+      { role: "user", content: "era two recent" },
+      { role: "assistant", content: "era two recent answer" }
+    ]);
+  });
+
+  it("re-anchors task-run message indexes after summary compaction (identity + folded-away)", () => {
+    const foldedUser: ChatMessage = { role: "user", content: "first task prompt" };
+    const survivingUser: ChatMessage = { role: "user", content: "second task prompt" };
+    const messages: ChatMessage[] = [
+      { role: "system", content: "system prompt" },
+      foldedUser,
+      { role: "assistant", content: "did first task" },
+      survivingUser,
+      { role: "assistant", content: "did second task" }
+    ];
+    const session = {
+      messages,
+      taskRuns: [
+        { userMessageIndex: 1, promptPreview: "first task prompt" },
+        { userMessageIndex: 3, promptPreview: "second task prompt" }
+      ]
+    };
+
+    const previousMessages = [...session.messages];
+    const applied = applyModelSummary(session.messages, "summary of first task", { recentMessageCount: 2 });
+    session.messages = applied.messages;
+    remapTaskRunUserMessageIndexes(session, previousMessages);
+
+    // The surviving user message keeps a correct anchor (found by identity, then verified by content).
+    const surviving = session.taskRuns[1]!;
+    expect(session.messages[surviving.userMessageIndex]).toBe(survivingUser);
+    // The folded-away run points at the summary system message, not an unrelated slot.
+    const folded = session.taskRuns[0]!;
+    expect(session.messages[folded.userMessageIndex]?.role).toBe("system");
+    expect(String(session.messages[folded.userMessageIndex]?.content)).toContain(MODEL_SUMMARY_PREFIX);
+  });
+
+  it("re-anchors task-run indexes across deterministic compaction that rebuilds messages", () => {
+    const survivingUser: ChatMessage = { role: "user", content: "keep this task prompt" };
+    const messages: ChatMessage[] = [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "old task prompt" },
+      { role: "assistant", content: "old answer" },
+      survivingUser,
+      { role: "assistant", content: "recent answer" }
+    ];
+    const session = {
+      messages,
+      taskRuns: [{ userMessageIndex: 3, promptPreview: "keep this task prompt" }]
+    };
+
+    const previousMessages = [...session.messages];
+    // Deterministic compaction clones recent messages (new objects), so identity fails and the
+    // content match must carry the anchor.
+    const result = compactSessionMessages(session.messages, { recentMessageCount: 2 });
+    session.messages = result.messages;
+    remapTaskRunUserMessageIndexes(session, previousMessages);
+
+    const anchored = session.messages[session.taskRuns[0]!.userMessageIndex];
+    expect(anchored?.role).toBe("user");
+    expect(String(anchored?.content)).toBe("keep this task prompt");
   });
 });

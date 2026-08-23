@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,32 +9,31 @@ import {
   app,
   clipboard,
   dialog,
-  nativeImage,
   powerSaveBlocker,
   shell,
   type WebContents,
   type ContextMenuParams,
-  type WebFrameMain,
   type Input,
   type MessageBoxOptions,
   type MenuItemConstructorOptions,
-  type Session,
-  type WebPreferences
+  type Session
 } from "electron";
 import { appDataDir } from "../../src/config.js";
+import { locateAnythingInViewport } from "../../src/browser/locateAnythingHarness.js";
 import {
   normalizeBrowserMode,
   normalizeBrowserUrl,
   type BrowserConsoleEntry,
   type BrowserMode,
   type BrowserState,
-  type BrowserTabState,
   type BrowserTargetState,
   type BrowserTaskModelConfig,
   type BrowserToolController,
   type BrowserToolResult
 } from "../../src/tools/browserControl.js";
+import type { WebSearchProviderProfile } from "../../src/tools/webSearchProvider.js";
 import { runBrowserTask } from "./browserTaskSupervisor.js";
+import type { BrowserTaskScreenshot, BrowserTaskVisualClickResult } from "./browserTaskProxy.js";
 import {
   BROWSER_ANNOTATION_CONSOLE_PREFIX,
   applyBrowserDesignPatchScript,
@@ -47,7 +46,6 @@ import {
   type BrowserDesignPatch,
   type BrowserPendingAnnotation
 } from "./browserCollaboration.js";
-import { codexBrowserShellHtml } from "./codexBrowserShell.js";
 import { BrowserProfileStore, type BrowserImportedCookie } from "./browserProfileStore.js";
 import {
   boundIndexedContent,
@@ -58,90 +56,68 @@ import {
   scrollPage,
   selectOptionByIndex
 } from "./pageControllerRuntime.js";
-
-type BrowserStateListener = (state: BrowserState) => void;
-
-type BrowserTargetRecord = Omit<BrowserTargetState, "activeTabId" | "tabs"> & {
-  logs: BrowserConsoleEntry[];
-  faviconUrl?: string;
-  failedUrl?: string;
-  recoveryTitle?: string;
-  lastScreenshotSize?: BrowserImageSize;
-  lastViewport?: BrowserViewport;
-};
-
-type BrowserTabRecord = BrowserTargetRecord & {
-  contents: WebContents;
-  view?: BrowserView;
-  popupWindow?: BrowserWindow;
-};
-
-type BrowserImageSize = {
-  width: number;
-  height: number;
-};
-
-type BrowserViewport = {
-  width: number;
-  height: number;
-  scrollX: number;
-  scrollY: number;
-  devicePixelRatio: number;
-};
-
-type BrowserDeviceViewport = {
-  enabled: boolean;
-  preset: string;
-  width: number;
-  height: number;
-  scale: number;
-};
-
-type BrowserFrameMeta = {
-  index: number;
-  url: string;
-  name?: string;
-  origin: string;
-  mainFrame: boolean;
-};
-
-type BrowserFrameInspection =
-  | (BrowserFrameMeta & {
-      ok: true;
-      snapshot: BrowserToolResult;
-    })
-  | (BrowserFrameMeta & {
-      ok: false;
-      error: string;
-    });
-
-type BrowserDownloadRecord = {
-  id: string;
-  filename: string;
-  url: string;
-  state: "progressing" | "completed" | "cancelled" | "interrupted";
-  receivedBytes: number;
-  totalBytes: number;
-  savePath?: string;
-};
-
-type BrowserSessionSnapshot = {
-  version: 1;
-  tabs: string[];
-  activeIndex: number;
-  history?: BrowserHistoryRecord[];
-  permissions?: Record<string, "allow" | "block">;
-  settings?: {
-    askDownloadLocation?: boolean;
-    downloadDirectory?: string;
-  };
-};
-
-type BrowserHistoryRecord = {
-  url: string;
-  title: string;
-  visitedAt: string;
-};
+import type {
+  BrowserDeviceViewport,
+  BrowserDownloadRecord,
+  BrowserFrameInspection,
+  BrowserHistoryRecord,
+  BrowserSessionSnapshot,
+  BrowserStateListener,
+  BrowserTabRecord,
+  BrowserTargetRecord,
+  BrowserViewport,
+  BrowserVisualViewportState
+} from "./browserTypes.js";
+import {
+  DEFAULT_VISIBLE_CHROME_HEIGHT,
+  VISIBLE_START_PAGE_TITLE,
+  isVisibleLoadErrorPageUrl,
+  isVisibleSettingsCommandUrl,
+  isVisibleSettingsPageUrl,
+  isVisibleShellCommandUrl,
+  isVisibleShellPageUrl,
+  isVisibleStartPageUrl,
+  parseVisibleShellCommand,
+  visibleCrashRecoveryPageUrl,
+  visibleLoadErrorPageUrl,
+  visibleSettingsPageUrl,
+  visibleShellPageUrl,
+  visibleStartPageUrl
+} from "./browserPages.js";
+import {
+  assertAllowedPopupUrl,
+  assertBrowserVisualViewportUnchanged,
+  assertPageLoaded,
+  availableDownloadPath,
+  axPropertyValue,
+  browserPermissionKey,
+  browserShellWebPreferences,
+  browserWebPreferences,
+  capElementsBySerializedSize,
+  clampNumber,
+  frameInfo,
+  frameList,
+  humanizePermission,
+  initialTarget,
+  isNavigationAbortError,
+  isRecord,
+  isRestorableBrowserUrl,
+  isSuccessfulFrameInspection,
+  mergeSnapshotText,
+  normalizeConsoleLevel,
+  publicTab,
+  publicTarget
+} from "./browserUtilities.js";
+import { capturePageWithDebugger, capturePageWithTimeout, delay, pruneOldBrowserScreenshots, waitForFreshPaint } from "./browserCapture.js";
+import {
+  boundScriptResult,
+  clickScript,
+  describePointScript,
+  executeJavaScriptScript,
+  snapshotScript,
+  typeScript
+} from "./browserInPageScripts.js";
+import { BrowserSessionPersistence } from "./browserSessionPersistence.js";
 
 const MAX_CONSOLE_LOGS = 300;
 // Budget for the serialized element list in snapshot/screenshot results. Without it a busy
@@ -151,24 +127,16 @@ const MAX_VISUAL_ELEMENTS_JSON_CHARS = 48_000;
 // Native BrowserView capture can occasionally remain pending forever after a
 // compositor swap. Screenshotting is diagnostic and must not pin the whole agent
 // run, so each native attempt is bounded before the existing CDP fallback runs.
-const NATIVE_CAPTURE_TIMEOUT_MS = 2_500;
 // A script with a blocking synchronous loop can wedge the renderer's JS thread forever;
 // executeJavaScript would then never resolve. This bounds the tool call itself so it always
 // returns to the model — the renderer may still be busy in the background afterward.
 const SCRIPT_EXECUTION_TIMEOUT_MS = 15_000;
 // Keeps a large returned value from pushing a single tool result past the request
 // auto-compaction threshold (same concern as MAX_VISUAL_ELEMENTS_JSON_CHARS above).
-const MAX_SCRIPT_RESULT_CHARS = 8_000;
+const VISUAL_GROUNDING_MAX_DIMENSION = 1_600;
+const VISUAL_GROUNDING_JPEG_QUALITY = 90;
+const VISUAL_GROUNDING_MAX_DATA_URL_CHARS = 8_000_000;
 const DEFAULT_BACKGROUND_BOUNDS = { width: 1280, height: 800 };
-const DEFAULT_VISIBLE_CHROME_HEIGHT = 80;
-const VISIBLE_START_PAGE_TITLE = "Arivu Browser";
-const VISIBLE_START_PAGE_PREFIX = "data:text/html;charset=utf-8,";
-const VISIBLE_START_PAGE_MARKER = "arivu-browser-start";
-const VISIBLE_LOAD_ERROR_PAGE_MARKER = "arivu-browser-load-error";
-const VISIBLE_SETTINGS_PAGE_MARKER = "arivu-browser-settings";
-const VISIBLE_SHELL_COMMAND_PROTOCOL = "arivu-browser:";
-const BROWSER_PARTITION = "persist:arivu-browser";
-const BROWSER_SESSION_FILE = "browser-session.json";
 
 export class DesktopBrowserController implements BrowserToolController {
   private hostWindow: BrowserWindow | undefined;
@@ -205,9 +173,7 @@ export class DesktopBrowserController implements BrowserToolController {
   private readonly browserPermissions = new Map<string, "allow" | "block">();
   private askDownloadLocation = false;
   private downloadDirectory: string | undefined;
-  private didAttemptVisibleSessionRestore = false;
-  private restoringVisibleSession = false;
-  private visibleSessionWriteTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly visibleSessionPersistence = new BrowserSessionPersistence();
   private nextVisibleTabNumber = 1;
   private readonly listeners = new Set<BrowserStateListener>();
   private readonly visibleTabs = new Map<string, BrowserTabRecord>();
@@ -283,6 +249,10 @@ export class DesktopBrowserController implements BrowserToolController {
     }
     this.emitState();
     return this.getState();
+  }
+
+  togglePaneOpen() {
+    return this.setPaneOpen(!this.paneOpen);
   }
 
   setDefaultMode(mode: BrowserMode) {
@@ -456,6 +426,7 @@ export class DesktopBrowserController implements BrowserToolController {
     await mkdir(screenshotDir, { recursive: true });
     const screenshotPath = path.join(screenshotDir, `arivu-browser-${mode}-${target.id}-${Date.now()}.png`);
     await writeFile(screenshotPath, image.toPNG());
+    void pruneOldBrowserScreenshots(screenshotDir).catch(() => undefined);
     target.lastScreenshotAt = new Date().toISOString();
     target.lastScreenshotPath = screenshotPath;
     target.lastScreenshotSize = size;
@@ -541,10 +512,7 @@ export class DesktopBrowserController implements BrowserToolController {
     assertPageLoaded(contents, mode);
     const point = this.resolveClickPoint(target, args.x, args.y, args.coordinateSpace ?? "css");
     const matched = (await contents.executeJavaScript(describePointScript(point.x, point.y), true)) as unknown;
-    contents.focus();
-    contents.sendInputEvent({ type: "mouseMove", x: point.x, y: point.y });
-    contents.sendInputEvent({ type: "mouseDown", x: point.x, y: point.y, button: "left", clickCount: 1 });
-    contents.sendInputEvent({ type: "mouseUp", x: point.x, y: point.y, button: "left", clickCount: 1 });
+    this.dispatchViewportClick(contents, point.x, point.y);
     await delay(120);
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
@@ -680,7 +648,7 @@ export class DesktopBrowserController implements BrowserToolController {
     allowedDomains?: string[];
     allowJavaScript?: boolean;
     allowSensitiveActions?: boolean;
-    tavilyApiKey?: string;
+    webSearchProvider?: WebSearchProviderProfile;
     modelConfig: BrowserTaskModelConfig;
     signal?: AbortSignal;
     onProgress?: (progress: { stepIndex: number; summary: string }) => void;
@@ -701,7 +669,12 @@ export class DesktopBrowserController implements BrowserToolController {
           allowedDomains: args.allowedDomains,
           allowJavaScript: args.allowJavaScript,
           allowSensitiveActions: args.allowSensitiveActions,
-          tavilyApiKey: args.tavilyApiKey,
+          webSearchProvider: args.webSearchProvider,
+          captureScreenshot: () => this.captureBrowserTaskScreenshot(mode, contents),
+          visualClick: args.modelConfig.visualGrounding
+            ? (description, signal) =>
+                this.locateAndClickBrowserTaskTarget(mode, contents, target, args.modelConfig.visualGrounding!, description, signal)
+            : undefined,
           visible: mode === "visible"
         },
         args.modelConfig,
@@ -715,10 +688,65 @@ export class DesktopBrowserController implements BrowserToolController {
     // tools use) so the main agent can verify the delegated outcome from text instead of
     // spending a whole extra turn on a heavier browser_screenshot. Never throws:
     // withFreshSnapshot returns the result unchanged if the page-controller can't load here.
-    const result = await this.withFreshSnapshot(contents, taskResult);
+    let result = await this.withFreshSnapshot(contents, taskResult);
+    // Failed delegated tasks often leave the supervising agent with only text (snapshotAfter /
+    // correction notes). Capture viewport pixels automatically so the next turn has the same
+    // recovery evidence a manual browser_screenshot would have produced — except on explicit
+    // user cancel, where the page state is not "stuck".
+    if (taskResult.success === false && taskResult.stopReason !== "cancelled") {
+      result = await this.withFailureScreenshot(mode, contents, target, result);
+    }
     this.updateTargetFromContents(mode, contents, target);
     this.emitState();
     return this.resultForMode(mode, result, target);
+  }
+
+  /**
+   * Best-effort failure-path capture. Never throws: a missing compositor surface or a closed
+   * tab must not replace the real failure reason with a screenshot error.
+   */
+  private async withFailureScreenshot(
+    mode: BrowserMode,
+    contents: WebContents,
+    target: BrowserTargetRecord,
+    result: BrowserToolResult
+  ): Promise<BrowserToolResult> {
+    if (contents.isDestroyed()) {
+      return result;
+    }
+    try {
+      this.prepareForScreenshot(contents);
+      await waitForFreshPaint(contents);
+      const image = await this.captureTargetPage(mode, contents);
+      if (image.isEmpty()) {
+        return result;
+      }
+      const size = image.getSize();
+      const screenshotDir = path.join(appDataDir(), "browser-screenshots");
+      await mkdir(screenshotDir, { recursive: true });
+      const screenshotPath = path.join(screenshotDir, `arivu-browser-task-failure-${mode}-${target.id}-${Date.now()}.png`);
+      await writeFile(screenshotPath, image.toPNG());
+      target.lastScreenshotAt = new Date().toISOString();
+      target.lastScreenshotPath = screenshotPath;
+      target.lastScreenshotSize = size;
+      // Captured automatically on every failed task (no user opt-in), so reap old screenshots
+      // here or the directory grows without bound over a long, failure-heavy session.
+      void pruneOldBrowserScreenshots(screenshotDir).catch(() => undefined);
+      const data = typeof result.data === "string" ? result.data : "";
+      const note =
+        "Failure screenshot captured automatically for recovery. Path: " +
+        screenshotPath +
+        ". Use the pixels plus snapshotAfter; re-issue a destination-specific browser_task from current indices (do not reuse stale ones).";
+      return {
+        ...result,
+        screenshotPath,
+        size,
+        failureScreenshot: true,
+        data: data ? `${data}\n\n${note}` : note
+      };
+    } catch {
+      return result;
+    }
   }
 
   private targetForMode(mode: BrowserMode | undefined) {
@@ -1015,6 +1043,119 @@ export class DesktopBrowserController implements BrowserToolController {
       x: (x / size.width) * viewport.width,
       y: (y / size.height) * viewport.height
     };
+  }
+
+  private dispatchViewportClick(contents: WebContents, x: number, y: number) {
+    const clickX = Math.round(x);
+    const clickY = Math.round(y);
+    contents.focus();
+    contents.sendInputEvent({ type: "mouseMove", x: clickX, y: clickY });
+    contents.sendInputEvent({ type: "mouseDown", x: clickX, y: clickY, button: "left", clickCount: 1 });
+    contents.sendInputEvent({ type: "mouseUp", x: clickX, y: clickY, button: "left", clickCount: 1 });
+  }
+
+  private async captureBrowserTaskScreenshot(mode: BrowserMode, contents: WebContents): Promise<BrowserTaskScreenshot> {
+    const captured = await this.captureBrowserTaskViewportImage(mode, contents);
+    return {
+      image: captured.imageDataUrl,
+      width: captured.imageWidth,
+      height: captured.imageHeight
+    };
+  }
+
+  /**
+   * Electron runtime equivalent of Playwright's viewport screenshot -> LocateAnything ->
+   * page.mouse.click flow. The grounding request can take seconds, so the visual fingerprint
+   * is checked immediately before dispatch; stale coordinates never reach the page.
+   */
+  private async locateAndClickBrowserTaskTarget(
+    mode: BrowserMode,
+    contents: WebContents,
+    target: BrowserTargetRecord,
+    config: NonNullable<BrowserTaskModelConfig["visualGrounding"]>,
+    description: string,
+    signal: AbortSignal
+  ): Promise<BrowserTaskVisualClickResult> {
+    if (contents.isDestroyed()) {
+      throw new Error("The browser tab closed before visual grounding started.");
+    }
+    const before = await this.readBrowserVisualViewportState(contents);
+    const screenshot = await this.captureBrowserTaskViewportImage(mode, contents, before);
+    const point = await locateAnythingInViewport(config, screenshot, description, { signal });
+    if (signal.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("Visual grounding was cancelled.");
+    }
+    const after = await this.readBrowserVisualViewportState(contents);
+    assertBrowserVisualViewportUnchanged(before, after);
+    if (contents.isDestroyed() || contents.isLoading()) {
+      throw new Error("The page started navigating during visual grounding; the stale coordinate was not clicked.");
+    }
+    const matched = (await contents.executeJavaScript(describePointScript(point.viewportX, point.viewportY), true)) as unknown;
+    this.dispatchViewportClick(contents, point.viewportX, point.viewportY);
+    await delay(120);
+    this.updateTargetFromContents(mode, contents, target);
+    this.emitState();
+    return {
+      target: description.replace(/\s+/g, " ").trim(),
+      x: point.viewportX,
+      y: point.viewportY,
+      model: config.model,
+      matched
+    };
+  }
+
+  private async captureBrowserTaskViewportImage(mode: BrowserMode, contents: WebContents, viewportState?: BrowserVisualViewportState) {
+    if (contents.isDestroyed()) {
+      throw new Error("The browser tab closed before its viewport could be captured.");
+    }
+    this.prepareForScreenshot(contents);
+    await waitForFreshPaint(contents);
+    const state = viewportState ?? (await this.readBrowserVisualViewportState(contents));
+    const captured = await this.captureTargetPage(mode, contents);
+    const size = captured.getSize();
+    if (captured.isEmpty() || size.width <= 0 || size.height <= 0) {
+      throw new Error("The browser returned an empty viewport screenshot.");
+    }
+    const scale = Math.min(1, VISUAL_GROUNDING_MAX_DIMENSION / Math.max(size.width, size.height));
+    const image =
+      scale < 1
+        ? captured.resize({
+            width: Math.max(1, Math.round(size.width * scale)),
+            height: Math.max(1, Math.round(size.height * scale)),
+            quality: "good"
+          })
+        : captured;
+    const outputSize = image.getSize();
+    const bytes = image.toJPEG(VISUAL_GROUNDING_JPEG_QUALITY);
+    const imageDataUrl = `data:image/jpeg;base64,${bytes.toString("base64")}`;
+    if (imageDataUrl.length > VISUAL_GROUNDING_MAX_DATA_URL_CHARS) {
+      throw new Error("The browser viewport screenshot exceeded the visual grounding transfer limit.");
+    }
+    return {
+      imageDataUrl,
+      imageWidth: outputSize.width,
+      imageHeight: outputSize.height,
+      viewportWidth: state.width,
+      viewportHeight: state.height
+    };
+  }
+
+  private async readBrowserVisualViewportState(contents: WebContents): Promise<BrowserVisualViewportState> {
+    if (contents.isDestroyed()) {
+      throw new Error("The browser tab closed during visual grounding.");
+    }
+    const state = (await contents.executeJavaScript(
+      `({ url: window.location.href, width: window.innerWidth, height: window.innerHeight, scrollX: window.scrollX, scrollY: window.scrollY })`,
+      true
+    )) as Omit<BrowserVisualViewportState, "frameSignature">;
+    if (!state || !Number.isFinite(state.width) || !Number.isFinite(state.height) || state.width <= 0 || state.height <= 0) {
+      throw new Error("The browser did not report a valid visual viewport.");
+    }
+    const frameSignature = frameList(contents)
+      .map((frame) => `${frame.name || ""}\u0000${frame.url || ""}\u0000${frame.frameTreeNodeId ?? ""}`)
+      .sort()
+      .join("\u0001");
+    return { ...state, url: contents.getURL() || state.url, frameSignature };
   }
 
   private prepareForScreenshot(contents: WebContents) {
@@ -1849,8 +1990,8 @@ export class DesktopBrowserController implements BrowserToolController {
       const nextTabId = this.visibleTabOrder[Math.max(0, orderIndex - 1)] ?? this.visibleTabOrder[0];
       this.activeVisibleTabId = nextTabId;
     }
-    if (this.visibleTabOrder.length === 0 && window && !window.isDestroyed()) {
-      this.createVisibleTab({ activate: true });
+    if (this.closeVisibleWindowWhenNoTabsRemain()) {
+      this.emitState();
       return;
     }
     this.attachActiveVisibleView();
@@ -1882,12 +2023,24 @@ export class DesktopBrowserController implements BrowserToolController {
     if (this.activeVisibleTabId === tabId) {
       this.activeVisibleTabId = this.visibleTabOrder[Math.max(0, orderIndex - 1)] ?? this.visibleTabOrder[0];
     }
-    if (this.visibleTabOrder.length === 0 && this.visibleWindow && !this.visibleWindow.isDestroyed()) {
-      this.createVisibleTab({ activate: true });
+    if (this.closeVisibleWindowWhenNoTabsRemain()) {
+      this.emitState();
       return;
     }
     this.attachActiveVisibleView();
     this.emitState();
+  }
+
+  private closeVisibleWindowWhenNoTabsRemain() {
+    if (this.visibleTabOrder.length > 0) {
+      return false;
+    }
+    this.activeVisibleTabId = undefined;
+    this.paneOpen = false;
+    if (this.visibleWindow && !this.visibleWindow.isDestroyed()) {
+      this.destroyVisibleWindow();
+    }
+    return true;
   }
 
   private resetVisibleTabs() {
@@ -1911,17 +2064,8 @@ export class DesktopBrowserController implements BrowserToolController {
   }
 
   private restoreVisibleSessionOnce() {
-    if (this.didAttemptVisibleSessionRestore || !this.browserSessionPersistenceEnabled()) {
-      return;
-    }
-    this.didAttemptVisibleSessionRestore = true;
-    let snapshot: BrowserSessionSnapshot;
-    try {
-      snapshot = JSON.parse(readFileSync(this.browserSessionPath(), "utf8")) as BrowserSessionSnapshot;
-    } catch {
-      return;
-    }
-    if (snapshot.version !== 1 || !Array.isArray(snapshot.tabs)) {
+    const snapshot = this.visibleSessionPersistence.readOnce();
+    if (!snapshot) {
       return;
     }
     if (Array.isArray(snapshot.history)) {
@@ -1953,39 +2097,24 @@ export class DesktopBrowserController implements BrowserToolController {
     if (urls.length === 0) {
       return;
     }
-    this.restoringVisibleSession = true;
-    try {
+    this.visibleSessionPersistence.whileRestoring(() => {
       const restored = urls.map((url) => this.createVisibleTab({ url: url || undefined, activate: false }));
       const activeIndex = clampNumber(Number(snapshot.activeIndex) || 0, 0, restored.length - 1);
       this.activeVisibleTabId = restored[activeIndex]?.id ?? restored[0]?.id;
       this.attachActiveVisibleView();
       this.emitState();
-    } finally {
-      this.restoringVisibleSession = false;
-    }
+    });
   }
 
   private scheduleVisibleSessionWrite() {
-    if (!this.didAttemptVisibleSessionRestore || this.restoringVisibleSession || !this.browserSessionPersistenceEnabled()) {
-      return;
-    }
-    if (this.visibleSessionWriteTimer) {
-      clearTimeout(this.visibleSessionWriteTimer);
-    }
-    this.visibleSessionWriteTimer = setTimeout(() => {
-      this.visibleSessionWriteTimer = undefined;
-      this.persistVisibleSessionNow();
-    }, 300);
+    this.visibleSessionPersistence.schedule(() => this.visibleSessionSnapshot());
   }
 
   private persistVisibleSessionNow() {
-    if (!this.didAttemptVisibleSessionRestore || !this.browserSessionPersistenceEnabled()) {
-      return;
-    }
-    if (this.visibleSessionWriteTimer) {
-      clearTimeout(this.visibleSessionWriteTimer);
-      this.visibleSessionWriteTimer = undefined;
-    }
+    this.visibleSessionPersistence.persistNow(() => this.visibleSessionSnapshot());
+  }
+
+  private visibleSessionSnapshot(): BrowserSessionSnapshot {
     const persistedTabs = this.visibleTabOrder.flatMap((id) => {
       const target = this.visibleTabs.get(id);
       if (!target || target.popupWindow) {
@@ -1999,7 +2128,7 @@ export class DesktopBrowserController implements BrowserToolController {
       0,
       persistedTabs.findIndex((tab) => tab.id === this.activeVisibleTabId)
     );
-    const snapshot: BrowserSessionSnapshot = {
+    return {
       version: 1,
       tabs,
       activeIndex,
@@ -2010,20 +2139,6 @@ export class DesktopBrowserController implements BrowserToolController {
         ...(this.downloadDirectory ? { downloadDirectory: this.downloadDirectory } : {})
       }
     };
-    try {
-      mkdirSync(appDataDir(), { recursive: true });
-      writeFileSync(this.browserSessionPath(), JSON.stringify(snapshot), "utf8");
-    } catch {
-      // Session restoration is best-effort and must not block browser navigation.
-    }
-  }
-
-  private browserSessionPath() {
-    return path.join(appDataDir(), BROWSER_SESSION_FILE);
-  }
-
-  private browserSessionPersistenceEnabled() {
-    return process.env.ARIVU_BROWSER_SMOKE !== "1" && process.env.ARIVU_DESKTOP_SMOKE !== "1";
   }
 
   private attachActiveVisibleView(options: { focus?: boolean } = {}) {
@@ -3198,6 +3313,9 @@ export class DesktopBrowserController implements BrowserToolController {
     if (!this.paneOpen || window.isDestroyed()) {
       return;
     }
+    if (window.isMinimized()) {
+      window.restore();
+    }
     if (!window.isMaximized()) {
       window.maximize();
     }
@@ -3222,1159 +3340,4 @@ export class DesktopBrowserController implements BrowserToolController {
       listener(state);
     }
   }
-}
-
-function visibleShellPageUrl() {
-  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(codexBrowserShellHtml({ defaultChromeHeight: DEFAULT_VISIBLE_CHROME_HEIGHT }))}`;
-}
-
-function isVisibleShellPageUrl(url: string) {
-  return url === visibleShellPageUrl();
-}
-
-function isVisibleShellCommandUrl(url: string) {
-  try {
-    return new URL(url).protocol === VISIBLE_SHELL_COMMAND_PROTOCOL;
-  } catch {
-    return false;
-  }
-}
-
-function parseVisibleShellCommand(url: string) {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== VISIBLE_SHELL_COMMAND_PROTOCOL) {
-      return undefined;
-    }
-    return {
-      action: parsed.hostname,
-      params: parsed.searchParams
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function isVisibleSettingsCommandUrl(url: string) {
-  const command = parseVisibleShellCommand(url);
-  return Boolean(
-    command &&
-    [
-      "set-ask-download",
-      "choose-download-directory",
-      "settings-clear-cookies",
-      "settings-clear-cache",
-      "settings-clear-history",
-      "settings-reset-permissions",
-      "settings-import-profile",
-      "settings-add-credential",
-      "settings-remove-credential",
-      "settings-add-autofill",
-      "settings-remove-autofill",
-      "settings-load-extension",
-      "settings-remove-extension",
-      "settings-open-extension"
-    ].includes(command.action)
-  );
-}
-
-function visibleStartPageUrl() {
-  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(visibleStartPageHtml())}`;
-}
-
-function isVisibleStartPageUrl(url: string) {
-  return url === visibleStartPageUrl();
-}
-
-function visibleSettingsPageUrl(state: {
-  askDownloadLocation: boolean;
-  downloadDirectory: string;
-  historyCount: number;
-  permissionCount: number;
-  credentials: Array<{ id: string; origin: string; username: string; label?: string }>;
-  autofillProfiles: Array<{ id: string; label: string; fullName?: string; email?: string; phone?: string }>;
-  extensions: Array<{ id: string; name: string; version: string; optionsUrl?: string }>;
-}) {
-  const credentialRows = state.credentials.length
-    ? state.credentials
-        .map(
-          (credential) =>
-            `<div class="saved-row"><div><strong>${escapeHtml(credential.label || credential.username)}</strong><span>${escapeHtml(credential.username)} · ${escapeHtml(credential.origin)}</span></div><button class="danger" data-command="settings-remove-credential" data-id="${escapeHtml(credential.id)}">Remove</button></div>`
-        )
-        .join("")
-    : `<p class="empty">No passwords saved.</p>`;
-  const profileRows = state.autofillProfiles.length
-    ? state.autofillProfiles
-        .map(
-          (profile) =>
-            `<div class="saved-row"><div><strong>${escapeHtml(profile.label)}</strong><span>${escapeHtml([profile.fullName, profile.email, profile.phone].filter(Boolean).join(" · "))}</span></div><button class="danger" data-command="settings-remove-autofill" data-id="${escapeHtml(profile.id)}">Remove</button></div>`
-        )
-        .join("")
-    : `<p class="empty">No autofill profiles saved.</p>`;
-  const extensionRows = state.extensions.length
-    ? state.extensions
-        .map(
-          (extension) =>
-            `<div class="saved-row"><div><strong>${escapeHtml(extension.name)}</strong><span>Version ${escapeHtml(extension.version)} · ${escapeHtml(extension.id)}</span></div><div class="actions">${extension.optionsUrl ? `<button data-command="settings-open-extension" data-url="${escapeHtml(extension.optionsUrl)}">Options</button>` : ""}<button class="danger" data-command="settings-remove-extension" data-id="${escapeHtml(extension.id)}">Remove</button></div></div>`
-        )
-        .join("")
-    : `<p class="empty">No unpacked extensions loaded.</p>`;
-  const html = `<!doctype html>
-<html lang="en" data-${VISIBLE_SETTINGS_PAGE_MARKER}>
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline';form-action 'none'">
-  <title>Browser settings</title>
-  <style>
-    :root{color-scheme:dark;--bg:#171717;--panel:#202020;--field:#151515;--line:#343434;--text:#f2f2f2;--muted:#a3a3a3;--accent:#5b9cf5;--danger:#ffaaa4}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,sans-serif}main{width:min(880px,calc(100vw - 40px));margin:0 auto;padding:40px 0 80px}header{position:sticky;top:0;padding:0 0 20px;background:linear-gradient(var(--bg) 78%,transparent);z-index:2}h1{font-size:26px;margin:0 0 18px;letter-spacing:0}#search{width:100%;height:38px}section{display:grid;gap:14px}article{padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}article[hidden]{display:none}h2{font-size:16px;margin:0 0 6px;letter-spacing:0}p{margin:0;color:var(--muted)}.row,.saved-row{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.stack,.saved-row>div{min-width:0;display:grid;gap:3px}.saved-row span,.path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}.path{font-family:ui-monospace,SFMono-Regular,monospace;color:#bbb}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:14px}.form-grid .wide{grid-column:1/-1}.form-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px}input,button{font:inherit}input[type=text],input[type=password],input[type=email],input[type=tel],input[type=search]{min-width:0;height:36px;border:1px solid var(--line);border-radius:7px;background:var(--field);color:var(--text);padding:0 10px;outline:0}input:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}button{flex:0 0 auto;border:1px solid var(--line);border-radius:7px;background:#292929;color:var(--text);padding:7px 10px;cursor:pointer}button:hover{background:#333}.primary{border-color:#4779b9;background:#315f98}.switch{display:flex;align-items:center;gap:9px;color:var(--muted)}input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}.count{color:var(--text);font-weight:600}.danger{color:var(--danger)}.empty{margin-top:12px}.hint{margin-top:8px;font-size:12px}.actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
-    @media(max-width:620px){main{width:min(100% - 24px,880px);padding-top:24px}.form-grid{grid-template-columns:1fr}.form-grid .wide{grid-column:auto}.row,.saved-row{align-items:flex-start}.saved-row{flex-direction:column}.saved-row button{align-self:flex-end}}
-    @media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f6f6f5;--panel:#fff;--field:#fff;--line:#d8d8d5;--text:#1c1c1b;--muted:#686865;--danger:#a92f2a}button{background:#f1f1ef}.primary{background:#3269aa;color:#fff}.path{color:#555}}
-  </style>
-</head>
-<body><main><header><h1>Browser settings</h1><input id="search" type="search" placeholder="Search settings" aria-label="Search browser settings"></header><section>
-  <article data-search="downloads location save ask"><h2>Downloads</h2><p>Control where files downloaded by the isolated Arivu browser are saved.</p><div class="row"><div class="stack"><strong>Download location</strong><div class="path">${escapeHtml(state.downloadDirectory)}</div></div><button data-command="choose-download-directory">Change</button></div><div class="row"><span>Ask where to save each file</span><label class="switch"><input id="ask-download" type="checkbox" ${state.askDownloadLocation ? "checked" : ""}>Ask</label></div></article>
-  <article data-search="privacy cookies cache history clear browsing data import profile"><h2>Privacy and browser data</h2><p>History entries: <span class="count">${state.historyCount}</span></p><div class="actions"><button class="primary" data-command="settings-import-profile">Import profile export</button><button data-command="settings-clear-cookies">Clear cookies</button><button data-command="settings-clear-cache">Clear cache</button><button class="danger" data-command="settings-clear-history">Delete history</button></div><p class="hint">Import accepts Chrome-compatible password CSV files or Arivu JSON exports containing passwords, cookies, and autofill profiles.</p></article>
-  <article data-search="password manager credentials login"><h2>Password manager</h2><p>Passwords are encrypted with the operating system credential store and never shown in this page.</p>${credentialRows}<form id="credential-form" class="form-grid"><input name="label" type="text" placeholder="Label"><input name="origin" type="text" placeholder="https://example.com" required><input name="username" type="text" autocomplete="username" placeholder="Username" required><input name="password" type="password" autocomplete="new-password" placeholder="Password" required><div class="form-actions"><button class="primary" type="submit">Save password</button></div></form></article>
-  <article data-search="autofill contact address phone email"><h2>Autofill profiles</h2><p>Saved contact details can be filled into the current page from Browser options.</p>${profileRows}<form id="autofill-form" class="form-grid"><input name="label" type="text" placeholder="Profile name" required><input name="fullName" type="text" autocomplete="name" placeholder="Full name"><input name="email" type="email" autocomplete="email" placeholder="Email"><input name="phone" type="tel" autocomplete="tel" placeholder="Phone"><input class="wide" name="addressLine1" type="text" autocomplete="address-line1" placeholder="Address"><input name="city" type="text" autocomplete="address-level2" placeholder="City"><input name="region" type="text" autocomplete="address-level1" placeholder="State or region"><input name="postalCode" type="text" autocomplete="postal-code" placeholder="Postal code"><input name="country" type="text" autocomplete="country-name" placeholder="Country"><div class="form-actions"><button class="primary" type="submit">Save profile</button></div></form></article>
-  <article data-search="extensions add-ons developer unpacked"><h2>Extensions</h2><p>Load unpacked Chromium extensions for this isolated profile. Chrome Web Store packages are not supported by Electron.</p>${extensionRows}<div class="actions"><button class="primary" data-command="settings-load-extension">Load unpacked extension</button></div></article>
-  <article data-search="permissions camera microphone location notifications clipboard fullscreen"><h2>Site permissions</h2><p>Saved permission decisions: <span class="count">${state.permissionCount}</span>. Per-site controls are available from the site-information button.</p><div class="row"><span>Reset all saved permission decisions</span><button data-command="settings-reset-permissions">Reset permissions</button></div></article>
-  <article data-search="developer devtools inspect cdp debugging"><h2>Developer tools</h2><p>Use F12 or Browser options > Inspect to open Chromium DevTools for the active page.</p></article>
-  <article data-search="keyboard shortcuts tabs navigation zoom find accessibility"><h2>Keyboard shortcuts</h2><p>Ctrl/Command+L address · Ctrl/Command+T new tab · Ctrl/Command+W close tab · Ctrl+Tab cycle tabs · Ctrl/Command+F find · Ctrl/Command+R reload · Ctrl/Command +/- zoom</p></article>
-</section></main><script>
-  const command=(name,params={})=>{const url=new URL("arivu-browser://"+name);for(const[key,value]of Object.entries(params))if(value!==undefined&&value!=="")url.searchParams.set(key,String(value));location.href=url.href};
-  document.querySelectorAll("[data-command]").forEach(button=>button.addEventListener("click",()=>command(button.dataset.command,{id:button.dataset.id,url:button.dataset.url})));
-  document.getElementById("ask-download").addEventListener("change",event=>command("set-ask-download",{value:event.target.checked}));
-  document.getElementById("credential-form").addEventListener("submit",event=>{event.preventDefault();command("settings-add-credential",Object.fromEntries(new FormData(event.target)))});
-  document.getElementById("autofill-form").addEventListener("submit",event=>{event.preventDefault();command("settings-add-autofill",Object.fromEntries(new FormData(event.target)))});
-  document.getElementById("search").addEventListener("input",event=>{const query=event.target.value.trim().toLowerCase();document.querySelectorAll("article").forEach(article=>article.hidden=Boolean(query)&&!article.dataset.search.includes(query)&&!article.innerText.toLowerCase().includes(query))});
-</script></body></html>`;
-  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
-}
-
-function isVisibleSettingsPageUrl(url: string) {
-  if (!url.startsWith(VISIBLE_START_PAGE_PREFIX)) {
-    return false;
-  }
-  try {
-    return decodeURIComponent(url).includes(`data-${VISIBLE_SETTINGS_PAGE_MARKER}`);
-  } catch {
-    return false;
-  }
-}
-
-function visibleLoadErrorPageUrl(failedUrl: string, errorCode: number, errorDescription: string) {
-  let host = failedUrl;
-  try {
-    host = new URL(failedUrl).hostname || failedUrl;
-  } catch {
-    // Keep the raw URL in the fallback page.
-  }
-  const summary =
-    errorCode === -105
-      ? `${host}'s server IP address could not be found`
-      : errorCode === -106
-        ? `${host} could not be loaded because the computer is offline`
-        : errorCode === -102
-          ? `${host} refused to connect`
-          : errorCode === -118
-            ? `${host} took too long to respond`
-            : errorCode <= -200 && errorCode >= -299
-              ? `${host}'s certificate could not be verified`
-              : `${host} could not be loaded`;
-  const failedUrlJson = JSON.stringify(failedUrl).replace(/</g, "\\u003c");
-  const html = `<!doctype html><html data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>This site can't be reached</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#171717;color:#f1f1f1;font-family:Inter,system-ui,sans-serif}.card{width:min(560px,calc(100vw - 48px));padding:42px}.icon{width:42px;height:42px;border:2px solid #777;border-radius:50%;display:grid;place-items:center;color:#aaa;font-size:22px}h1{margin:24px 0 10px;font-size:26px}p{color:#aaa;line-height:1.55}.try{margin-top:24px;color:#ddd}.try+ul{padding-left:20px;color:#aaa;line-height:1.7}button{margin-top:20px;border:0;border-radius:9px;padding:9px 15px;background:#f1f1f1;color:#171717;font-weight:650;cursor:pointer}code{display:block;margin-top:18px;color:#777;font-size:11px}@media(prefers-color-scheme:light){:root{color-scheme:light}body{background:#f7f7f6;color:#1c1c1b}p,.try+ul{color:#686865}.try{color:#333}button{background:#1c1c1b;color:#fff}}</style></head><body><main class="card"><div class="icon">!</div><h1>This site can't be reached</h1><p>${escapeHtml(summary)}</p><p class="try">Try:</p><ul><li>Checking the connection</li><li>Checking the proxy, firewall, and DNS configuration</li></ul><button id="retry" type="button">Reload</button><code>${escapeHtml(errorDescription)} (${errorCode})</code></main><script>document.getElementById("retry").addEventListener("click",()=>{location.href=${failedUrlJson}})</script></body></html>`;
-  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
-}
-
-function visibleCrashRecoveryPageUrl(failedUrl: string, reason: string) {
-  const retryTargetJson = JSON.stringify(failedUrl || visibleStartPageUrl()).replace(/</g, "\\u003c");
-  const html = `<!doctype html><html data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline'"><title>This tab crashed</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#171717;color:#f1f1f1;font-family:Inter,system-ui,sans-serif}.card{width:min(560px,calc(100vw - 48px));padding:42px}.icon{width:42px;height:42px;border:2px solid #777;border-radius:50%;display:grid;place-items:center;color:#aaa;font-size:22px}h1{margin:24px 0 10px;font-size:26px}p{color:#aaa;line-height:1.55}button{margin-top:20px;border:0;border-radius:9px;padding:9px 15px;background:#f1f1f1;color:#171717;font-weight:650;cursor:pointer}code{display:block;margin-top:18px;color:#777;font-size:11px}@media(prefers-color-scheme:light){:root{color-scheme:light}body{background:#f7f7f6;color:#1c1c1b}p{color:#686865}button{background:#1c1c1b;color:#fff}}</style></head><body><main class="card"><div class="icon">!</div><h1>This tab crashed</h1><p>The page renderer stopped unexpectedly. Reload the tab to continue where you left off.</p><button id="retry" type="button">Reload tab</button><code>${escapeHtml(reason)}</code></main><script>document.getElementById("retry").addEventListener("click",()=>{location.href=${retryTargetJson}})</script></body></html>`;
-  return `${VISIBLE_START_PAGE_PREFIX}${encodeURIComponent(html)}`;
-}
-
-function isVisibleLoadErrorPageUrl(url: string) {
-  if (!url.startsWith(VISIBLE_START_PAGE_PREFIX)) {
-    return false;
-  }
-  try {
-    return decodeURIComponent(url).includes(`data-${VISIBLE_LOAD_ERROR_PAGE_MARKER}`);
-  } catch {
-    return false;
-  }
-}
-
-function escapeHtml(value: string) {
-  return value.replace(
-    /[&<>"']/g,
-    (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character
-  );
-}
-
-function visibleStartPageHtml() {
-  return `<!doctype html>
-<html lang="en" data-${VISIBLE_START_PAGE_MARKER}>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'">
-  <title>${VISIBLE_START_PAGE_TITLE}</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #000000;
-      --panel: #0a0e10;
-      --line: #1a2a30;
-      --text: #e8f4f8;
-      --muted: #7a919c;
-      --accent: #00d4ff;
-      --accent-strong: #67e8f9;
-      --error: #ff8b7f;
-    }
-    * {
-      box-sizing: border-box;
-    }
-    body {
-      min-height: 100vh;
-      margin: 0;
-      display: grid;
-      place-items: center;
-      padding: 40px;
-      background: linear-gradient(180deg, #000000 0%, #050a0c 100%);
-      color: var(--text);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    main {
-      width: min(680px, 100%);
-      display: grid;
-      gap: 18px;
-    }
-    h1 {
-      margin: 0;
-      font-size: 32px;
-      line-height: 1.1;
-      font-weight: 760;
-      letter-spacing: 0;
-    }
-    form {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 10px;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      background: color-mix(in srgb, var(--panel) 92%, transparent);
-      box-shadow: 0 18px 55px rgba(0, 0, 0, 0.28);
-    }
-    input {
-      min-width: 0;
-      height: 46px;
-      border: 0;
-      outline: 0;
-      border-radius: 10px;
-      padding: 0 14px;
-      background: #05080a;
-      color: var(--text);
-      font: inherit;
-    }
-    input::placeholder {
-      color: var(--muted);
-    }
-    input:focus {
-      box-shadow: 0 0 0 2px rgba(71, 199, 151, 0.45);
-    }
-    button {
-      height: 46px;
-      border: 0;
-      border-radius: 999px;
-      padding: 0 22px;
-      background: var(--accent);
-      color: #001018;
-      font: inherit;
-      font-weight: 720;
-      cursor: pointer;
-    }
-    button:hover {
-      background: var(--accent-strong);
-    }
-    p {
-      min-height: 20px;
-      margin: 0;
-      color: var(--error);
-      font-size: 14px;
-    }
-    @media (prefers-color-scheme: light) {
-      :root {
-        color-scheme: light;
-        --bg: #f7f7f6;
-        --panel: #ffffff;
-        --line: #d8d8d5;
-        --text: #1c1c1b;
-        --muted: #6d6d68;
-        --accent: #0891b2;
-        --accent-strong: #0e7490;
-        --error: #a92f2a;
-      }
-      body { background: #f7f7f6; }
-      form, input { background: #ffffff; }
-      button { color: #ffffff; }
-    }
-    @media (max-width: 560px) {
-      body {
-        padding: 22px;
-      }
-      form {
-        grid-template-columns: 1fr;
-      }
-      button {
-        width: 100%;
-      }
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>Arivu Browser</h1>
-    <form id="open-form" autocomplete="off">
-      <input id="url-input" name="url" type="text" inputmode="url" spellcheck="false" placeholder="Search or enter URL" autofocus>
-      <button type="submit">Open</button>
-    </form>
-    <p id="error" role="status" aria-live="polite"></p>
-  </main>
-  <script>
-    const form = document.getElementById("open-form");
-    const input = document.getElementById("url-input");
-    const error = document.getElementById("error");
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      error.textContent = "";
-      const rawValue = input.value.trim();
-      if (!rawValue) {
-        error.textContent = "Enter a URL.";
-        input.focus();
-        return;
-      }
-      try {
-        const nextUrl = normalizeUrl(rawValue);
-        window.location.assign(nextUrl);
-      } catch {
-        error.textContent = "Enter a valid URL.";
-        input.focus();
-      }
-    });
-    function normalizeUrl(value) {
-      if (/^https?:\\/\\//i.test(value) || /^file:\\/\\//i.test(value)) {
-        return assertAllowedUrl(value).href;
-      }
-      if (/^(localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?(\\/.*)?$/i.test(value)) {
-        return assertAllowedUrl("http://" + value).href;
-      }
-      if (/^[\\w.-]+:\\d+(\\/.*)?$/i.test(value)) {
-        return assertAllowedUrl("http://" + value).href;
-      }
-      if (/^[a-z0-9.-]+\\.[a-z]{2,}(:\\d+)?(\\/.*)?$/i.test(value)) {
-        return assertAllowedUrl("https://" + value).href;
-      }
-      return googleSearchUrl(value);
-    }
-    function googleSearchUrl(value) {
-      return "https://www.google.com/search?q=" + encodeURIComponent(value);
-    }
-    function assertAllowedUrl(value) {
-      const url = new URL(value);
-      if (!["http:", "https:", "file:"].includes(url.protocol)) {
-        throw new Error("Unsupported protocol");
-      }
-      return url;
-    }
-  </script>
-</body>
-</html>`;
-}
-
-/**
- * Keeps elements (in document order, so earlier/on-screen elements win) until their combined
- * serialized size reaches the budget. Element index positions stay stable for the kept prefix.
- */
-function capElementsBySerializedSize<T>(elements: T[], budgetChars: number): T[] {
-  let used = 0;
-  let kept = 0;
-  for (const element of elements) {
-    used += JSON.stringify(element).length + 1;
-    if (used > budgetChars) {
-      break;
-    }
-    kept += 1;
-  }
-  return kept === elements.length ? elements : elements.slice(0, kept);
-}
-
-function initialTarget(mode: BrowserMode, id: string = mode): BrowserTargetRecord {
-  return {
-    id,
-    mode,
-    url: "",
-    title: "",
-    loading: false,
-    canGoBack: false,
-    canGoForward: false,
-    owner: mode === "background" ? "agent" : "user",
-    logs: []
-  };
-}
-
-function publicTab(target: BrowserTargetRecord): BrowserTabState {
-  return {
-    id: target.id,
-    url: target.url,
-    title: target.title,
-    ...(target.faviconUrl ? { faviconUrl: target.faviconUrl } : {}),
-    loading: target.loading,
-    canGoBack: target.canGoBack,
-    canGoForward: target.canGoForward,
-    owner: target.owner,
-    ...(target.lastError ? { lastError: target.lastError } : {}),
-    ...(target.lastSnapshotAt ? { lastSnapshotAt: target.lastSnapshotAt } : {}),
-    ...(target.lastScreenshotAt ? { lastScreenshotAt: target.lastScreenshotAt } : {}),
-    ...(target.lastScreenshotPath ? { lastScreenshotPath: target.lastScreenshotPath } : {})
-  };
-}
-
-function publicTarget(target: BrowserTargetRecord): BrowserTargetState {
-  return { ...publicTab(target), mode: target.mode };
-}
-
-function humanizePermission(permission: string): string {
-  return permission
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/[-_]+/g, " ")
-    .toLowerCase();
-}
-
-function browserPermissionKey(origin: string, permission: string) {
-  let normalizedOrigin = origin;
-  try {
-    normalizedOrigin = new URL(origin).origin;
-  } catch {
-    // Preserve Chromium's requesting-origin value if it is not a standard URL.
-  }
-  return `${normalizedOrigin}|${permission}`;
-}
-
-function browserWebPreferences(mode: BrowserMode): WebPreferences {
-  return {
-    nodeIntegration: false,
-    contextIsolation: true,
-    sandbox: true,
-    webSecurity: true,
-    offscreen: mode === "background",
-    partition: BROWSER_PARTITION
-  };
-}
-
-function assertAllowedPopupUrl(url: string) {
-  if (url === "about:blank" || url.startsWith("about:blank#") || url.startsWith("about:blank?")) {
-    return;
-  }
-  normalizeBrowserUrl(url);
-}
-
-function browserShellWebPreferences(): WebPreferences {
-  return {
-    nodeIntegration: false,
-    contextIsolation: true,
-    sandbox: true,
-    webSecurity: true
-  };
-}
-
-function normalizeConsoleLevel(level: unknown): BrowserConsoleEntry["level"] {
-  if (level === "error" || level === 3) {
-    return "error";
-  }
-  if (level === "warning" || level === "warn" || level === 2) {
-    return "warning";
-  }
-  if (level === "debug" || level === "verbose" || level === 0) {
-    return "debug";
-  }
-  return "info";
-}
-
-function assertPageLoaded(contents: WebContents, mode: BrowserMode) {
-  if (!contents.getURL()) {
-    throw new Error(`The ${mode} browser has not opened a page yet.`);
-  }
-}
-
-function isNavigationAbortError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("ERR_ABORTED") || message.includes("(-3)");
-}
-
-function clampNumber(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function isRestorableBrowserUrl(value: string) {
-  if (value === "") {
-    return true;
-  }
-  try {
-    return ["http:", "https:", "file:"].includes(new URL(value).protocol);
-  } catch {
-    return false;
-  }
-}
-
-function availableDownloadPath(directory: string, filename: string) {
-  const safeFilename = path.basename(filename) || "download";
-  const extension = path.extname(safeFilename);
-  const stem = path.basename(safeFilename, extension);
-  let candidate = path.join(directory, safeFilename);
-  for (let suffix = 1; suffix < 10_000 && existsSync(candidate); suffix += 1) {
-    candidate = path.join(directory, `${stem} (${suffix})${extension}`);
-  }
-  return candidate;
-}
-
-function frameList(contents: WebContents) {
-  const frames = contents.mainFrame.framesInSubtree;
-  return frames.length > 0 ? frames : [contents.mainFrame];
-}
-
-function frameInfo(frame: WebFrameMain, mainFrame: WebFrameMain, index: number) {
-  return {
-    index,
-    url: frame.url,
-    name: frame.name || undefined,
-    origin: frame.origin,
-    mainFrame: frame === mainFrame
-  };
-}
-
-function mergeSnapshotText(parts: string[], maxLength: number) {
-  const seen = new Set<string>();
-  const merged: string[] = [];
-  for (const part of parts) {
-    const normalized = part.replace(/\n{3,}/g, "\n\n").trim();
-    if (!normalized || seen.has(normalized)) {
-      continue;
-    }
-    seen.add(normalized);
-    merged.push(normalized);
-  }
-  return merged.join("\n\n").slice(0, maxLength);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isSuccessfulFrameInspection(frame: BrowserFrameInspection): frame is BrowserFrameMeta & { ok: true; snapshot: BrowserToolResult } {
-  return frame.ok && isRecord(frame.snapshot);
-}
-
-function axPropertyValue(value: unknown) {
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  if (isRecord(value)) {
-    const nestedValue = value.value;
-    if (typeof nestedValue === "string" || typeof nestedValue === "number" || typeof nestedValue === "boolean") {
-      return String(nestedValue);
-    }
-  }
-  return "";
-}
-
-async function waitForFreshPaint(contents: WebContents) {
-  await waitForLoadToStop(contents);
-  try {
-    return (await contents.executeJavaScript(freshPaintScript(), true)) as BrowserToolResult;
-  } catch (error) {
-    await delay(180);
-    return {
-      ok: false,
-      reason: "paint-wait-failed",
-      error: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
-
-async function waitForLoadToStop(contents: WebContents) {
-  if (!contents.isLoading()) {
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(done, 2_000);
-    const onStopLoading = () => done();
-    const onFailLoad = () => done();
-    function done() {
-      clearTimeout(timeout);
-      contents.off("did-stop-loading", onStopLoading);
-      contents.off("did-fail-load", onFailLoad);
-      resolve();
-    }
-    contents.once("did-stop-loading", onStopLoading);
-    contents.once("did-fail-load", onFailLoad);
-  });
-}
-
-async function capturePageWithDebugger(contents: WebContents, captureBeyondViewport = false) {
-  const debuggerApi = contents.debugger;
-  const wasAttached = debuggerApi.isAttached();
-  try {
-    if (!wasAttached) {
-      debuggerApi.attach("1.3");
-    }
-    const result = (await Promise.race([
-      debuggerApi.sendCommand("Page.captureScreenshot", {
-        format: "png",
-        fromSurface: true,
-        captureBeyondViewport
-      }),
-      delay(3_000).then(() => {
-        throw new Error("CDP screenshot capture timed out.");
-      })
-    ])) as BrowserToolResult;
-    const data = typeof result.data === "string" ? result.data : "";
-    if (!data) {
-      return undefined;
-    }
-    return nativeImage.createFromBuffer(Buffer.from(data, "base64"));
-  } catch {
-    return undefined;
-  } finally {
-    if (!wasAttached && debuggerApi.isAttached()) {
-      debuggerApi.detach();
-    }
-  }
-}
-
-async function capturePageWithTimeout(contents: WebContents) {
-  return Promise.race([
-    contents.capturePage(),
-    delay(NATIVE_CAPTURE_TIMEOUT_MS).then(() => {
-      throw new Error(`Native screenshot capture timed out after ${NATIVE_CAPTURE_TIMEOUT_MS}ms.`);
-    })
-  ]);
-}
-
-function freshPaintScript() {
-  return `(() => new Promise((resolve) => {
-    const startedAt = performance.now();
-    const minWaitMs = 500;
-    const quietMs = 120;
-    const timeoutMs = 1500;
-    let lastMutationAt = startedAt;
-    let frameCount = 0;
-    let completed = false;
-    const observer = new MutationObserver(() => {
-      lastMutationAt = performance.now();
-      frameCount = 0;
-    });
-    const complete = (reason) => {
-      if (completed) {
-        return;
-      }
-      completed = true;
-      observer.disconnect();
-      clearTimeout(timeout);
-      resolve({
-        ok: reason === "stable",
-        reason,
-        elapsedMs: Math.round(performance.now() - startedAt),
-        frameCount
-      });
-    };
-    const timeout = setTimeout(() => complete("timeout"), timeoutMs);
-    try {
-      observer.observe(document, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-        characterData: true
-      });
-    } catch {}
-    const scheduleFrame = (callback) => {
-      let called = false;
-      const finish = () => {
-        if (called) {
-          return;
-        }
-        called = true;
-        clearTimeout(fallback);
-        callback();
-      };
-      const fallback = setTimeout(finish, 80);
-      requestAnimationFrame(finish);
-    };
-    const tick = () => {
-      scheduleFrame(() => {
-        frameCount += 1;
-        const now = performance.now();
-        if (now - startedAt >= minWaitMs && now - lastMutationAt >= quietMs && frameCount >= 3) {
-          complete("stable");
-          return;
-        }
-        tick();
-      });
-    };
-    const fonts = document.fonts?.ready && typeof document.fonts.ready.then === "function" ? document.fonts.ready : Promise.resolve();
-    fonts.catch(() => undefined).finally(tick);
-  }))()`;
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function describePointScript(x: number, y: number) {
-  return `(() => {
-    const x = ${JSON.stringify(x)};
-    const y = ${JSON.stringify(y)};
-    const element = document.elementFromPoint(x, y);
-    if (!element) {
-      return { x, y, element: null };
-    }
-    const rect = element.getBoundingClientRect();
-    const text = [
-      element.getAttribute("aria-label"),
-      element.getAttribute("title"),
-      element.getAttribute("placeholder"),
-      element.getAttribute("alt"),
-      element.innerText,
-      element.textContent,
-      element.value
-    ].filter(Boolean).join(" ").replace(/\\s+/g, " ").trim();
-    return {
-      x,
-      y,
-      element: {
-        tag: element.tagName.toLowerCase(),
-        id: element.id || undefined,
-        role: element.getAttribute("role") || undefined,
-        label: text ? text.slice(0, 180) : undefined,
-        bounds: {
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-          centerX: Math.round(rect.x + rect.width / 2),
-          centerY: Math.round(rect.y + rect.height / 2)
-        }
-      }
-    };
-  })()`;
-}
-
-function snapshotScript(maxLength: number) {
-  return `(() => {
-    const maxLength = ${JSON.stringify(maxLength)};
-    const semanticSelector = "h1,h2,h3,h4,h5,h6,a,button,input,textarea,select,label,[role],img,[contenteditable=true],summary";
-    const textOf = (element) => [
-      element.innerText,
-      element.textContent,
-      element.value
-    ].filter(Boolean).join(" ").replace(/\\s+/g, " ").trim();
-    const attr = (element, name) => element.getAttribute(name) || "";
-    const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-    const isVisible = (element) => {
-      if (!(element instanceof Element)) {
-        return false;
-      }
-      if (element.closest("[hidden], [aria-hidden='true']")) {
-        return false;
-      }
-      const style = window.getComputedStyle(element);
-      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") {
-        return false;
-      }
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
-    const queryAllDeep = (root, selector, seen = new Set(), output = []) => {
-      if (!root || !root.querySelectorAll) {
-        return output;
-      }
-      for (const element of root.querySelectorAll(selector)) {
-        if (!seen.has(element)) {
-          seen.add(element);
-          output.push(element);
-        }
-      }
-      for (const element of root.querySelectorAll("*")) {
-        if (element.shadowRoot) {
-          queryAllDeep(element.shadowRoot, selector, seen, output);
-        }
-      }
-      return output;
-    };
-    const collectVisibleText = () => {
-      const chunks = [];
-      const pushText = (text) => {
-        const normalized = normalize(text);
-        if (normalized) {
-          chunks.push(normalized);
-        }
-      };
-      if (document.body) {
-        pushText(document.body.innerText);
-      }
-      for (const element of queryAllDeep(document, semanticSelector)) {
-        if (isVisible(element)) {
-          pushText(elementLabel(element));
-        }
-      }
-      return Array.from(new Set(chunks)).join("\\n").slice(0, maxLength);
-    };
-    const elementLabel = (element) => [
-      attr(element, "aria-label"),
-      attr(element, "title"),
-      attr(element, "placeholder"),
-      element.alt || "",
-      textOf(element)
-    ].find(Boolean) || "";
-    const selectorFor = (element) => {
-      if (element.id) {
-        return "#" + CSS.escape(element.id);
-      }
-      const parts = [];
-      let current = element;
-      while (current && current instanceof Element && parts.length < 4) {
-        const tag = current.tagName.toLowerCase();
-        const parent = current.parentElement;
-        if (!parent) {
-          parts.unshift(tag);
-          break;
-        }
-        const sameTag = Array.from(parent.children).filter((child) => child.tagName === current.tagName);
-        const index = sameTag.indexOf(current) + 1;
-        parts.unshift(sameTag.length > 1 ? tag + ":nth-of-type(" + index + ")" : tag);
-        current = parent;
-      }
-      return parts.join(" > ");
-    };
-    const elements = queryAllDeep(document, semanticSelector)
-      .filter(isVisible)
-      .slice(0, 220)
-      .map((element) => {
-        const rect = element.getBoundingClientRect();
-        return {
-          tag: element.tagName.toLowerCase(),
-          role: attr(element, "role") || undefined,
-          id: element.id || undefined,
-          selector: selectorFor(element) || undefined,
-          label: elementLabel(element).slice(0, 180) || undefined,
-          href: element.href || undefined,
-          type: attr(element, "type") || undefined,
-          name: attr(element, "name") || undefined,
-          disabled: element.disabled === true || attr(element, "aria-disabled") === "true" || undefined,
-          bounds: {
-            x: Math.round(rect.x),
-            y: Math.round(rect.y),
-            width: Math.round(rect.width),
-            height: Math.round(rect.height),
-            centerX: Math.round(rect.x + rect.width / 2),
-            centerY: Math.round(rect.y + rect.height / 2)
-          }
-        };
-      })
-      .filter((element) => element.label || element.href || element.id || element.role);
-    return {
-      url: location.href,
-      title: document.title,
-      text: collectVisibleText().replace(/\\n{3,}/g, "\\n\\n").trim().slice(0, maxLength),
-      viewport: {
-        width: window.innerWidth,
-        height: window.innerHeight,
-        scrollX: window.scrollX,
-        scrollY: window.scrollY,
-        devicePixelRatio: window.devicePixelRatio || 1
-      },
-      elements
-    };
-  })()`;
-}
-
-/**
- * Wraps a model-authored script so it runs with the same result shape regardless of what the
- * script itself does: `{ ok: true, result }` on success, `{ ok: false, error }` if it throws.
- * The user's code is captured in its own inner async IIFE so `return`/`await` work exactly as
- * they would in a normal async function body, without letting an early `return` skip this
- * wrapper's own error handling.
- *
- * Serialization happens here, inside the page, because a value crossing back through
- * executeJavaScript is structurally cloned: DOM nodes, functions, and circular references
- * would otherwise silently vanish or throw instead of producing a readable result.
- */
-function executeJavaScriptScript(script: string) {
-  return `(async () => {
-    function arivuSafeSerialize(value, seen) {
-      if (value === null || (typeof value !== "object" && typeof value !== "function")) {
-        if (typeof value === "function") {
-          return "[Function" + (value.name ? ": " + value.name : "") + "]";
-        }
-        if (typeof value === "bigint") {
-          return value.toString() + "n";
-        }
-        return value;
-      }
-      if (typeof value === "function") {
-        return "[Function" + (value.name ? ": " + value.name : "") + "]";
-      }
-      if (typeof Node !== "undefined" && value instanceof Node) {
-        var tag = value.nodeType === 1 ? "<" + value.tagName.toLowerCase() + ">" : String(value.nodeName || "node");
-        return "[DOM " + tag + "]";
-      }
-      if (seen.has(value)) {
-        return "[Circular]";
-      }
-      seen.add(value);
-      if (Array.isArray(value)) {
-        return value.slice(0, 500).map(function(item) { return arivuSafeSerialize(item, seen); });
-      }
-      var out = {};
-      var keys = Object.keys(value).slice(0, 200);
-      for (var i = 0; i < keys.length; i++) {
-        try {
-          out[keys[i]] = arivuSafeSerialize(value[keys[i]], seen);
-        } catch (err) {
-          out[keys[i]] = "[Unserializable]";
-        }
-      }
-      return out;
-    }
-    try {
-      var arivuScriptResult = await (async () => {
-        ${script}
-      })();
-      return { ok: true, result: arivuSafeSerialize(arivuScriptResult, new WeakSet()) };
-    } catch (err) {
-      return { ok: false, error: String(err && err.message ? err.message : err) };
-    }
-  })()`;
-}
-
-function boundScriptResult(value: unknown): unknown {
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined || serialized.length <= MAX_SCRIPT_RESULT_CHARS) {
-    return value;
-  }
-  return `${serialized.slice(0, MAX_SCRIPT_RESULT_CHARS)}\n[truncated ${serialized.length - MAX_SCRIPT_RESULT_CHARS} more characters]`;
-}
-
-function clickScript(target: string) {
-  return `(() => {
-    const target = ${JSON.stringify(target)};
-    const element = findBrowserTarget(target);
-    if (!element) {
-      return { ok: false, error: "No element matched target", target };
-    }
-    element.scrollIntoView({ block: "center", inline: "center" });
-    const rect = element.getBoundingClientRect();
-    element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
-    element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
-    element.click();
-    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
-    return { ok: true, target, matched: describeBrowserTarget(element) };
-
-    ${findTargetHelpers()}
-  })()`;
-}
-
-function typeScript(target: string, text: string, submit: boolean) {
-  return `(() => {
-    const target = ${JSON.stringify(target)};
-    const text = ${JSON.stringify(text)};
-    const submit = ${JSON.stringify(submit)};
-    const element = findBrowserTarget(target);
-    if (!element) {
-      return { ok: false, error: "No element matched target", target };
-    }
-    element.scrollIntoView({ block: "center", inline: "center" });
-    element.focus();
-    if (element instanceof HTMLSelectElement) {
-      const option = Array.from(element.options).find((entry) => entry.value === text || entry.textContent.trim() === text);
-      if (!option) {
-        return { ok: false, error: "No select option matched text", target };
-      }
-      element.value = option.value;
-    } else if (element.isContentEditable) {
-      element.textContent = text;
-    } else {
-      const descriptor =
-        element instanceof HTMLTextAreaElement
-          ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")
-          : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
-      if (descriptor?.set) {
-        descriptor.set.call(element, text);
-      } else {
-        element.value = text;
-      }
-    }
-    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-    if (submit) {
-      element.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
-      const form = element.closest("form");
-      if (form?.requestSubmit) {
-        form.requestSubmit();
-      } else {
-        element.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", code: "Enter" }));
-      }
-    }
-    return { ok: true, target, matched: describeBrowserTarget(element), submitted: submit };
-
-    ${findTargetHelpers()}
-  })()`;
-}
-
-function findTargetHelpers() {
-  return `
-    function normalize(value) {
-      return String(value || "").replace(/\\s+/g, " ").trim().toLowerCase();
-    }
-    function escapeRegExp(value) {
-      return value.replace(/[.*+?^${"{"}()}|[\\]\\\\]/g, "\\\\$&");
-    }
-    function elementText(element) {
-      return normalize([
-        element.getAttribute("aria-label"),
-        element.getAttribute("title"),
-        element.getAttribute("placeholder"),
-        element.getAttribute("alt"),
-        element.innerText,
-        element.textContent,
-        element.value
-      ].filter(Boolean).join(" "));
-    }
-    function isBrowserTargetVisible(element) {
-      if (!(element instanceof Element)) {
-        return false;
-      }
-      if (element.closest("[hidden], [aria-hidden='true']")) {
-        return false;
-      }
-      const style = window.getComputedStyle(element);
-      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") {
-        return false;
-      }
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    }
-    function resolveBrowserTarget(element) {
-      const control = labelControl(element);
-      return control && isBrowserTargetVisible(control) ? control : element;
-    }
-    function queryAllDeep(root, selector, seen = new Set(), output = []) {
-      if (!root || !root.querySelectorAll) {
-        return output;
-      }
-      for (const element of root.querySelectorAll(selector)) {
-        if (!seen.has(element)) {
-          seen.add(element);
-          output.push(element);
-        }
-      }
-      for (const element of root.querySelectorAll("*")) {
-        if (element.shadowRoot) {
-          queryAllDeep(element.shadowRoot, selector, seen, output);
-        }
-      }
-      return output;
-    }
-    function querySelectorDeep(selector) {
-      try {
-        const direct = document.querySelector(selector);
-        if (direct) {
-          return direct;
-        }
-      } catch {
-        throw new Error("Invalid selector");
-      }
-      for (const element of queryAllDeep(document, "*")) {
-        if (element.matches?.(selector)) {
-          return element;
-        }
-      }
-      return null;
-    }
-    function visibleBrowserCandidates() {
-      const seen = new Set();
-      return queryAllDeep(document, "button,a,input,textarea,select,[role],label,[contenteditable=true]")
-        .filter(isBrowserTargetVisible)
-        .map(resolveBrowserTarget)
-        .filter((element) => {
-          if (!isBrowserTargetVisible(element) || seen.has(element)) {
-            return false;
-          }
-          seen.add(element);
-          return true;
-        });
-    }
-    function hasWholePhrase(text, phrase) {
-      if (!phrase) {
-        return false;
-      }
-      const phrasePattern = phrase.split(/\\s+/).filter(Boolean).map(escapeRegExp).join("\\\\s+");
-      const pattern = new RegExp("(^|[^a-z0-9])" + phrasePattern + "([^a-z0-9]|$)");
-      return pattern.test(text);
-    }
-    function targetTokens(value) {
-      return value.split(/[^a-z0-9]+/).filter(Boolean);
-    }
-    function hasAllWholeTokens(text, target) {
-      const textTokens = new Set(targetTokens(text));
-      const tokens = targetTokens(target);
-      return tokens.length > 0 && tokens.every((token) => textTokens.has(token));
-    }
-    function findBrowserTarget(rawTarget) {
-      try {
-        const selected = resolveBrowserTarget(querySelectorDeep(rawTarget));
-        if (selected && isBrowserTargetVisible(selected)) {
-          return selected;
-        }
-      } catch {}
-      const normalizedTarget = normalize(rawTarget);
-      const candidates = visibleBrowserCandidates();
-      const exact = candidates.find((element) => elementText(element) === normalizedTarget);
-      if (exact) {
-        return exact;
-      }
-      const wholePhrase = candidates.find((element) => hasWholePhrase(elementText(element), normalizedTarget));
-      if (wholePhrase) {
-        return wholePhrase;
-      }
-      const prefix = candidates.find((element) => {
-        const text = elementText(element);
-        return text.startsWith(normalizedTarget + " ") || text.startsWith(normalizedTarget + ":");
-      });
-      if (prefix) {
-        return prefix;
-      }
-      const tokenMatch = candidates.find((element) => hasAllWholeTokens(elementText(element), normalizedTarget));
-      return tokenMatch || null;
-    }
-    function labelControl(element) {
-      if (!(element instanceof HTMLLabelElement)) {
-        return null;
-      }
-      if (element.control) {
-        return element.control;
-      }
-      return queryAllDeep(element, "input,textarea,select,[contenteditable=true]")[0] || null;
-    }
-    function describeBrowserTarget(element) {
-      const text = elementText(element);
-      return {
-        tag: element.tagName.toLowerCase(),
-        id: element.id || undefined,
-        label: text ? text.slice(0, 160) : undefined,
-        role: element.getAttribute("role") || undefined,
-        name: element.getAttribute("name") || undefined
-      };
-    }
-  `;
 }

@@ -1,7 +1,7 @@
 import type { AppConfig } from "../config.js";
 import { resolveContextWindowTokens } from "../models/contextResolver.js";
 import type { ModelCatalog } from "../models/modelCatalogSchema.js";
-import type { BrowserTaskModelConfig } from "../tools/browserControl.js";
+import type { BrowserTaskModelConfig, BrowserVisualGroundingConfig } from "../tools/browserControl.js";
 import { providerCandidatesFromConfig, type ModelSelection } from "./modelRouter.js";
 
 type BrowserTaskModelOverride = NonNullable<AppConfig["browserTaskModel"]>;
@@ -13,21 +13,54 @@ type BrowserTaskModelCandidateOverride = Omit<BrowserTaskModelOverride, "fallbac
  * turn (respecting `auto` model selection). An explicit `providerId` pulls that saved
  * provider's fields; explicit `baseUrl`/`model`/`apiKey` fields override on top of either.
  *
- * `fallbackModels` (if configured) resolve the same way, but default their unset
- * providerId/baseUrl/apiKey to the *primary's already-resolved* fields rather than the chat
- * model's — a fallback naming only a different `model` id lands on the same provider/endpoint
- * as the primary, which is the common case (same account, a different deployed model).
+ * `fallbackModels` (if configured) resolve the same way, but default their unset provider,
+ * credentials, and loop settings to the *primary's already-resolved* fields rather than the
+ * chat model's — a fallback naming only a different `model` id lands on the same endpoint
+ * with the same max-steps and action-loop delay, which is the common case.
  */
 export function resolveBrowserTaskModel(config: AppConfig, fallback: ModelSelection): BrowserTaskModelConfig {
   const override = config.browserTaskModel;
   const primary = resolveBrowserTaskModelCandidate(config, override, fallback);
   const fallbackOverrides = override?.fallbackModels;
-  if (!fallbackOverrides?.length) {
-    return primary;
+  const resolved: BrowserTaskModelConfig = fallbackOverrides?.length
+    ? {
+        ...primary,
+        fallbacks: fallbackOverrides.map((fallbackOverride) => resolveBrowserTaskModelCandidate(config, fallbackOverride, primary))
+      }
+    : primary;
+  const visualGrounding = resolveBrowserVisualGroundingModel(config);
+  return visualGrounding ? { ...resolved, visualGrounding } : resolved;
+}
+
+/**
+ * Resolve the optional coordinate-only GUI grounding model independently from both chat and
+ * browser-task reasoning. The settings profile may point at any saved OpenAI-compatible
+ * provider (for example a local vLLM server hosting nvidia/LocateAnything-3B).
+ */
+export function resolveBrowserVisualGroundingModel(config: AppConfig): BrowserVisualGroundingConfig | undefined {
+  const override = config.browserVisualGrounding;
+  if (!override) {
+    return undefined;
+  }
+  const provider = override.providerId
+    ? providerCandidatesFromConfig(config).find((candidate) => candidate.id === override.providerId)
+    : undefined;
+  if (override.providerId && !provider) {
+    throw new Error(
+      `browserVisualGrounding references unknown provider "${override.providerId}". Choose a configured provider or disable visual grounding.`
+    );
+  }
+  const baseUrl = override.baseUrl ?? provider?.baseUrl;
+  if (!baseUrl) {
+    throw new Error("browserVisualGrounding needs a providerId or baseUrl.");
   }
   return {
-    ...primary,
-    fallbacks: fallbackOverrides.map((fallbackOverride) => resolveBrowserTaskModelCandidate(config, fallbackOverride, primary))
+    baseUrl,
+    model: override.model,
+    apiKey: override.apiKey ?? provider?.apiKey,
+    providerId: provider?.id ?? override.providerId,
+    providerName: provider?.name,
+    timeoutMs: override.timeoutMs
   };
 }
 
@@ -55,6 +88,7 @@ function resolveBrowserTaskModelCandidate(
     );
   }
   const resolvedBase = provider ?? base;
+  const baseBrowserConfig = base as Partial<BrowserTaskModelConfig>;
 
   return {
     baseUrl: override.baseUrl ?? resolvedBase.baseUrl,
@@ -62,8 +96,8 @@ function resolveBrowserTaskModelCandidate(
     apiKey: override.apiKey ?? resolvedBase.apiKey,
     providerId: provider?.id ?? base.providerId,
     providerName: provider?.name ?? base.providerName,
-    maxSteps: override.maxSteps,
-    stepDelayMs: override.stepDelayMs
+    maxSteps: override.maxSteps ?? baseBrowserConfig.maxSteps,
+    stepDelayMs: override.stepDelayMs ?? baseBrowserConfig.stepDelayMs
   };
 }
 
