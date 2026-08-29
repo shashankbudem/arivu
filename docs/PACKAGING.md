@@ -1,6 +1,6 @@
 # Packaging & Release
 
-Arivu ships two artifacts: the **npm CLI/TUI package** and the **Electron desktop app**.
+Arivu ships two artifacts: the **npm CLI/native-TUI package** and the **Electron desktop app**.
 
 ## Prerequisites
 
@@ -10,17 +10,19 @@ Install dev dependencies first (the packaging toolchain is in `devDependencies`)
 npm install
 ```
 
+The CLI/TUI source build also requires Rust 1.92 or newer. The Electron-only build does not compile the native TUI.
+
 ## npm CLI package
 
-The CLI is published from `dist/` (built by `npm run build`).
+The CLI is published from `dist/` (built by `npm run build`). That command builds the TypeScript entry point, compiles the current platform's native TUI in release mode, and stages the executable plus its notices under `dist/native/<platform>-<arch>/`.
 
 ```
-npm run build          # emits dist/cli.js
+npm run build          # emits dist/cli.js and the current native TUI
 npm publish            # prepublishOnly re-runs the build
 ```
 
 Package metadata (name, bin, repository, license, keywords) lives in `package.json`. The published
-tarball contains only `dist/` (see the `files` field).
+tarball contains only `dist/` (see the `files` field). Build and publish separately for every supported npm platform/architecture artifact; a binary staged on one host cannot run on another target.
 
 ## Desktop app (electron-builder)
 
@@ -65,7 +67,7 @@ electron-builder environment variables. See the electron-builder docs for the fu
 ## Release checklist
 
 1. Bump `version` in `package.json`.
-2. `npm run typecheck && npm test && npm run build && npm run desktop:build`.
+2. `npm run typecheck && npm test && npm run native:tui:test && npm run build && npm run desktop:build`.
 3. `npm run dist` for the desktop installers (with signing env set for a public release).
 4. `npm publish` for the CLI.
 5. Attach the `release/` installers to the GitHub release.

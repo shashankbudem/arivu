@@ -1,0 +1,17 @@
+Arivu native TUI
+================
+
+The native Arivu TUI uses the Ratatui and Crossterm technology stack and adapts
+terminal layout, inline-scrollback, prompt, status, and slash-completion ideas
+from Grok Build:
+
+  https://github.com/xai-org/grok-build
+  Copyright 2023-2026 SpaceXAI
+  Licensed under the Apache License, Version 2.0.
+
+The xai-ratatui-inline dependency is consumed from the upstream Grok Build
+repository at a pinned revision. It contains code derived from Ratatui, which is
+dual-licensed under MIT or Apache-2.0. See that dependency's NOTICE and the
+upstream repository's THIRD-PARTY-NOTICES for full attribution.
+
+Arivu-specific code remains copyright Arivu contributors.

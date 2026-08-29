@@ -44,7 +44,7 @@ Implemented:
 - Desktop inline available-tools drawer, backed by the actual tool registry through IPC.
 - Desktop Capability policy matrix in Settings, backed by the same trust-mode table used by approvals and tool status labels, with stricter per-workspace overrides for enforceable capabilities including repo reads plus path-prefix, network-domain, MCP-server, and browser target-class scope rules. Preset buttons apply common default, review-first, local-only, and locked-down workspace policies, named local profiles save/apply reusable bundles, and Workspace policy JSON can copy/apply normalized override and scope-rule bundles. Active scope rules are summarized in Settings and shown as chips on affected Tools drawer rows.
 - Desktop MCP server JSON config in Settings plus `mcp_list_tools` and `mcp_call_tool`.
-- Desktop Settings doctor and CLI `arivu doctor` diagnostics for API key, model listing, selected model, basic chat completions, streaming, tool calling, and Tavily. Settings doctor persists Tool calling as disabled for auto-mode saved providers when the tool probe proves unsupported.
+- Desktop Settings doctor and CLI `arivu doctor` diagnostics for API key, model listing, selected model, basic chat completions, streaming, tool calling, and the active web-search provider. Settings doctor persists Tool calling as disabled for auto-mode saved providers when the tool probe proves unsupported.
 - Desktop browser-style chat search with match navigation.
 - Desktop collapsible/resizable left sidebar and slim Activity rail/panel.
 - Desktop collapsible sidebar sections and Activity rows.
@@ -53,20 +53,20 @@ Implemented:
 - Desktop icon-only message actions: Edit/Copy on user messages, Retry/Copy on agent replies, assistant-reply retry that regenerates from the existing user bubble instead of duplicating it, failed-user-message Retry/Edit/Copy after send errors, and failed-prompt retry from the error strip with hover/focus labels.
 - Desktop compact-context action that locally summarizes older session messages, strips old tool-call protocol into plain transcript text, saves the session, and keeps the recent message window.
 - Token-aware composer paste guard with truncate/full/cancel options.
-- Tavily-first `web_search` tool with Bing/Bing News RSS fallback.
+- Managed Tavily, Brave Search, Exa, Serper, and Bing RSS profiles shared by main-agent `web_search` and browser-agent `search_web`.
 - Local `current_datetime` and timezone-only `current_location` tools.
 - Global skill discovery from the app data skills directory, explicit `$skill-name` skill attachment, and read-only `list_skills`/`read_skill` tools.
 - OpenAI-compatible provider hardening for NVIDIA-style tool/fallback JSON decode errors, empty assistant content rejection, empty no-tool run rejection, and blank assistant history cleanup.
 - OpenAI-compatible multimodal serialization through text and `image_url` content parts.
 - Streaming assistant replies with raw citation artifact cleanup.
 - Markdown rendering for assistant responses, with Shiki-highlighted fenced code blocks and per-block copy controls.
-- Default TUI built with `blessed`.
+- Default TUI built as a native Rust/Ratatui/Crossterm frontend using Grok Build's pinned `xai-ratatui-inline` engine.
 - One-shot mode via `arivu "task"`.
 - `sessions`, `resume <session-id>`, `compact <session-id>`, and `config get|set`; `arivu sessions` and TUI `/sessions [n]` support shared search/workspace/pinned/project filters, TUI `/sessions --pick` opens an interactive resume picker, `/resume <session-id>` switches the live TUI into that saved session, `/compact [n]` compacts the active saved session, `/diff` shows a read-only staged/unstaged/untracked git summary for the active workspace, and TUI pane shortcuts scroll/jump conversation plus Activity logs.
 - OpenAI-compatible `/chat/completions` client.
 - Agent tool-call loop plus desktop bounded agent-loop mode for multi-iteration tasks.
 - Harness foundation docs in `docs/HARNESS.md`, with task runs plus opt-in task worktrees and local worktree lifecycle actions implemented; sandbox execution remains a future milestone.
-- Tools: `list`, `read`, `search`, `edit`, `web_search`, `current_datetime`, `current_location`, `list_skills`, `read_skill`, `mcp_list_tools`, `mcp_call_tool`, `browser_state`, `browser_select_tab`, `browser_open`, `browser_screenshot`, `browser_task`, lower-level browser snapshot/console/click/type/scroll/select helpers, `apply_patch`, `write_file`, `run`, and `git_status`.
+- Tools: `list`, `read`, `search`, `edit`, `web_search`, `current_datetime`, `current_location`, `list_skills`, `read_skill`, `mcp_list_tools`, `mcp_call_tool`, browser state/open/screenshot/direct interaction helpers, `apply_patch`, `write_file`, `run`, and `git_status`. Desktop additionally exposes the delegated `browser_task`; TUI and one-shot CLI use Browser Use direct primitives instead.
 - The per-model catalog (`arivu models sync/status/probe-context/schedule`) records provider availability and measured context limits. Desktop, TUI, and CLI resolve the selected model's request budget from that catalog, while live context-overflow errors update the observed limit without an extra provider call.
 - Trust modes: `readonly`, `ask`, `trusted`.
 - Session storage.
@@ -77,6 +77,8 @@ Recommended verification:
 ```bash
 npm run typecheck
 npm test
+npm run native:tui:test
+npm run build
 npm run desktop:build
 arivu --trust readonly "Reply with exactly OK."
 ```
@@ -131,13 +133,13 @@ Desktop provider behavior:
 - Provider drafts with blank URLs are not persisted, saved provider names must be unique, and saved providers need a model id.
 - If a provider does not expose `/models`, the user can manually enter a model id.
 
-Tavily config behavior:
+Legacy Tavily config migration:
 
 ```text
 ARIVU_TAVILY_API_KEY > SHANKINSTER_TAVILY_API_KEY > TAVILY_API_KEY > saved tavilyApiKey
 ```
 
-The user has a Tavily key in shell config; do not print or commit it.
+The environment key is overlaid onto a Tavily profile without replacing an explicitly selected search profile. Never print or commit search-provider keys.
 
 ## Important decisions
 
@@ -147,7 +149,7 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Desktop workspace creation uses Electron's save dialog to create a directory and switch into it.
 - Desktop startup and `New chat` start unassigned; the prompt `+` menu can route the draft to no project, a recent project, or an opened workspace before the first prompt locks the chat target.
 - The sidebar Workspaces section doubles as the recent workspace list: folder/name rows reopen a saved workspace directly, while the chevron expands that workspace's chats. Missing workspace folders are marked unavailable and can be forgotten by moving their saved chats to standalone history.
-- `blessed` remains for the TUI fallback.
+- The retired Blessed renderer is not a runtime fallback; default interactive terminal mode launches the staged native binary.
 - OpenAI-compatible API support is the provider layer for v1; direct provider-specific SDKs are deferred.
 - Model listing is provider-scoped. A combined model picker would need grouped provider rows and would need to switch both provider and model together.
 - Batch chat requests omit `stream` instead of sending `stream: false`; streaming requests send `stream: true`.
@@ -164,10 +166,10 @@ The user has a Tavily key in shell config; do not print or commit it.
 - Full-file writes are allowed for creation and explicit replacement only.
 - The agent must not write outside the active workspace.
 - Assistant system prompts include a no-emoji instruction for new and resumed sessions.
-- Web search uses local function tools, not MCP. Tavily is preferred when configured and uses `basic` depth by default to avoid casually spending extra credits. The no-key fallback uses Bing RSS, with Bing News RSS for news-like queries.
+- Web search uses local function tools, not MCP. Settings manages one active Tavily, Brave Search, Exa, Serper, or Bing RSS profile; the selection, endpoint, and key are shared with the in-page browser agent. Tavily uses `basic` depth, and Bing RSS remains the no-key option with Bing News RSS for news-like queries.
 - `current_datetime` and `current_location` are local read-only tools. `current_location` intentionally uses timezone context only and avoids GPS, IP lookup, browser geolocation, and network location.
 - The desktop Tools drawer lists registry schemas from the Electron main process instead of duplicating tool metadata in renderer state, and it receives active workspace scope labels from the same policy path used for enforcement.
-- Browser tools are desktop-only and route through `desktop/main/browserController.ts`. Agent calls default to the hidden isolated Electron target, while explicit visible calls use a separate maximized tabbed browser window. Normal visible tabs are individual `BrowserView`s. Website-created popups remain native maximized child windows so `window.open()` receives a valid handle; Arivu registers their `WebContents` in the same visible tab state so the agent can select, inspect, and close them by `tabId`. All visible targets share Arivu's persistent browser partition. `browser_open` can create a visible tab with `newTab: true` and turns non-URL text into a Google search URL. `browser_state` exposes active mode, active visible tab id, visible tabs, background target, and last snapshot/screenshot timestamps, while `browser_select_tab` switches visible targets before inspection. The Review surface transfers pages between visible and background ownership and sends annotation text plus saved screenshot evidence into the chat composer. Browser profile passwords use Electron `safeStorage`; import supports Chrome password CSV and Arivu JSON, and extensions are unpacked-only. Current-browser prompts are preflighted with `browser_state` and a targeted `browser_screenshot`. Chrome DevTools MCP remains optional for deeper diagnostics or real Chrome behavior.
+- Desktop browser tools route through `desktop/main/browserController.ts`. Agent calls default to the hidden isolated Electron target, while explicit visible calls use a separate maximized tabbed browser window. Normal visible tabs are individual `BrowserView`s. Website-created popups remain native maximized child windows so `window.open()` receives a valid handle; Arivu registers their `WebContents` in the same visible tab state so the agent can select, inspect, and close them by `tabId`. All visible targets share Arivu's persistent browser partition. `browser_open` can create a visible tab with `newTab: true` and turns non-URL text into a Google search URL. `browser_state` exposes active mode, active visible tab id, visible tabs, background target, and last snapshot/screenshot timestamps, while `browser_select_tab` switches visible targets before inspection. The Review surface transfers pages between visible and background ownership and sends annotation text plus saved screenshot evidence into the chat composer. Browser profile passwords use Electron `safeStorage`; import supports Chrome password CSV and Arivu JSON, and extensions are unpacked-only. Current-browser prompts are preflighted with `browser_state` and a targeted `browser_screenshot`. Chrome DevTools MCP remains optional for deeper diagnostics or real Chrome behavior. Native TUI and one-shot CLI instead construct `src/browser/browserUseCliController.ts`, which uses direct Browser Use helpers against an external Chrome/CDP session. That terminal route exposes snapshot/click/type/scroll/select/JavaScript tools, defaults agent navigation to a new visible tab, and deliberately omits the desktop-only `browser_task` nested-agent path.
 - The desktop image picker is owned by the Electron main process. The renderer receives picker data URLs plus display metadata and never gets direct Node filesystem access. Pasted and dropped images are read by the renderer as data URLs and follow the same attachment limits.
 - Skills live globally under the app data directory's `skills/` folder, or `ARIVU_SKILLS_HOME` when set. The agent advertises discovered skills, exposes `list_skills` and `read_skill`, persists composer-loaded skills as hidden chat context, and attaches explicitly requested `$skill-name` content before that model turn.
 - MCP servers live in saved config as `mcpServers`. The desktop Settings UI edits the JSON object, and MCP tool calls use short-lived official SDK stdio clients.

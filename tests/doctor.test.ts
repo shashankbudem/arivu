@@ -11,7 +11,10 @@ describe("doctor diagnostics", () => {
 
     expect(report.checks.find((check) => check.id === "api-key")?.status).toBe("fail");
     expect(report.checks.find((check) => check.id === "chat")?.status).toBe("skip");
-    expect(report.checks.find((check) => check.id === "tavily")?.status).toBe("skip");
+    expect(report.checks.find((check) => check.id === "web-search")).toMatchObject({
+      label: "Web search (Bing RSS)",
+      status: "skip"
+    });
   });
 
   it("warns when tool calling is unsupported", async () => {
@@ -66,6 +69,42 @@ describe("doctor diagnostics", () => {
         status: "warn"
       }
     ]);
+  });
+
+  it("checks the selected web search provider", async () => {
+    const report = await runDoctor(
+      {
+        baseUrl: "https://api.example.test/v1",
+        model: "test-model",
+        trustMode: "ask",
+        activeWebSearchProviderId: "brave",
+        webSearchProviders: [
+          {
+            id: "brave",
+            name: "Team search",
+            kind: "brave",
+            baseUrl: "https://api.search.brave.com/res/v1/web/search",
+            apiKey: "brave-key"
+          }
+        ]
+      },
+      {
+        async fetcher(input, init) {
+          expect(String(input)).toContain("api.search.brave.com");
+          expect((init?.headers as Record<string, string>)["X-Subscription-Token"]).toBe("brave-key");
+          return Response.json({
+            web: {
+              results: [{ title: "OpenAI", url: "https://openai.com", description: "OpenAI" }]
+            }
+          });
+        }
+      }
+    );
+
+    expect(report.checks.find((check) => check.id === "web-search")).toMatchObject({
+      label: "Web search (Team search)",
+      status: "pass"
+    });
   });
 
   it("skips tool-calling probe when provider tool calling is disabled", async () => {

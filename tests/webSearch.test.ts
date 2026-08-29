@@ -146,4 +146,130 @@ describe("web search helpers", () => {
       })
     ).rejects.toThrow(/\[truncated\]/);
   });
+
+  it("uses Brave Search headers and parses web results", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    const results = await searchWeb("browser agents", 2, {
+      provider: {
+        id: "brave",
+        name: "Brave Search",
+        kind: "brave",
+        baseUrl: "https://api.search.brave.com/res/v1/web/search",
+        apiKey: "brave-test"
+      },
+      async fetcher(input, init) {
+        calls.push({ input, init });
+        return Response.json({
+          web: {
+            results: [
+              {
+                title: "Brave result",
+                url: "https://example.com/brave",
+                description: "A Brave snippet."
+              }
+            ]
+          }
+        });
+      }
+    });
+
+    expect(calls[0]?.input).toContain("q=browser+agents");
+    expect(calls[0]?.input).toContain("count=2");
+    expect((calls[0]?.init?.headers as Record<string, string>)["X-Subscription-Token"]).toBe("brave-test");
+    expect(results[0]).toMatchObject({
+      title: "Brave result",
+      url: "https://example.com/brave",
+      snippet: "A Brave snippet."
+    });
+  });
+
+  it("uses Exa search and includes compact result text", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    const results = await searchWeb("visual grounding", 1, {
+      provider: {
+        id: "exa",
+        name: "Exa",
+        kind: "exa",
+        baseUrl: "https://api.exa.ai/search",
+        apiKey: "exa-test"
+      },
+      async fetcher(input, init) {
+        calls.push({ input, init });
+        return Response.json({
+          results: [
+            {
+              title: "Exa result",
+              url: "https://example.com/exa",
+              text: "Full Exa text.",
+              highlights: ["An Exa snippet."],
+              publishedDate: "2026-07-01",
+              score: 0.8
+            }
+          ]
+        });
+      }
+    });
+
+    expect(calls[0]?.input).toBe("https://api.exa.ai/search");
+    expect((calls[0]?.init?.headers as Record<string, string>)["x-api-key"]).toBe("exa-test");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+      query: "visual grounding",
+      numResults: 1,
+      contents: { highlights: true }
+    });
+    expect(results[0]).toMatchObject({
+      title: "Exa result",
+      snippet: "An Exa snippet.",
+      publishedAt: "2026-07-01",
+      score: 0.8
+    });
+  });
+
+  it("uses Serper search and parses organic results", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    const results = await searchWeb("agent search", 3, {
+      provider: {
+        id: "serper",
+        name: "Serper",
+        kind: "serper",
+        baseUrl: "https://google.serper.dev/search",
+        apiKey: "serper-test"
+      },
+      async fetcher(input, init) {
+        calls.push({ input, init });
+        return Response.json({
+          organic: [
+            {
+              title: "Serper result",
+              link: "https://example.com/serper",
+              snippet: "A Serper snippet.",
+              date: "Jul 2, 2026"
+            }
+          ]
+        });
+      }
+    });
+
+    expect((calls[0]?.init?.headers as Record<string, string>)["X-API-KEY"]).toBe("serper-test");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ q: "agent search", num: 3 });
+    expect(results[0]).toMatchObject({
+      title: "Serper result",
+      url: "https://example.com/serper",
+      snippet: "A Serper snippet.",
+      publishedAt: "Jul 2, 2026"
+    });
+  });
+
+  it("reports a missing key for keyed providers instead of silently changing providers", async () => {
+    await expect(
+      searchWeb("hello", 1, {
+        provider: {
+          id: "brave",
+          name: "Work search",
+          kind: "brave",
+          baseUrl: "https://api.search.brave.com/res/v1/web/search"
+        }
+      })
+    ).rejects.toThrow("Brave Search API key is not configured.");
+  });
 });

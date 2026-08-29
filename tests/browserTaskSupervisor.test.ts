@@ -95,6 +95,60 @@ describe("browserTaskProxy", () => {
     expect(revokedResponse.status).toBe(401);
   });
 
+  it("keeps LocateAnything visual clicks inside the authenticated task bridge", async () => {
+    await ensureUpstream();
+    const visualClick = vi.fn(async (target: string) => ({
+      target,
+      x: 321,
+      y: 222,
+      model: "nvidia/LocateAnything-3B"
+    }));
+    const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+      realBaseUrl: upstreamUrl,
+      visualClick,
+      ttlMs: 30_000
+    });
+
+    const response = await fetch(`${proxyBaseUrl}/__arivu_visual_click`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ target: "the blue Save button" })
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      target: "the blue Save button",
+      x: 321,
+      y: 222,
+      model: "nvidia/LocateAnything-3B"
+    });
+    expect(visualClick).toHaveBeenCalledWith("the blue Save button", expect.any(AbortSignal));
+    unregisterBrowserTaskProxyEntry(token);
+  });
+
+  it("does not expose visual clicking when LocateAnything is not configured", async () => {
+    await ensureUpstream();
+    const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+      realBaseUrl: upstreamUrl,
+      ttlMs: 30_000
+    });
+    const response = await fetch(`${proxyBaseUrl}/__arivu_visual_click`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ target: "Save" })
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/not configured/i) });
+    unregisterBrowserTaskProxyEntry(token);
+  });
+
   it("answers OPTIONS preflights with CORS approval without requiring a token", async () => {
     const { port } = await ensureBrowserTaskProxy();
     const response = await fetch(`http://127.0.0.1:${port}/chat/completions`, {
@@ -158,6 +212,61 @@ describe("browserTaskProxy", () => {
     }
   });
 
+  it("uses the task's selected web search provider for in-page search_web", async () => {
+    await ensureUpstream();
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("api.search.brave.com")) {
+        expect((init?.headers as Record<string, string>)["X-Subscription-Token"]).toBe("brave-task-key");
+        return Response.json({
+          web: {
+            results: [
+              {
+                title: "Brave task result",
+                url: "https://example.com/brave-task",
+                description: "Selected provider reached."
+              }
+            ]
+          }
+        });
+      }
+      return realFetch(input, init);
+    });
+
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: upstreamUrl,
+        realApiKey: REAL_API_KEY,
+        webSearchProvider: {
+          id: "brave",
+          name: "Brave Search",
+          kind: "brave",
+          baseUrl: "https://api.search.brave.com/res/v1/web/search",
+          apiKey: "brave-task-key"
+        },
+        ttlMs: 30_000
+      });
+      const response = await fetch(`${proxyBaseUrl}/__arivu_search?q=page+agent&n=1`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        results: [
+          {
+            title: "Brave task result",
+            url: "https://example.com/brave-task",
+            snippet: "Selected provider reached."
+          }
+        ]
+      });
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("rejects a search request with a missing query and an invalid token the same as the LLM path", async () => {
     const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
       realBaseUrl: upstreamUrl || "http://127.0.0.1:1",
@@ -171,6 +280,100 @@ describe("browserTaskProxy", () => {
       expect(badToken.status).toBe(401);
     } finally {
       unregisterBrowserTaskProxyEntry(token);
+    }
+  });
+
+  it("serves a task-scoped recovery screenshot without forwarding it or recording an LLM diagnostic", async () => {
+    const captureScreenshot = vi.fn(async () => ({
+      image: "data:image/jpeg;base64,aGVsbG8=",
+      width: 800,
+      height: 600
+    }));
+    const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+      realBaseUrl: upstreamUrl || "http://127.0.0.1:1",
+      captureScreenshot,
+      ttlMs: 30_000
+    });
+    try {
+      const response = await fetch(`${proxyBaseUrl}/__arivu_screenshot`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` }
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        queued: true,
+        width: 800,
+        height: 600
+      });
+      expect(captureScreenshot).toHaveBeenCalledTimes(1);
+      expect(getBrowserTaskProxyDiagnostics(token)).toEqual([]);
+
+      const badToken = await fetch(`${proxyBaseUrl}/__arivu_screenshot`, {
+        method: "POST",
+        headers: { authorization: "Bearer not-a-real-token" }
+      });
+      expect(badToken.status).toBe(401);
+    } finally {
+      unregisterBrowserTaskProxyEntry(token);
+    }
+  });
+
+  it("injects queued screenshot pixels only after the model request leaves page JavaScript", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const visionUpstream = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((resolve) => visionUpstream.listen(0, "127.0.0.1", resolve));
+    const visionUrl = `http://127.0.0.1:${(visionUpstream.address() as AddressInfo).port}`;
+    const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+      realBaseUrl: visionUrl,
+      captureScreenshot: async () => ({
+        image: "data:image/jpeg;base64,cGl4ZWxz",
+        width: 640,
+        height: 480
+      }),
+      ttlMs: 30_000
+    });
+    try {
+      const captureResponse = await fetch(`${proxyBaseUrl}/__arivu_screenshot`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` }
+      });
+      const captureBody = (await captureResponse.json()) as Record<string, unknown>;
+      expect(captureBody).toEqual({ queued: true, width: 640, height: 480 });
+      expect(JSON.stringify(captureBody)).not.toContain("cGl4ZWxz");
+
+      const modelResponse = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Inspect it" },
+                {
+                  type: "image_url",
+                  image_url: { url: "arivu-recovery-screenshot://pending" }
+                }
+              ]
+            }
+          ]
+        })
+      });
+      expect(modelResponse.status).toBe(200);
+      expect(JSON.stringify(bodies[0])).toContain("data:image/jpeg;base64,cGl4ZWxz");
+      expect(JSON.stringify(bodies[0])).not.toContain("arivu-recovery-screenshot://pending");
+    } finally {
+      unregisterBrowserTaskProxyEntry(token);
+      visionUpstream.close();
     }
   });
 
@@ -368,6 +571,63 @@ describe("browserTaskProxy", () => {
       unregisterBrowserTaskProxyEntry(token);
     } finally {
       strict.close();
+    }
+  });
+
+  it("falls back to a truthful text notice when the selected model rejects screenshot image input", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const textOnly = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+        bodies.push(body);
+        const serialized = JSON.stringify(body);
+        if (serialized.includes('"image_url"')) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "image_url content parts are not supported by this model" } }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((resolve) => textOnly.listen(0, "127.0.0.1", resolve));
+    const textOnlyUrl = `http://127.0.0.1:${(textOnly.address() as AddressInfo).port}`;
+    try {
+      const { token, proxyBaseUrl } = await registerBrowserTaskProxyEntry({
+        realBaseUrl: textOnlyUrl,
+        ttlMs: 30_000
+      });
+      const response = await fetch(`${proxyBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "text-only",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Inspect the recovery screenshot." },
+                { type: "image_url", image_url: { url: "data:image/jpeg;base64,aGVsbG8=" } }
+              ]
+            }
+          ]
+        })
+      });
+
+      expect(response.status).toBe(200);
+      expect(bodies).toHaveLength(2);
+      expect(JSON.stringify(bodies[0])).toContain('"image_url"');
+      expect(JSON.stringify(bodies[1])).not.toContain('"image_url"');
+      expect(JSON.stringify(bodies[1])).toContain("rejected image input");
+      expect(getBrowserTaskProxyDiagnostics(token)).toMatchObject([
+        { status: 400, willRetry: true, message: expect.stringContaining("rejected screenshot image input") },
+        { status: 200, outcome: "success" }
+      ]);
+      unregisterBrowserTaskProxyEntry(token);
+    } finally {
+      textOnly.close();
     }
   });
 
@@ -1036,11 +1296,15 @@ describe("runBrowserTask", () => {
     });
 
     try {
-      const result = await runBrowserTask(contents, { instruction: "rotate on failure" }, {
-        baseUrl,
-        model: "rotate-primary-missing",
-        fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "rotate-fallback-model", apiKey: REAL_API_KEY }]
-      });
+      const result = await runBrowserTask(
+        contents,
+        { instruction: "rotate on failure" },
+        {
+          baseUrl,
+          model: "rotate-primary-missing",
+          fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "rotate-fallback-model", apiKey: REAL_API_KEY }]
+        }
+      );
 
       expect(result).toMatchObject({ success: true, data: "Recovered on the fallback model." });
       expect(result.browserTaskModel).toMatchObject({ model: "rotate-fallback-model" });
@@ -1067,12 +1331,21 @@ describe("runBrowserTask", () => {
       });
       await runBrowserTask(opener.contents, { instruction: "open the circuit" }, { baseUrl, model: "preopened-missing" });
 
-      const { contents, scripts } = createFakeContents(() => ({ ok: true, success: true, data: "Used the fallback directly.", stepCount: 1 }));
-      const result = await runBrowserTask(contents, { instruction: "should skip straight to the fallback" }, {
-        baseUrl,
-        model: "preopened-missing",
-        fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "healthy-fallback" }]
-      });
+      const { contents, scripts } = createFakeContents(() => ({
+        ok: true,
+        success: true,
+        data: "Used the fallback directly.",
+        stepCount: 1
+      }));
+      const result = await runBrowserTask(
+        contents,
+        { instruction: "should skip straight to the fallback" },
+        {
+          baseUrl,
+          model: "preopened-missing",
+          fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "healthy-fallback" }]
+        }
+      );
 
       expect(result).toMatchObject({ success: true, data: "Used the fallback directly." });
       expect(result.browserTaskModel).toMatchObject({ model: "healthy-fallback" });
@@ -1105,15 +1378,27 @@ describe("runBrowserTask", () => {
     };
 
     try {
-      await runBrowserTask(createFakeContents(failScript).contents, { instruction: "open circuit A" }, { baseUrl: baseUrlA, model: "dead-primary" });
-      await runBrowserTask(createFakeContents(failScript).contents, { instruction: "open circuit B" }, { baseUrl: baseUrlB, model: "dead-fallback" });
+      await runBrowserTask(
+        createFakeContents(failScript).contents,
+        { instruction: "open circuit A" },
+        { baseUrl: baseUrlA, model: "dead-primary" }
+      );
+      await runBrowserTask(
+        createFakeContents(failScript).contents,
+        { instruction: "open circuit B" },
+        { baseUrl: baseUrlB, model: "dead-fallback" }
+      );
 
       const { contents, scripts } = createFakeContents(() => ({ ok: true, success: true, data: "should not run" }));
-      const result = await runBrowserTask(contents, { instruction: "no viable candidate" }, {
-        baseUrl: baseUrlA,
-        model: "dead-primary",
-        fallbacks: [{ baseUrl: baseUrlB, model: "dead-fallback" }]
-      });
+      const result = await runBrowserTask(
+        contents,
+        { instruction: "no viable candidate" },
+        {
+          baseUrl: baseUrlA,
+          model: "dead-primary",
+          fallbacks: [{ baseUrl: baseUrlB, model: "dead-fallback" }]
+        }
+      );
 
       expect(result).toMatchObject({ success: false, stopped: true, stopReason: "infrastructure", durationMs: 0 });
       expect(String(result.data)).toContain("dead-primary");
@@ -1142,11 +1427,15 @@ describe("runBrowserTask", () => {
     });
 
     try {
-      const result = await runBrowserTask(contents, { instruction: "fail after progress" }, {
-        baseUrl,
-        model: "progressed-then-dead",
-        fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "should-not-be-tried" }]
-      });
+      const result = await runBrowserTask(
+        contents,
+        { instruction: "fail after progress" },
+        {
+          baseUrl,
+          model: "progressed-then-dead",
+          fallbacks: [{ baseUrl: "https://api.openai.com/v1", model: "should-not-be-tried" }]
+        }
+      );
 
       expect(result).toMatchObject({ success: false, stopped: true, stopReason: "infrastructure", stepCount: 2 });
       expect(result.rotatedModels).toBeUndefined();
@@ -1533,8 +1822,7 @@ describe("runBrowserTask", () => {
 
   describe("presence chip", () => {
     // No per-frame duplication (the bug this replaced the old page-agent Panel to fix), no
-    // orphaned agent-frame mask, and -- new behavior -- an ordered, capped task history instead
-    // of a single line that gets wiped on every call.
+    // orphaned agent-frame mask, and a complete ordered task/action history.
     function createFakeContentsWithMainFrame(onScript: (script: string) => unknown) {
       const { contents, scripts } = createFakeContents((script) => {
         if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
@@ -1556,7 +1844,21 @@ describe("runBrowserTask", () => {
     // The chip is upserted via `(${UPDATE_PRESENCE_CHIP_SNIPPET})(${JSON.stringify(tasks)})` --
     // pull the trailing JSON array argument back out to assert on its structure directly instead
     // of string-matching the whole minified call.
-    function lastChipTasks(mainFrameScripts: string[]): Array<{ instruction: string; status: string; detail?: string[] }> {
+    type ChipTask = {
+      id: string;
+      instruction: string;
+      status: string;
+      actions: Array<{ stepIndex: number; name: string; input?: string; output?: string }>;
+    };
+
+    function chipTaskUpdates(mainFrameScripts: string[]): ChipTask[][] {
+      return mainFrameScripts.flatMap((script) => {
+        const match = script.match(/\)\((\[[\s\S]*\])\)$/);
+        return match ? [JSON.parse(match[1]) as ChipTask[]] : [];
+      });
+    }
+
+    function lastChipTasks(mainFrameScripts: string[]): ChipTask[] {
       const match = mainFrameScripts.at(-1)?.match(/\)\((\[[\s\S]*\])\)$/);
       if (!match) {
         throw new Error(`No presence-chip update call found in: ${JSON.stringify(mainFrameScripts)}`);
@@ -1565,9 +1867,12 @@ describe("runBrowserTask", () => {
     }
 
     it("shows the task as current while running, then done once it succeeds, and disposes the agent-frame mask", async () => {
-      const { contents, scripts, mainFrameScripts } = createFakeContentsWithMainFrame(
-        () => ({ ok: true, success: true, data: "Done.", stepCount: 1 })
-      );
+      const { contents, scripts, mainFrameScripts } = createFakeContentsWithMainFrame(() => ({
+        ok: true,
+        success: true,
+        data: "Done.",
+        stepCount: 1
+      }));
 
       await runBrowserTask(
         contents,
@@ -1576,7 +1881,9 @@ describe("runBrowserTask", () => {
       );
 
       const tasks = lastChipTasks(mainFrameScripts);
-      expect(tasks).toEqual([{ instruction: "fill out the form", status: "done" }]);
+      expect(tasks).toMatchObject([{ instruction: "fill out the form", status: "done", actions: [] }]);
+      // Ordered prefix plus an unguessable random suffix so a page cannot forge panel commands.
+      expect(tasks[0].id).toMatch(/^task-\d+-[0-9a-f]{12}$/);
 
       // The mask teardown runs against the agent's own frame (contents in this fixture), not
       // mainFrame -- they're deliberately different scopes.
@@ -1585,9 +1892,12 @@ describe("runBrowserTask", () => {
     });
 
     it("never touches the page for the presence chip in background mode", async () => {
-      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(
-        () => ({ ok: true, success: true, data: "Done.", stepCount: 1 })
-      );
+      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(() => ({
+        ok: true,
+        success: true,
+        data: "Done.",
+        stepCount: 1
+      }));
 
       await runBrowserTask(
         contents,
@@ -1607,13 +1917,16 @@ describe("runBrowserTask", () => {
         { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
       );
 
-      expect(lastChipTasks(mainFrameScripts)).toEqual([{ instruction: "fill out the form", status: "failed" }]);
+      expect(lastChipTasks(mainFrameScripts)).toMatchObject([{ instruction: "fill out the form", status: "failed", actions: [] }]);
     });
 
     it("accumulates separate browser_task calls on the same tab in order, done ones alongside the current one", async () => {
-      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(
-        () => ({ ok: true, success: true, data: "Done.", stepCount: 1 })
-      );
+      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(() => ({
+        ok: true,
+        success: true,
+        data: "Done.",
+        stepCount: 1
+      }));
 
       await runBrowserTask(
         contents,
@@ -1626,16 +1939,19 @@ describe("runBrowserTask", () => {
         { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
       );
 
-      expect(lastChipTasks(mainFrameScripts)).toEqual([
-        { instruction: "navigate to the service catalog", status: "done" },
-        { instruction: "click the new button", status: "done" }
+      expect(lastChipTasks(mainFrameScripts)).toMatchObject([
+        { instruction: "navigate to the service catalog", status: "done", actions: [] },
+        { instruction: "click the new button", status: "done", actions: [] }
       ]);
     });
 
-    it("caps the task history to the most recent calls instead of growing without bound", async () => {
-      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(
-        () => ({ ok: true, success: true, data: "Done.", stepCount: 1 })
-      );
+    it("keeps every task on the tab while the panel itself stays scrollable", async () => {
+      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(() => ({
+        ok: true,
+        success: true,
+        data: "Done.",
+        stepCount: 1
+      }));
 
       for (let i = 1; i <= 7; i += 1) {
         await runBrowserTask(
@@ -1646,9 +1962,251 @@ describe("runBrowserTask", () => {
       }
 
       const tasks = lastChipTasks(mainFrameScripts);
-      expect(tasks.length).toBeLessThan(7);
-      expect(tasks.map((task) => task.instruction)).toEqual(["step 3", "step 4", "step 5", "step 6", "step 7"]);
+      expect(tasks).toHaveLength(7);
+      expect(tasks.map((task) => task.instruction)).toEqual(["step 1", "step 2", "step 3", "step 4", "step 5", "step 6", "step 7"]);
     });
+
+    it("keeps the complete structured action timeline after a task collapses", async () => {
+      const { contents, mainFrameScripts } = createFakeContentsWithMainFrame(() => ({
+        ok: true,
+        success: true,
+        data: "Done.",
+        stepCount: 2,
+        actions: [
+          {
+            stepIndex: 1,
+            name: "input_text",
+            input: '{"index":7,"text":"Maintain Items"}',
+            output: "Entered the filter.",
+            evaluation: "The input succeeded.",
+            memory: "The catalog page is open.",
+            goal: "Submit the search."
+          },
+          { stepIndex: 2, name: "send_keys", input: '{"keys":"ENTER"}', output: "Submitted." }
+        ]
+      }));
+
+      await runBrowserTask(
+        contents,
+        { instruction: "search the catalog", visible: true },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+
+      expect(lastChipTasks(mainFrameScripts)[0]).toMatchObject({
+        instruction: "search the catalog",
+        status: "done",
+        actions: [
+          {
+            stepIndex: 1,
+            name: "input_text",
+            input: '{"index":7,"text":"Maintain Items"}',
+            output: "Entered the filter.",
+            evaluation: "The input succeeded.",
+            memory: "The catalog page is open.",
+            goal: "Submit the search."
+          },
+          { stepIndex: 2, name: "send_keys", input: '{"keys":"ENTER"}', output: "Submitted." }
+        ]
+      });
+    });
+
+    it("pauses before the next action and resumes from the on-page controls", async () => {
+      let resolveTask: ((value: unknown) => void) | undefined;
+      const taskResult = new Promise<unknown>((resolve) => {
+        resolveTask = resolve;
+      });
+      const controlWrites: boolean[] = [];
+      const { contents } = createFakeContents(
+        (script) => {
+          if (script.includes("window.__arivuPageAgentControl.paused = true;")) {
+            controlWrites.push(true);
+            return true;
+          }
+          if (script.includes("window.__arivuPageAgentControl.paused = false;")) {
+            controlWrites.push(false);
+            setTimeout(
+              () =>
+                resolveTask?.({
+                  ok: true,
+                  success: true,
+                  data: "Done.",
+                  stepCount: 1,
+                  actions: [{ stepIndex: 1, name: "click_element_by_index", output: "Clicked." }]
+                }),
+              50
+            );
+            return true;
+          }
+          if (script.includes("if (!window.__ArivuPageAgentLib)")) {
+            return taskResult;
+          }
+          return true;
+        },
+        () => ({ stepCount: 0, actions: [] })
+      );
+      const mainFrameScripts: string[] = [];
+      let taskId = "";
+      let commandPoll = 0;
+      Object.assign(contents, {
+        mainFrame: {
+          executeJavaScript: async (script: string) => {
+            mainFrameScripts.push(script);
+            const updateMatch = script.match(/\)\((\[[\s\S]*\])\)$/);
+            if (updateMatch) {
+              taskId = (JSON.parse(updateMatch[1]) as ChipTask[]).at(-1)?.id ?? taskId;
+              return undefined;
+            }
+            if (script.includes("var command = window.__arivuPageAgentPresenceCommand")) {
+              commandPoll += 1;
+              if (commandPoll === 1) {
+                return { type: "pause", taskId };
+              }
+              if (commandPoll === 2) {
+                return { type: "resume", taskId };
+              }
+            }
+            return null;
+          }
+        }
+      });
+
+      const result = await runBrowserTask(
+        contents,
+        { instruction: "click the requested control", visible: true },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+
+      const statuses = chipTaskUpdates(mainFrameScripts).map((update) => update.at(-1)?.status);
+      expect(controlWrites).toEqual([true, false]);
+      expect(statuses).toContain("paused");
+      expect(statuses.filter((status) => status === "current").length).toBeGreaterThanOrEqual(2);
+      expect(statuses.at(-1)).toBe("done");
+      expect(result.success).toBe(true);
+    }, 10_000);
+
+    it("stops the active page agent from the on-page controls", async () => {
+      let resolveTask: ((value: unknown) => void) | undefined;
+      const taskResult = new Promise<unknown>((resolve) => {
+        resolveTask = resolve;
+      });
+      let stopCalled = false;
+      const { contents } = createFakeContents(
+        (script) => {
+          if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+            stopCalled = true;
+            resolveTask?.({ ok: true, success: false, data: "Task aborted", stepCount: 0, actions: [] });
+            return true;
+          }
+          if (script.includes("if (!window.__ArivuPageAgentLib)")) {
+            return taskResult;
+          }
+          return true;
+        },
+        () => ({ stepCount: 0, actions: [] })
+      );
+      const mainFrameScripts: string[] = [];
+      let taskId = "";
+      let commandSent = false;
+      Object.assign(contents, {
+        mainFrame: {
+          executeJavaScript: async (script: string) => {
+            mainFrameScripts.push(script);
+            const updateMatch = script.match(/\)\((\[[\s\S]*\])\)$/);
+            if (updateMatch) {
+              taskId = (JSON.parse(updateMatch[1]) as ChipTask[]).at(-1)?.id ?? taskId;
+              return undefined;
+            }
+            if (!commandSent && script.includes("var command = window.__arivuPageAgentPresenceCommand")) {
+              commandSent = true;
+              return { type: "stop", taskId };
+            }
+            return null;
+          }
+        }
+      });
+
+      const result = await runBrowserTask(
+        contents,
+        { instruction: "a task the user stops", visible: true },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+
+      expect(stopCalled).toBe(true);
+      expect(result).toMatchObject({
+        success: false,
+        stopped: true,
+        stopReason: "cancelled",
+        data: "Browser task stopped by the user."
+      });
+      expect(lastChipTasks(mainFrameScripts)[0].status).toBe("stopped");
+      expect(chipTaskUpdates(mainFrameScripts).some((update) => update[0]?.status === "stopping")).toBe(true);
+    }, 10_000);
+
+    it("excludes paused time from the active-time budget and only times out after resume", async () => {
+      const controlWrites: boolean[] = [];
+      // The task never resolves on its own, so only the pause-adjusted deadline can end it.
+      const { contents } = createFakeContents(
+        (script) => {
+          // The timeout stop path also flips paused=false, so match the stop script first to keep
+          // it out of controlWrites (which should record only the user pause + user resume).
+          if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+            return true;
+          }
+          if (script.includes("window.__arivuPageAgentControl.paused = true;")) {
+            controlWrites.push(true);
+            return true;
+          }
+          if (script.includes("window.__arivuPageAgentControl.paused = false;")) {
+            controlWrites.push(false);
+            return true;
+          }
+          if (script.includes("if (!window.__ArivuPageAgentLib)")) {
+            return new Promise(() => undefined);
+          }
+          return true;
+        },
+        () => ({ stepCount: 0, actions: [] })
+      );
+      const mainFrameScripts: string[] = [];
+      let taskId = "";
+      let commandPoll = 0;
+      Object.assign(contents, {
+        mainFrame: {
+          executeJavaScript: async (script: string) => {
+            mainFrameScripts.push(script);
+            const updateMatch = script.match(/\)\((\[[\s\S]*\])\)$/);
+            if (updateMatch) {
+              taskId = (JSON.parse(updateMatch[1]) as ChipTask[]).at(-1)?.id ?? taskId;
+              return undefined;
+            }
+            if (script.includes("var command = window.__arivuPageAgentPresenceCommand")) {
+              commandPoll += 1;
+              // Pause on the first poll (~1s), hold paused past the original 2s budget, then resume
+              // on the third poll (~3s). If paused time counted against the budget, the deadline
+              // would have fired at ~2s and this resume would never be delivered.
+              if (commandPoll === 1) {
+                return { type: "pause", taskId };
+              }
+              if (commandPoll >= 3) {
+                return { type: "resume", taskId };
+              }
+            }
+            return null;
+          }
+        }
+      });
+
+      const result = await runBrowserTask(
+        contents,
+        { instruction: "a task paused past its budget", visible: true, timeoutMs: 2_000 },
+        { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+      );
+
+      // Resume was delivered (pause then resume) => the deadline survived a pause longer than the
+      // original budget; the task still ultimately timed out => resume re-armed the deadline.
+      expect(controlWrites).toEqual([true, false]);
+      expect(result).toMatchObject({ success: false, stopped: true, stopReason: "timeout" });
+    }, 15_000);
   });
 
   it("wires the in-page agent with instructions, content capping, reflection backfill and retry budget", async () => {
@@ -1668,7 +2226,8 @@ describe("runBrowserTask", () => {
     const mainScript = mainScriptFrom(scripts);
     expect(mainScript).toContain("maxRetries: 4");
     expect(mainScript).toContain("transformPageContent: arivuCapPageContent");
-    expect(mainScript).toContain("onAfterStep: arivuBackfillReflection");
+    expect(mainScript).toContain("onAfterStep: arivuOnAfterStep");
+    expect(mainScript).toContain("transformRequestBody: arivuScreenshotRecovery.transformRequestBody");
     // The anti-toggle checkbox rule is the marker for the whole system-instruction block.
     expect(mainScript).toContain("Never click a checkbox");
   });
@@ -1776,7 +2335,7 @@ describe("runBrowserTask", () => {
     expect(mainScriptFrom(scripts)).toContain("experimentalScriptExecutionTool: true");
   });
 
-  it("always wires the in-page search_web custom tool, unlike the opt-in script tool", async () => {
+  it("always wires the in-page search and screenshot recovery tools, unlike the opt-in script tool", async () => {
     const { contents, scripts } = createFakeContents((script) => {
       if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
         return true;
@@ -1791,12 +2350,38 @@ describe("runBrowserTask", () => {
     );
 
     const mainScript = mainScriptFrom(scripts);
-    expect(mainScript).toContain("customTools: { search_web: arivuSearchWebTool }");
+    expect(mainScript).toContain("inspect_screenshot: arivuInspectScreenshotTool");
     expect(mainScript).toContain("/__arivu_search?q=");
+    expect(mainScript).toContain("/__arivu_screenshot");
     expect(mainScript).toContain("lib.z.object({ query: lib.z.string() })");
+    expect(mainScript).toContain("if (false) {");
     // arivuSearchWebTool's execute body is hand-escaped inside this template literal (\\" and
     // \\n produce literal \" and \n in the generated source); new Function parses without
     // executing, so this is the one guard against a silent escaping/syntax mistake there.
+    expect(() => new Function(mainScript)).not.toThrow();
+  });
+
+  it("exposes the LocateAnything click tool only when a trusted visual-click callback is configured", async () => {
+    const { contents, scripts } = createFakeContents((script) => {
+      if (script.includes("typeof window.__arivuPageAgentTask.stop")) {
+        return true;
+      }
+      return { ok: true, success: true, data: "Done.", stepCount: 1 };
+    });
+
+    await runBrowserTask(
+      contents,
+      {
+        instruction: "click the pixel-only canvas control",
+        visualClick: async (target) => ({ target, x: 10, y: 20, model: "nvidia/LocateAnything-3B" })
+      },
+      { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1", apiKey: REAL_API_KEY }
+    );
+
+    const mainScript = mainScriptFrom(scripts);
+    expect(mainScript).toContain("if (true) {");
+    expect(mainScript).toContain("arivuCustomTools.locate_and_click");
+    expect(mainScript).toContain("/__arivu_visual_click");
     expect(() => new Function(mainScript)).not.toThrow();
   });
 

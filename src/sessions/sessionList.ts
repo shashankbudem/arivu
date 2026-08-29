@@ -57,13 +57,82 @@ export function describeSessionListFilters(filters: SessionListFilters = {}) {
   return descriptions.join(", ");
 }
 
-export function sessionDisplayTitle(session: AgentSession) {
+/** Max words kept when auto-freezing a chat title into session JSON. */
+const SESSION_TITLE_WORD_LIMIT = 12;
+
+/** Short continuation prompts that should not become the permanent chat title. */
+const CONTINUATION_TITLE_PATTERN = /^(continue|resume|go on|ok|yes|y|please continue|keep going)\.?$/i;
+
+/**
+ * Build a short display title from free text (first N words). Empty input becomes
+ * "Untitled session".
+ */
+export function deriveSessionTitleFromText(text: string, wordLimit = SESSION_TITLE_WORD_LIMIT): string {
+  const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean).slice(0, Math.max(1, wordLimit));
+  return words.join(" ") || "Untitled session";
+}
+
+/**
+ * Best available title source for a session without mutating it: saved title, first
+ * substantial user message, earliest task-run preview, then any user message.
+ */
+export function resolveSessionTitleSource(session: AgentSession): string {
   const savedTitle = session.title?.trim();
   if (savedTitle) {
     return savedTitle;
   }
-  const content = session.messages.find((message) => message.role === "user")?.content;
-  return content ? chatContentToText(content).trim().split(/\s+/).slice(0, 12).join(" ") || "Untitled session" : "Untitled session";
+
+  for (const message of session.messages) {
+    if (message.role !== "user") {
+      continue;
+    }
+    const text = chatContentToText(message.content).trim();
+    if (!text || CONTINUATION_TITLE_PATTERN.test(text)) {
+      continue;
+    }
+    return deriveSessionTitleFromText(text);
+  }
+
+  for (const run of session.taskRuns ?? []) {
+    const text = run.promptPreview?.trim();
+    if (!text || CONTINUATION_TITLE_PATTERN.test(text)) {
+      continue;
+    }
+    return deriveSessionTitleFromText(text);
+  }
+
+  const anyUser = session.messages.find((message) => message.role === "user");
+  if (anyUser) {
+    return deriveSessionTitleFromText(chatContentToText(anyUser.content));
+  }
+
+  return "Untitled session";
+}
+
+/**
+ * Freeze a permanent `session.title` when missing so compaction (which drops early
+ * user messages) cannot wipe the sidebar label. Does not overwrite a user rename.
+ * Returns true when a title was written.
+ */
+export function ensureSessionTitle(session: AgentSession): boolean {
+  if (session.title?.trim()) {
+    return false;
+  }
+  const resolved = resolveSessionTitleSource(session);
+  if (resolved === "Untitled session" && !(session.taskRuns?.length || session.messages.some((m) => m.role === "user"))) {
+    return false;
+  }
+  // Even "Untitled session" is better frozen only when we had real content that still
+  // resolved to something useful; skip writing pure untitled with no evidence.
+  if (resolved === "Untitled session") {
+    return false;
+  }
+  session.title = resolved;
+  return true;
+}
+
+export function sessionDisplayTitle(session: AgentSession) {
+  return resolveSessionTitleSource(session);
 }
 
 export function sessionWorkspacePath(session: AgentSession) {

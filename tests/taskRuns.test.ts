@@ -112,6 +112,56 @@ describe("agent task runs", () => {
     expect(run.error).toMatch(/browser task did not complete/i);
   });
 
+  it("materializes a failure screenshot artifact when browser_task embeds screenshotPath", () => {
+    const run = createAgentTaskRun({
+      userMessageIndex: 0,
+      prompt: "create the record",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+    recordTaskRunEvent(
+      run,
+      {
+        type: "tool_result",
+        toolCallId: "failed-task-shot",
+        name: "browser_task",
+        result: JSON.stringify({
+          success: false,
+          data: "Stopped for correction: stale index",
+          stepCount: 2,
+          failureScreenshot: true,
+          screenshotPath: "/tmp/task-failure.png",
+          size: { width: 1440, height: 900 },
+          title: "Catalog Item"
+        })
+      },
+      "2026-01-01T00:00:01.000Z"
+    );
+
+    expect(run.tools[0]?.status).toBe("failed");
+    expect(run.tools[0]?.artifactIds).toEqual([
+      "failed-task-shot:browser_task_log",
+      "failed-task-shot:browser_screenshot:/tmp/task-failure.png"
+    ]);
+    expect(run.artifacts).toMatchObject([
+      {
+        kind: "browser_task_log",
+        path: "/tmp/task-failure.png",
+        width: 1440,
+        height: 900,
+        summary: expect.stringContaining("failure screenshot")
+      },
+      {
+        kind: "browser_screenshot",
+        title: "Browser task failure screenshot",
+        path: "/tmp/task-failure.png",
+        width: 1440,
+        height: 900
+      }
+    ]);
+    expect(run.artifacts[0]?.content).toContain("Failure screenshot:");
+    expect(run.artifacts[0]?.content).toContain("auto-captured on task failure");
+  });
+
   it("allows persisted browser verification to resolve an earlier delegated task failure", () => {
     const run = createAgentTaskRun({
       userMessageIndex: 0,
@@ -1095,6 +1145,48 @@ boom`
           ]
         }
       ]
+    });
+  });
+
+  it("passes a SARIF report that contains only warnings and notes (no error-level findings)", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "arivu-task-run-sarif-warn-"));
+    await mkdir(path.join(workspace, "reports"));
+    await writeFile(
+      path.join(workspace, "reports", "lint.sarif"),
+      JSON.stringify({
+        version: "2.1.0",
+        runs: [
+          {
+            results: [
+              { ruleId: "no-console", level: "warning", message: { text: "Unexpected console statement." } },
+              { ruleId: "docs", level: "note", message: { text: "Add docs." } }
+            ]
+          }
+        ]
+      }),
+      "utf8"
+    );
+    const run = createAgentTaskRun({ userMessageIndex: 0, prompt: "lint", now: "2026-01-01T00:00:00.000Z" });
+    recordTaskRunEvent(
+      run,
+      { type: "tool_call", call: { id: "call_lint", name: "run", arguments: { command: "npm run lint -- --sarif reports/lint.sarif" } } },
+      "2026-01-01T00:00:00.000Z"
+    );
+    recordTaskRunEvent(
+      run,
+      { type: "tool_result", toolCallId: "call_lint", name: "run", result: "exitCode: 0\nstdout:\nwrote reports/lint.sarif" },
+      "2026-01-01T00:00:01.000Z",
+      { workspaceRoot: workspace }
+    );
+
+    // Advisory-only findings must not sink the run's verification — only error-level findings fail.
+    expect(run.artifacts[0]?.testReports?.[0]).toMatchObject({
+      kind: "sarif",
+      status: "passed",
+      findings: 2,
+      errorFindings: 0,
+      warningFindings: 1,
+      noteFindings: 1
     });
   });
 

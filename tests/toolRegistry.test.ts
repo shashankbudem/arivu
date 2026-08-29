@@ -39,7 +39,7 @@ describe("createToolRegistry", () => {
     expect(names).toContain("browser_state");
     expect(names).toContain("browser_select_tab");
     expect(names).toContain("browser_screenshot");
-    expect(names).toContain("browser_task");
+    expect(names).not.toContain("browser_task");
 
     const result = JSON.parse(await withBrowser.execute("browser_open", { url: "localhost:5173" })) as Record<string, unknown>;
     expect(result.action).toBe("open");
@@ -103,6 +103,28 @@ describe("createToolRegistry", () => {
     expect(names).toContain("browser_execute_javascript");
   });
 
+  it("enables direct browser primitives for Browser Use terminal sessions", () => {
+    const registry = createToolRegistry({
+      workspaceRoot: process.cwd(),
+      approvals: new ApprovalManager("trusted"),
+      browser: createFakeBrowser(),
+      manualBrowserTools: true
+    });
+    const names = registry.schemas.map((schema) => schema.name);
+
+    for (const enabled of [
+      "browser_snapshot",
+      "browser_click",
+      "browser_click_at",
+      "browser_type",
+      "browser_scroll",
+      "browser_select_option"
+    ]) {
+      expect(names).toContain(enabled);
+    }
+    expect(names).not.toContain("browser_task");
+  });
+
   it("runs browser_execute_javascript and returns the wrapped result", async () => {
     const browser = createFakeBrowser();
     const registry = createToolRegistry({
@@ -111,10 +133,7 @@ describe("createToolRegistry", () => {
       browser
     });
 
-    const result = JSON.parse(await registry.execute("browser_execute_javascript", { script: "return 1 + 1;" })) as Record<
-      string,
-      unknown
-    >;
+    const result = JSON.parse(await registry.execute("browser_execute_javascript", { script: "return 1 + 1;" })) as Record<string, unknown>;
     expect(result.action).toBe("execute_javascript");
     expect(result.ok).toBe(true);
     expect(result.result).toBe("ran: return 1 + 1;");
@@ -156,7 +175,7 @@ describe("createToolRegistry", () => {
     expect(prompted).toBe(false);
   });
 
-  it("registers browser_task only when a browser controller is provided", () => {
+  it("registers browser_task only when a browser controller and task runtime are provided", () => {
     const withoutBrowser = createRegistry();
     expect(withoutBrowser.schemas.map((schema) => schema.name)).not.toContain("browser_task");
 
@@ -394,16 +413,15 @@ describe("createToolRegistry", () => {
     await expect(registry.execute("browser_task", { instruction: "do something" })).resolves.toMatch(/denied browser/);
   });
 
-  it("fails browser_task cleanly when no model is configured for the run", async () => {
+  it("does not expose browser_task when no delegated task model is configured", async () => {
     const registry = createToolRegistry({
       workspaceRoot: process.cwd(),
       approvals: new ApprovalManager("trusted"),
       browser: createFakeBrowser()
     });
 
-    await expect(registry.execute("browser_task", { instruction: "do something" })).resolves.toMatch(
-      /Error: browser_task has no model configured/
-    );
+    expect(registry.schemas.map((schema) => schema.name)).not.toContain("browser_task");
+    await expect(registry.execute("browser_task", { instruction: "do something" })).rejects.toThrow(/Unknown tool/);
   });
 
   it("rejects instructions that ask the in-page agent to navigate an explicit URL", async () => {

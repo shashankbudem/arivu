@@ -1,3 +1,10 @@
+import {
+  defaultWebSearchProvider,
+  webSearchProviderLabel,
+  webSearchProviderRequiresApiKey,
+  type WebSearchProviderProfile
+} from "./webSearchProvider.js";
+
 export type WebSearchResult = {
   title: string;
   url: string;
@@ -8,7 +15,9 @@ export type WebSearchResult = {
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
-type SearchWebOptions = {
+export type SearchWebOptions = {
+  provider?: WebSearchProviderProfile;
+  /** Backward-compatible call seam; new callers should pass provider. */
   tavilyApiKey?: string;
   fetcher?: FetchLike;
 };
@@ -23,20 +32,68 @@ type TavilySearchResponse = {
   }>;
 };
 
+type BraveSearchResponse = {
+  web?: {
+    results?: Array<{
+      title?: string;
+      url?: string;
+      description?: string;
+      page_age?: string;
+    }>;
+  };
+};
+
+type ExaSearchResponse = {
+  results?: Array<{
+    title?: string;
+    url?: string;
+    text?: string;
+    highlights?: string[];
+    publishedDate?: string;
+    score?: number;
+  }>;
+};
+
+type SerperSearchResponse = {
+  organic?: Array<{
+    title?: string;
+    link?: string;
+    snippet?: string;
+    date?: string;
+  }>;
+};
+
 const WEB_SEARCH_TIMEOUT_MS = 15_000;
 const MAX_WEB_SEARCH_BODY_BYTES = 256 * 1024;
 
 export async function searchWeb(query: string, maxResults: number, options: SearchWebOptions = {}): Promise<WebSearchResult[]> {
   const fetcher = options.fetcher ?? fetch;
-  if (options.tavilyApiKey?.trim()) {
-    return searchTavily(query, maxResults, options.tavilyApiKey.trim(), fetcher);
+  const provider =
+    options.provider ??
+    (options.tavilyApiKey?.trim()
+      ? { ...defaultWebSearchProvider("tavily"), apiKey: options.tavilyApiKey.trim() }
+      : defaultWebSearchProvider("bing"));
+  const apiKey = provider.apiKey?.trim();
+  if (webSearchProviderRequiresApiKey(provider.kind) && !apiKey) {
+    throw new Error(`${webSearchProviderLabel(provider.kind)} API key is not configured.`);
   }
 
-  return searchBingRss(query, maxResults, fetcher);
+  switch (provider.kind) {
+    case "tavily":
+      return searchTavily(query, maxResults, provider.baseUrl, apiKey!, fetcher);
+    case "brave":
+      return searchBrave(query, maxResults, provider.baseUrl, apiKey!, fetcher);
+    case "exa":
+      return searchExa(query, maxResults, provider.baseUrl, apiKey!, fetcher);
+    case "serper":
+      return searchSerper(query, maxResults, provider.baseUrl, apiKey!, fetcher);
+    case "bing":
+      return searchBingRss(query, maxResults, provider.baseUrl, fetcher);
+  }
 }
 
-async function searchTavily(query: string, maxResults: number, apiKey: string, fetcher: FetchLike) {
-  const response = await fetchWithTimeout(fetcher, "https://api.tavily.com/search", {
+async function searchTavily(query: string, maxResults: number, endpoint: string, apiKey: string, fetcher: FetchLike) {
+  const response = await fetchWithTimeout(fetcher, endpoint, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -57,7 +114,7 @@ async function searchTavily(query: string, maxResults: number, apiKey: string, f
 
   if (!response.ok) {
     const body = await readBoundedResponseText(response);
-    throw new Error(`Tavily search request failed (${response.status}): ${body}`);
+    throw providerRequestError("Tavily", response.status, body);
   }
 
   const json = JSON.parse(await readBoundedResponseText(response)) as TavilySearchResponse;
@@ -73,10 +130,108 @@ async function searchTavily(query: string, maxResults: number, apiKey: string, f
     .slice(0, maxResults);
 }
 
-async function searchBingRss(query: string, maxResults: number, fetcher: FetchLike) {
+async function searchBrave(query: string, maxResults: number, endpoint: string, apiKey: string, fetcher: FetchLike) {
+  const url = new URL(endpoint);
+  url.searchParams.set("q", query);
+  url.searchParams.set("count", String(maxResults));
+
+  const response = await fetchWithTimeout(fetcher, url.toString(), {
+    headers: {
+      Accept: "application/json",
+      "X-Subscription-Token": apiKey,
+      "User-Agent": "arivu/0.1 web_search"
+    }
+  });
+  if (!response.ok) {
+    throw providerRequestError("Brave Search", response.status, await readBoundedResponseText(response));
+  }
+
+  const json = JSON.parse(await readBoundedResponseText(response)) as BraveSearchResponse;
+  return (json.web?.results ?? [])
+    .map((result) => ({
+      title: result.title?.trim() ?? "",
+      url: result.url?.trim() ?? "",
+      snippet: result.description?.trim() ?? "",
+      publishedAt: result.page_age?.trim() || undefined
+    }))
+    .filter((result) => result.title && result.url)
+    .slice(0, maxResults);
+}
+
+async function searchExa(query: string, maxResults: number, endpoint: string, apiKey: string, fetcher: FetchLike) {
+  const response = await fetchWithTimeout(fetcher, endpoint, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": "arivu/0.1 web_search",
+      "x-api-key": apiKey
+    },
+    body: JSON.stringify({
+      query,
+      numResults: maxResults,
+      contents: {
+        highlights: true
+      }
+    })
+  });
+  if (!response.ok) {
+    throw providerRequestError("Exa", response.status, await readBoundedResponseText(response));
+  }
+
+  const json = JSON.parse(await readBoundedResponseText(response)) as ExaSearchResponse;
+  return (json.results ?? [])
+    .map((result) => ({
+      title: result.title?.trim() ?? "",
+      url: result.url?.trim() ?? "",
+      snippet:
+        result.highlights
+          ?.map((highlight) => highlight.trim())
+          .filter(Boolean)
+          .join(" ") ||
+        result.text?.trim() ||
+        "",
+      publishedAt: result.publishedDate?.trim() || undefined,
+      score: result.score
+    }))
+    .filter((result) => result.title && result.url)
+    .slice(0, maxResults);
+}
+
+async function searchSerper(query: string, maxResults: number, endpoint: string, apiKey: string, fetcher: FetchLike) {
+  const response = await fetchWithTimeout(fetcher, endpoint, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": "arivu/0.1 web_search",
+      "X-API-KEY": apiKey
+    },
+    body: JSON.stringify({
+      q: query,
+      num: maxResults
+    })
+  });
+  if (!response.ok) {
+    throw providerRequestError("Serper", response.status, await readBoundedResponseText(response));
+  }
+
+  const json = JSON.parse(await readBoundedResponseText(response)) as SerperSearchResponse;
+  return (json.organic ?? [])
+    .map((result) => ({
+      title: result.title?.trim() ?? "",
+      url: result.link?.trim() ?? "",
+      snippet: result.snippet?.trim() ?? "",
+      publishedAt: result.date?.trim() || undefined
+    }))
+    .filter((result) => result.title && result.url)
+    .slice(0, maxResults);
+}
+
+async function searchBingRss(query: string, maxResults: number, endpoint: string, fetcher: FetchLike) {
   const newsLike = isNewsLikeQuery(query);
   const searchQuery = newsLike ? normalizeNewsQuery(query) : query;
-  const url = new URL(newsLike ? "https://www.bing.com/news/search" : "https://www.bing.com/search");
+  const url = bingSearchUrl(endpoint, newsLike);
   url.searchParams.set("q", searchQuery);
   url.searchParams.set("format", "rss");
 
@@ -93,6 +248,18 @@ async function searchBingRss(query: string, maxResults: number, fetcher: FetchLi
 
   const body = await readBoundedResponseText(response);
   return parseBingRssResults(body).slice(0, maxResults);
+}
+
+function bingSearchUrl(endpoint: string, newsLike: boolean) {
+  const url = new URL(endpoint);
+  if (newsLike && /(^|\.)bing\.com$/i.test(url.hostname) && url.pathname.replace(/\/+$/, "") === "/search") {
+    url.pathname = "/news/search";
+  }
+  return url;
+}
+
+function providerRequestError(provider: string, status: number, body: string) {
+  return new Error(`${provider} search request failed (${status}): ${body}`);
 }
 
 export function formatWebSearchResults(query: string, results: WebSearchResult[]) {

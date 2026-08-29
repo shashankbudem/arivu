@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Agent } from "../src/agent/Agent.js";
 import type { ChatContent } from "../src/agent/content.js";
+import { contextMessagesForSession } from "../src/agent/contextCompaction.js";
 import { AgentRunAbortedError } from "../src/agent/types.js";
 import type { AgentRunEvent, AgentSession, ChatClient, ChatMessage, ChatRequest, ChatResponse, ChatUsage } from "../src/agent/types.js";
 import { createAgentTaskRun } from "../src/agent/taskRuns.js";
@@ -59,6 +60,52 @@ describe("agent", () => {
     const result = await agent.run("summarize");
     expect(result.output).toBe("The readme says Fixture.");
     expect(result.session.messages.some((message) => message.role === "tool")).toBe(true);
+    for (const message of result.session.messages.filter((message) => message.role === "user" || message.role === "assistant")) {
+      expect(message.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    }
+  });
+
+  it("continues from a safe turn boundary when a steering message arrives during a final response", async () => {
+    const client = new ScriptedClient([
+      { message: { role: "assistant", content: "Initial answer." } },
+      { message: { role: "assistant", content: "Updated answer with the new direction." } }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir
+    });
+    const steeringMessage: ChatMessage = {
+      role: "user",
+      content: "Also include the migration risk.",
+      createdAt: "2026-01-01T00:00:30.000Z"
+    };
+    let steeringChecks = 0;
+    const onSteeringMessagesApplied = vi.fn();
+
+    const result = await agent.run("Review this change.", {
+      takeSteeringMessages: () => {
+        steeringChecks += 1;
+        return steeringChecks === 2 ? [steeringMessage] : [];
+      },
+      onSteeringMessagesApplied
+    });
+
+    expect(result.output).toBe("Updated answer with the new direction.");
+    expect(client.requests).toHaveLength(2);
+    expect(client.requests[1]?.messages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: "user", content: "Also include the migration risk." })])
+    );
+    expect(
+      result.session.messages.filter((message) => message.role !== "system").map((message) => [message.role, message.content])
+    ).toEqual([
+      ["user", "Review this change."],
+      ["assistant", "Initial answer."],
+      ["user", "Also include the migration risk."],
+      ["assistant", "Updated answer with the new direction."]
+    ]);
+    expect(onSteeringMessagesApplied).toHaveBeenCalledOnce();
+    expect(onSteeringMessagesApplied).toHaveBeenCalledWith([steeringMessage]);
   });
 
   it("rejects a premature no-tool final in a multi-TODO browser run", async () => {
@@ -120,6 +167,94 @@ describe("agent", () => {
     expect(retryRequest).toContain("previous no-tool reply was rejected");
     expect(retryRequest).toContain("TODO 2");
     expect(retryRequest).toContain("Original checklist excerpts");
+  });
+
+  it("inherits the browser checklist on Continue and rejects future-tense narration as a final", async () => {
+    const session = createTestSession();
+    session.messages.push(
+      {
+        role: "user",
+        content: ["TODO 1: Create and verify the catalog item.", "TODO 2: Add and verify the remaining checkbox."].join("\n")
+      },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "previous_browser", name: "browser_task", arguments: { instruction: "Create TODO 1." } }]
+      },
+      {
+        role: "tool",
+        toolCallId: "previous_browser",
+        name: "browser_task",
+        content: JSON.stringify({ success: true, data: "TODO 1 created.", stepCount: 3 })
+      }
+    );
+    const client = new ScriptedClient([
+      { message: { role: "assistant", content: "Let me create the remaining checkbox now." } },
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "remaining_browser", name: "browser_task", arguments: { instruction: "Create and verify TODO 2." } }]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: ["TODO 1: complete — catalog item verified.", "TODO 2: complete — checkbox verified."].join("\n")
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted"),
+      cwd: tempDir,
+      session,
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    const result = await agent.run("Continue");
+
+    expect(result.output).toContain("TODO 2: complete");
+    expect(client.requests).toHaveLength(3);
+    const firstRequest = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    const correctiveRequest = client.requests[1]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(firstRequest).toContain("Original browser completion gate: TODO 1, TODO 2");
+    expect(correctiveRequest).toContain("only announced a future action");
+    expect(result.session.messages.some((message) => message.content === "Let me create the remaining checkbox now.")).toBe(false);
+  });
+
+  it("accepts a completion line even when an earlier line marks the same TODO in progress", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "todo_1", name: "browser_task", arguments: { instruction: "Create and verify the item.", mode: "background" } }]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          // The first line mentioning TODO 1 is "in progress"; a later line completes it. The gate
+          // must scan every matching line, not just the first, or it would reject this valid final.
+          content: ["TODO 1: in progress — filling the form", "TODO 1: complete — verified the created item"].join("\n")
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted"),
+      cwd: tempDir,
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    const result = await agent.run("TODO 1: Create the catalog item and verify it.");
+
+    // Accepted on the first final (no completion-retry), so exactly two model requests were made.
+    expect(result.output).toContain("TODO 1: complete");
+    expect(client.requests.length).toBe(2);
   });
 
   it("advertises global skills and attaches explicitly requested skills to the model", async () => {
@@ -265,7 +400,7 @@ describe("agent", () => {
     expect(toolNames).not.toContain("web_search");
   });
 
-  it("auto-summarizes an oversized transcript before the next step and remaps task-run indexes", async () => {
+  it("auto-summarizes an oversized working context without changing transcript history or task-run indexes", async () => {
     const now = new Date().toISOString();
     const filler = (marker: string) => `${marker} ${"x".repeat(3_000)}`;
     const messages: ChatMessage[] = [];
@@ -307,14 +442,16 @@ describe("agent", () => {
     const stepText = client.requests[1]?.messages.map((message) => String(message.content)).join("\n") ?? "";
     expect(stepText).toContain("SUMMARY-BRIEF");
     expect(stepText).not.toContain("early-user-0");
-    const summaryIndex = session.messages.findIndex(
+    const summary = session.contextCompaction?.messages.find(
       (message) => message.role === "system" && String(message.content).startsWith("Conversation summary (model-generated)")
     );
-    expect(summaryIndex).toBeGreaterThanOrEqual(0);
-    // The early run's user message was folded into the summary; the recent run's survived by reference.
-    expect(earlyRun.userMessageIndex).toBe(summaryIndex);
+    expect(String(summary?.content)).toContain("SUMMARY-BRIEF");
+    // Both task runs still anchor the canonical transcript; compaction only changes model input.
+    expect(session.messages[earlyRun.userMessageIndex]?.role).toBe("user");
+    expect(String(session.messages[earlyRun.userMessageIndex]?.content)).toContain("early-user-0");
     expect(recentRun.userMessageIndex).toBe(session.messages.indexOf(lastSeededUserMessage));
     expect(session.messages.indexOf(lastSeededUserMessage)).toBeGreaterThanOrEqual(0);
+    expect(session.messages.some((message) => String(message.content).includes("early-answer-0"))).toBe(true);
   });
 
   it("falls back to transient request compaction when the auto-summary call times out", async () => {
@@ -403,6 +540,89 @@ describe("agent", () => {
     expect(result.session.messages.some((message) => message.role === "tool")).toBe(true);
   });
 
+  it("waits before a second normal request without delaying the final response", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read", arguments: { path: "README.md" } }]
+        }
+      },
+      { message: { role: "assistant", content: "Done." } }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      minStepIntervalMs: 120
+    });
+
+    const result = await agent.run("summarize");
+    const completedAt = Date.now();
+
+    expect(result.output).toBe("Done.");
+    expect(client.requestTimes).toHaveLength(2);
+    expect(client.requestTimes[1]! - client.requestTimes[0]!).toBeGreaterThanOrEqual(100);
+    expect(completedAt - client.requestTimes[1]!).toBeLessThan(90);
+  });
+
+  it("disables the main-request throttle when minStepIntervalMs is zero", async () => {
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read", arguments: { path: "README.md" } }]
+        }
+      },
+      { message: { role: "assistant", content: "Done." } }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      minStepIntervalMs: 0
+    });
+
+    await agent.run("summarize");
+
+    expect(client.requestTimes).toHaveLength(2);
+    expect(client.requestTimes[1]! - client.requestTimes[0]!).toBeLessThan(100);
+  });
+
+  it("aborts promptly while waiting before the next normal request", async () => {
+    const controller = new AbortController();
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read", arguments: { path: "README.md" } }]
+        }
+      },
+      { message: { role: "assistant", content: "Done." } }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      minStepIntervalMs: 150_000
+    });
+
+    const runPromise = agent.run("summarize", { signal: controller.signal });
+    for (let index = 0; index < 200 && client.requests.length < 1; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const abortedAt = Date.now();
+    controller.abort();
+
+    await expect(runPromise).rejects.toThrow(AgentRunAbortedError);
+    expect(Date.now() - abortedAt).toBeLessThan(500);
+    expect(client.requests).toHaveLength(1);
+  });
+
   it("answers from existing web results instead of offering repeated web searches", async () => {
     vi.stubGlobal(
       "fetch",
@@ -458,9 +678,8 @@ describe("agent", () => {
     expect(secondRequestMessages).toContain("You already have web_search results");
   });
 
-  it("rolls back unsaved messages when a run fails", async () => {
+  it("preserves read-only progress and a recovery note when a later model request fails", async () => {
     const session = createTestSession();
-    const originalMessages = structuredClone(session.messages);
     const client = new ScriptedClient([
       {
         message: {
@@ -479,7 +698,203 @@ describe("agent", () => {
 
     await expect(agent.run("summarize")).rejects.toThrow("No scripted response.");
 
-    expect(session.messages).toEqual(originalMessages);
+    expect(session.messages.some((message) => message.role === "user" && message.content === "summarize")).toBe(true);
+    expect(session.messages.some((message) => message.role === "tool" && message.toolCallId === "call_1")).toBe(true);
+    expect(
+      session.messages.some(
+        (message) =>
+          message.role === "system" && String(message.content).includes("Run recovery note: The immediately preceding agent run failed")
+      )
+    ).toBe(true);
+  });
+
+  it("keeps the transcript when a run fails after a side-effecting tool already ran", async () => {
+    const session = createTestSession();
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "write1", name: "write_file", arguments: { path: "kept.txt", content: "kept", mode: "create" } }]
+        }
+      }
+      // No second response: the next model request throws mid-run, AFTER the write happened.
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted", async () => true),
+      cwd: tempDir,
+      session
+    });
+
+    await expect(agent.run("write the file")).rejects.toThrow("No scripted response.");
+
+    // The write actually happened; a rollback would have erased its record, so a retry would redo it.
+    await expect(readFile(path.join(tempDir, "kept.txt"), "utf8")).resolves.toBe("kept");
+    const assistant = session.messages.find((message) => message.role === "assistant" && message.toolCalls?.length);
+    expect(assistant?.toolCalls?.[0]?.id).toBe("write1");
+    // Transcript stays a valid tool protocol: the assistant's tool call has a matching result.
+    const toolResult = session.messages.find((message) => message.role === "tool" && message.toolCallId === "write1");
+    expect(toolResult).toBeDefined();
+    expect(session.messages.filter((message) => message.role === "user").some((message) => message.content === "write the file")).toBe(
+      true
+    );
+    expect(session.messages.at(-1)?.role).toBe("system");
+    expect(String(session.messages.at(-1)?.content)).toContain("durable partial-work evidence");
+  });
+
+  it("preserves the original browser TODO requirements in the recovery note", async () => {
+    const session = createTestSession();
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "todo_browser", name: "browser_task", arguments: { instruction: "Create TODO 1." } }]
+        }
+      }
+      // The next model request fails after browser work completed, matching the long-session timeout.
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted"),
+      cwd: tempDir,
+      session,
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    await expect(
+      agent.run(["TODO 1: Create Laptop Type with four exact choices.", "TODO 2: Create the Mandatory checkbox at order 20."].join("\n"))
+    ).rejects.toThrow("No scripted response.");
+
+    const note = String(session.messages.find((message) => String(message.content).startsWith("Run recovery note:"))?.content);
+    expect(note).toContain("Original browser completion scope remains: TODO 1, TODO 2");
+    expect(note).toContain("Create Laptop Type with four exact choices");
+    expect(note).toContain("Create the Mandatory checkbox at order 20");
+  });
+
+  it("persists a completed tool result before an event-recorder failure, and stays sendable", async () => {
+    const session = createTestSession();
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "write1", name: "write_file", arguments: { path: "dangles.txt", content: "hi", mode: "create" } }]
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted", async () => true),
+      cwd: tempDir,
+      session
+    });
+
+    // Throw while Desktop is recording the result event. The transcript result must already exist,
+    // because that same event is the persistence boundary used by the app.
+    await expect(
+      agent.run("write the file", {
+        onEvent: async (event) => {
+          if (event.type === "tool_result" && event.name === "write_file") {
+            throw new Error("event sink exploded");
+          }
+        }
+      })
+    ).rejects.toThrow("event sink exploded");
+
+    await expect(readFile(path.join(tempDir, "dangles.txt"), "utf8")).resolves.toBe("hi");
+    const toolResult = session.messages.find((message) => message.role === "tool" && message.toolCallId === "write1");
+    expect(toolResult).toBeDefined();
+    expect(String(toolResult?.content)).not.toContain("did not finish");
+
+    // Prove the kept transcript is actually sendable: a follow-up run must not hit a protocol error.
+    const followUp = new ScriptedClient([{ message: { role: "assistant", content: "Resumed cleanly." } }]);
+    const resumeAgent = new Agent({
+      client: followUp,
+      approvals: new ApprovalManager("trusted", async () => true),
+      cwd: tempDir,
+      session
+    });
+    expect(session.messages.some((message) => String(message.content).startsWith("Run recovery note:"))).toBe(true);
+    const resumed = await resumeAgent.continue();
+    expect(resumed.output).toBe("Resumed cleanly.");
+    expect(session.messages.some((message) => String(message.content).startsWith("Run recovery note:"))).toBe(false);
+    const sentMessages = followUp.requests[0]?.messages ?? [];
+    const sentAssistant = sentMessages.find((message) => message.role === "assistant" && message.toolCalls?.length);
+    const sentResultIds = new Set(sentMessages.filter((message) => message.role === "tool").map((message) => message.toolCallId));
+    for (const call of sentAssistant?.toolCalls ?? []) {
+      expect(sentResultIds.has(call.id)).toBe(true);
+    }
+  });
+
+  it("records the browser result when Stop interrupts the tool itself", async () => {
+    const controller = new AbortController();
+    const session = createTestSession();
+    const browser = createFakeBrowser();
+    let browserTaskStarted = false;
+    browser.task = async () => {
+      browserTaskStarted = true;
+      controller.abort();
+      throw new AgentRunAbortedError();
+    };
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "interrupted_browser", name: "browser_task", arguments: { instruction: "Create the record." } }]
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted"),
+      cwd: tempDir,
+      session,
+      browser,
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    await expect(agent.run("Create the record", { signal: controller.signal })).rejects.toThrow(AgentRunAbortedError);
+
+    expect(browserTaskStarted).toBe(true);
+    const interrupted = session.messages.find((message) => message.role === "tool" && message.toolCallId === "interrupted_browser");
+    expect(String(interrupted?.content)).toContain("Error: Run stopped.");
+    expect(String(session.messages.at(-1)?.content)).toContain("was stopped by the user");
+  });
+
+  it("repairs a tool call whose dispatch event is interrupted before execution", async () => {
+    const session = createTestSession();
+    const client = new ScriptedClient([
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "never_dispatched", name: "read", arguments: { path: "README.md" } }]
+        }
+      }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    await expect(
+      agent.run("read the file", {
+        onEvent: (event) => {
+          if (event.type === "tool_call") {
+            throw new AgentRunAbortedError();
+          }
+        }
+      })
+    ).rejects.toThrow(AgentRunAbortedError);
+
+    const repaired = session.messages.find((message) => message.role === "tool" && message.toolCallId === "never_dispatched");
+    expect(String(repaired?.content)).toContain("did not finish");
   });
 
   it("continues from a pre-saved user prompt without duplicating it", async () => {
@@ -548,7 +963,7 @@ describe("agent", () => {
     expect(session.taskRuns?.[0]?.userMessageIndex).toBe(1);
   });
 
-  it("restores task-run user message indexes when system-prompt insertion rolls back", async () => {
+  it("keeps task-run user message indexes aligned when a failed turn is preserved", async () => {
     const now = new Date().toISOString();
     const session: AgentSession = {
       id: "failed-pre-saved-task-run-session",
@@ -577,8 +992,44 @@ describe("agent", () => {
 
     await expect(agent.run("summarize", { promptAlreadyInSession: true })).rejects.toThrow("empty assistant response");
 
-    expect(session.messages).toEqual([{ role: "user", content: "summarize" }]);
-    expect(session.taskRuns?.[0]?.userMessageIndex).toBe(0);
+    expect(session.messages.map((message) => message.role)).toEqual(["system", "user", "system"]);
+    expect(String(session.messages.at(-1)?.content)).toContain("Run recovery note:");
+    expect(session.taskRuns?.[0]?.userMessageIndex).toBe(1);
+    expect(session.messages[session.taskRuns?.[0]?.userMessageIndex ?? -1]).toEqual({ role: "user", content: "summarize" });
+  });
+
+  it("removes resolved recovery guidance without shifting the continuation task-run anchor", async () => {
+    const now = new Date().toISOString();
+    const session: AgentSession = {
+      id: "resolved-recovery-session",
+      cwd: tempDir,
+      projectRoot: tempDir,
+      trustMode: "readonly",
+      messages: [
+        { role: "user", content: "Original task" },
+        {
+          role: "system",
+          content: "Run recovery note: The immediately preceding agent run failed before it finished.\nResume only unfinished work."
+        },
+        { role: "user", content: "Continue" }
+      ],
+      taskRuns: [createAgentTaskRun({ userMessageIndex: 2, prompt: "Continue", now })],
+      createdAt: now,
+      updatedAt: now
+    };
+    const client = new ScriptedClient([{ message: { role: "assistant", content: "Continuation completed." } }]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      session
+    });
+
+    await agent.run("Continue", { promptAlreadyInSession: true });
+
+    expect(session.messages.some((message) => String(message.content).startsWith("Run recovery note:"))).toBe(false);
+    const userMessageIndex = session.taskRuns?.[0]?.userMessageIndex ?? -1;
+    expect(session.messages[userMessageIndex]).toEqual({ role: "user", content: "Continue" });
   });
 
   it("keeps task-run user message indexes aligned when loading skills before a saved prompt", async () => {
@@ -644,7 +1095,8 @@ describe("agent", () => {
 
     expect(result.output).toBe("Continued work.");
     expect(session.messages.filter((message) => message.role === "user")).toHaveLength(1);
-    expect(session.messages.at(-1)).toEqual({ role: "assistant", content: "Continued work." });
+    expect(session.messages.at(-1)).toMatchObject({ role: "assistant", content: "Continued work." });
+    expect(session.messages.at(-1)?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it("keeps the base Arivu system prompt when loop instructions are already present", async () => {
@@ -785,6 +1237,28 @@ describe("agent", () => {
     expect(String(baseMessages[0]?.content)).toContain('Never ask the browser agent to click the "Question Choices" menu');
     expect(String(baseMessages[0]?.content)).toContain("For a variable inside an existing ServiceNow Multi-Row Variable Set");
     expect(String(baseMessages[0]?.content)).not.toContain("Old appended sentence");
+  });
+
+  it("advertises direct Browser Use tools and terminal-specific browser guidance", async () => {
+    const client = new ScriptedClient([{ message: { role: "assistant", content: "Ready." } }]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir,
+      browser: createFakeBrowser(),
+      manualBrowserTools: true
+    });
+
+    await agent.run("say hello");
+
+    const names = client.requests[0]?.tools.map((tool) => tool.name) ?? [];
+    expect(names).toContain("browser_snapshot");
+    expect(names).toContain("browser_click");
+    expect(names).toContain("browser_type");
+    expect(names).not.toContain("browser_task");
+    const requestText = client.requests[0]?.messages.map((message) => String(message.content)).join("\n") ?? "";
+    expect(requestText).toContain("Browser Use direct browser primitives");
+    expect(requestText).toContain("browser_task is unavailable in this terminal backend");
   });
 
   it("ignores tool calls that were not advertised for the current step", async () => {
@@ -1067,6 +1541,129 @@ describe("agent", () => {
     expect(result.session.messages.filter((message) => message.role === "assistant").length).toBe(1);
   });
 
+  it("steers the model after it repeats a tool call that keeps failing with the identical error", async () => {
+    // The benchmarked failure mode: browser_task re-issued with direct-URL instructions — a
+    // different URL each time, but the identical guard rejection every time.
+    const rejectedCall = (id: string, url: string) => ({
+      id,
+      name: "browser_task",
+      arguments: { instruction: `Navigate to ${url} and continue the work there.`, mode: "background" }
+    });
+    const client = new ScriptedClient([
+      {
+        message: { role: "assistant", content: "", toolCalls: [rejectedCall("url_1", "https://dev425223.service-now.com/sc_cat_item.do")] }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [rejectedCall("url_2", "https://dev425223.service-now.com/item_option_new.do")]
+        }
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [rejectedCall("url_3", "https://dev425223.service-now.com/question_choice.do")]
+        }
+      },
+      { message: { role: "assistant", content: "Switching to browser_open instead." } },
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "open_1", name: "browser_open", arguments: { url: "https://dev425223.service-now.com/" } }]
+        }
+      },
+      { message: { role: "assistant", content: "Opened the ServiceNow home page with the corrected approach." } }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("trusted"),
+      cwd: tempDir,
+      browser: createFakeBrowser(),
+      browserTaskModel: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1" }
+    });
+
+    const result = await agent.run("Create the catalog item and its variables.");
+
+    const toolResults = result.session.messages
+      .filter((message) => message.role === "tool" && message.name === "browser_task")
+      .map((message) => String(message.content));
+    expect(toolResults).toHaveLength(3);
+    expect(toolResults.every((content) => content.startsWith("Error: browser_task cannot navigate"))).toBe(true);
+    // The first failure passes through untouched; the identical repeats carry an inline notice
+    // even though each call used a different URL.
+    expect(toolResults[0]).not.toContain("Repeated failure:");
+    expect(toolResults[1]).toContain("Repeated failure: browser_task has returned this exact error 2 times");
+    expect(toolResults[2]).toContain("3 times");
+    // From the step after the second identical failure, every request carries the transient
+    // corrective instruction; earlier requests do not.
+    const systemText = (index: number) =>
+      client.requests[index]?.messages
+        .filter((message) => message.role === "system")
+        .map((message) => String(message.content))
+        .join("\n") ?? "";
+    expect(systemText(0)).not.toContain("Repeated failing tool calls");
+    expect(systemText(1)).not.toContain("Repeated failing tool calls");
+    expect(systemText(2)).toContain("Repeated failing tool calls detected in this run");
+    expect(systemText(2)).toContain("browser_task failed 2 times with the identical error");
+    expect(systemText(3)).toContain("browser_task failed 3 times with the identical error");
+    expect(systemText(4)).toContain("previous no-tool reply only announced a future action");
+    // The instruction is transient: it rides the request, never the saved session.
+    expect(result.session.messages.some((message) => String(message.content).includes("Repeated failing tool calls"))).toBe(false);
+  });
+
+  it("does not flag repeated failures when the errors differ", async () => {
+    const client = new ScriptedClient([
+      { message: { role: "assistant", content: "", toolCalls: [{ id: "miss_a", name: "read", arguments: { path: "missing-a.txt" } }] } },
+      { message: { role: "assistant", content: "", toolCalls: [{ id: "miss_b", name: "read", arguments: { path: "missing-b.txt" } }] } },
+      { message: { role: "assistant", content: "Neither file exists." } }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir
+    });
+
+    const result = await agent.run("read both candidate files");
+
+    const toolResults = result.session.messages.filter((message) => message.role === "tool").map((message) => String(message.content));
+    expect(toolResults).toHaveLength(2);
+    expect(toolResults.every((content) => content.startsWith("Error:"))).toBe(true);
+    expect(toolResults.some((content) => content.includes("Repeated failure:"))).toBe(false);
+    expect(
+      client.requests.some((request) => request.messages.some((message) => String(message.content).includes("Repeated failing tool calls")))
+    ).toBe(false);
+  });
+
+  it("counts identical failures cumulatively across the run, not just consecutively", async () => {
+    const client = new ScriptedClient([
+      { message: { role: "assistant", content: "", toolCalls: [{ id: "miss_1", name: "read", arguments: { path: "missing.txt" } }] } },
+      { message: { role: "assistant", content: "", toolCalls: [{ id: "ok_1", name: "read", arguments: { path: "README.md" } }] } },
+      { message: { role: "assistant", content: "", toolCalls: [{ id: "miss_2", name: "read", arguments: { path: "missing.txt" } }] } },
+      { message: { role: "assistant", content: "Giving up on missing.txt." } }
+    ]);
+    const agent = new Agent({
+      client,
+      approvals: new ApprovalManager("readonly", async () => false),
+      cwd: tempDir
+    });
+
+    const result = await agent.run("compare the two files");
+
+    const toolResults = result.session.messages.filter((message) => message.role === "tool").map((message) => String(message.content));
+    expect(toolResults).toHaveLength(3);
+    // The successful read in between does not reset the count for the failing one.
+    expect(toolResults[2]).toContain("Repeated failure: read has returned this exact error 2 times");
+    const finalRequestText =
+      client.requests[3]?.messages
+        .filter((message) => message.role === "system")
+        .map((message) => String(message.content))
+        .join("\n") ?? "";
+    expect(finalRequestText).toContain("read failed 2 times with the identical error");
+  });
+
   it("retries a genuinely empty assistant response up to 3 times, 2.5 minutes apart, before giving up", async () => {
     const now = new Date().toISOString();
     const session: AgentSession = {
@@ -1078,7 +1675,6 @@ describe("agent", () => {
       createdAt: now,
       updatedAt: now
     };
-    const originalMessages = structuredClone(session.messages);
     const emptyResponse = { message: { role: "assistant" as const, content: "   " } };
     const client = new ScriptedClient([emptyResponse, emptyResponse, emptyResponse, emptyResponse]);
     const agent = new Agent({
@@ -1095,8 +1691,11 @@ describe("agent", () => {
     await expect(agent.run("summarize")).rejects.toThrow("empty assistant response 4 times in a row");
 
     expect(client.requests.length).toBe(4);
-    // Every empty turn was popped on retry; nothing about the failed attempts remains.
-    expect(session.messages).toEqual(originalMessages);
+    // Empty assistant shells are dropped, but the user's turn and a durable failure explanation
+    // remain so a later Continue is not detached from the request that failed.
+    expect(session.messages.filter((message) => message.role === "assistant")).toHaveLength(0);
+    expect(session.messages.some((message) => message.role === "user" && message.content === "summarize")).toBe(true);
+    expect(String(session.messages.at(-1)?.content)).toContain("empty assistant response 4 times in a row");
   });
 
   it("recovers if a later attempt returns a real response after an empty one", async () => {
@@ -1393,10 +1992,9 @@ describe("agent", () => {
     expect(session.messages).toEqual(originalMessages);
   });
 
-  it("stops mid-run when the signal aborts and rolls the session back", async () => {
+  it("stops mid-run while preserving completed progress for Continue", async () => {
     const controller = new AbortController();
     const session = createTestSession();
-    const originalMessages = structuredClone(session.messages);
     const client = new ScriptedClient([
       {
         message: {
@@ -1426,7 +2024,10 @@ describe("agent", () => {
     ).rejects.toThrow(AgentRunAbortedError);
 
     expect(client.requests).toHaveLength(1);
-    expect(session.messages).toEqual(originalMessages);
+    expect(session.messages.some((message) => message.role === "user" && message.content === "summarize")).toBe(true);
+    expect(session.messages.some((message) => message.role === "tool" && message.toolCallId === "call_1")).toBe(true);
+    expect(String(session.messages.at(-1)?.content)).toContain("was stopped by the user");
+    expect(String(session.messages.at(-1)?.content)).toContain("resume only unfinished work");
   });
 
   it("reports provider token usage to onUsage", async () => {
@@ -1454,6 +2055,7 @@ describe("agent", () => {
 
   it("summarizes older context with the model and keeps recent turns verbatim", async () => {
     const session = sessionWithManyTurns();
+    const transcriptBefore = structuredClone(session.messages);
     const client = new ScriptedClient([{ message: { role: "assistant", content: "- Goal: ship feature X\n- Touched: a.ts" } }]);
     const agent = new Agent({
       client,
@@ -1466,12 +2068,14 @@ describe("agent", () => {
 
     expect(result.source).toBe("model");
     expect(result.compacted).toBe(true);
-    const summary = session.messages.find(
+    const summary = session.contextCompaction?.messages.find(
       (message) => message.role === "system" && String(message.content).includes("Conversation summary (model-generated)")
     );
     expect(String(summary?.content)).toContain("Goal: ship feature X");
     expect(session.messages.some((message) => String(message.content) === "turn 11")).toBe(true);
-    expect(session.messages.some((message) => String(message.content) === "turn 0")).toBe(false);
+    expect(session.messages.some((message) => String(message.content) === "turn 0")).toBe(true);
+    expect(session.messages).toEqual(transcriptBefore);
+    expect(contextMessagesForSession(session).some((message) => String(message.content) === "turn 0")).toBe(false);
   });
 
   it("falls back to deterministic compaction when the model summary fails", async () => {
@@ -1488,7 +2092,10 @@ describe("agent", () => {
 
     expect(result.source).toBe("deterministic");
     expect(result.compacted).toBe(true);
-    expect(session.messages.some((message) => String(message.content).startsWith("Context compacted locally"))).toBe(true);
+    expect(session.messages.some((message) => String(message.content) === "turn 0")).toBe(true);
+    expect(session.contextCompaction?.messages.some((message) => String(message.content).startsWith("Context compacted locally"))).toBe(
+      true
+    );
   });
 
   it("saves a visible assistant message when max tool depth is reached", async () => {
@@ -1513,18 +2120,21 @@ describe("agent", () => {
     expect(result.output).toContain("Stopped after reaching the maximum tool-call depth");
     expect(result.output).toContain("500 steps");
     expect(result.output).toContain("Continue to resume");
-    expect(lastMessage).toEqual({ role: "assistant", content: result.output });
+    expect(lastMessage).toMatchObject({ role: "assistant", content: result.output });
+    expect(lastMessage?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });
 
 class ScriptedClient implements ChatClient {
   private index = 0;
   readonly requests: ChatRequest[] = [];
+  readonly requestTimes: number[] = [];
 
   constructor(private readonly responses: ChatResponse[]) {}
 
   async complete(request: ChatRequest): Promise<ChatResponse> {
     this.requests.push(request);
+    this.requestTimes.push(Date.now());
     const response = this.responses[this.index];
     this.index += 1;
     if (!response) {

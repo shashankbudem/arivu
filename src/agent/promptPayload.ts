@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { textPart, type ChatContent, type ChatContentPart, type ImageDetail } from "./content.js";
+import { MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from "./attachmentPolicy.js";
 
-export const MAX_PROMPT_IMAGE_ATTACHMENTS = 6;
-export const MAX_PROMPT_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_PROMPT_IMAGE_ATTACHMENTS = MAX_IMAGE_ATTACHMENTS;
+export const MAX_PROMPT_IMAGE_BYTES = MAX_IMAGE_BYTES;
 
 export type PromptImageAttachment = {
   id: string;

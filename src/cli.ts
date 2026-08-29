@@ -2,7 +2,14 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { Agent } from "./agent/Agent.js";
-import { COMPACT_RECENT_MESSAGE_COUNT, compactSessionMessages } from "./agent/contextCompaction.js";
+import { randomUUID } from "node:crypto";
+import { BrowserUseCliController } from "./browser/browserUseCliController.js";
+import {
+  COMPACT_RECENT_MESSAGE_COUNT,
+  applyContextCompactionCheckpoint,
+  compactSessionMessages,
+  contextMessagesForSession
+} from "./agent/contextCompaction.js";
 import type { AgentSession } from "./agent/types.js";
 import { OpenAICompatibleChatClient } from "./agent/OpenAICompatibleChatClient.js";
 import { fileURLToPath } from "node:url";
@@ -10,6 +17,7 @@ import {
   loadConfig,
   redactConfigForDisplay,
   resolveModelListEndpoint,
+  resolveWebSearchProvider,
   saveConfig,
   workspacePolicyOverridesForRoot,
   workspaceScopeRulesForRoot,
@@ -125,7 +133,7 @@ program
     const now = new Date();
     const recentMessageCount = parsePositiveInteger(options.recent, "Recent message count");
     const entryCharacterLimit = options.entryLimit ? parsePositiveInteger(options.entryLimit, "Entry limit") : undefined;
-    const result = compactSessionMessages(session.messages, {
+    const result = compactSessionMessages(contextMessagesForSession(session), {
       recentMessageCount,
       entryCharacterLimit,
       now
@@ -141,17 +149,19 @@ program
     }
 
     if (!options.dryRun) {
-      await store.save({
+      const compactedSession = {
         ...session,
-        messages: result.messages,
         updatedAt: now.toISOString()
-      });
+      };
+      applyContextCompactionCheckpoint(compactedSession, result, "deterministic", now);
+      await store.save(compactedSession);
     }
 
     console.log(chalk.green(`${options.dryRun ? "Would compact" : "Compacted"} session ${session.id}.`));
     console.log(`Compacted messages: ${result.compactedMessageCount}`);
     console.log(`Kept recent messages: ${result.remainingMessageCount}`);
-    console.log(`Total stored messages after compaction: ${result.messages.length}`);
+    console.log(`Working context messages after compaction: ${result.messages.length}`);
+    console.log(`Full transcript messages preserved: ${session.messages.length}`);
   });
 
 program
@@ -193,7 +203,7 @@ program
 
 program
   .command("doctor")
-  .description("Validate API, model, tool-calling, streaming, and Tavily connectivity.")
+  .description("Validate model and active web-search provider connectivity.")
   .option("--json", "print raw JSON report")
   .action(async (options: DoctorOptions) => {
     const config = await loadConfig();
@@ -408,9 +418,13 @@ async function runOneShot(task: string, config: AppConfig) {
     cwd,
     model: config.model,
     baseUrl: config.baseUrl,
-    tavilyApiKey: config.tavilyApiKey,
+    webSearchProvider: resolveWebSearchProvider(config),
     mcpServers: config.mcpServers,
     scopePolicyRules,
+    browser: new BrowserUseCliController({ sessionId: `cli-${randomUUID()}` }),
+    manualBrowserTools: true,
+    customInstructions: config.customSystemPrompt,
+    minStepIntervalMs: config.chatModelRequestDelayMs,
     // Interactive terminal sessions can answer structured ask_user questions inline.
     elicit: terminalElicit,
     // Per-model window from the catalog, capped by any hand-entered provider value.
@@ -433,7 +447,7 @@ function validateRuntimeConfig(config: Omit<AppConfig, "trustMode"> & { trustMod
 }
 
 function isTrustMode(value: string): value is AppConfig["trustMode"] {
-  return ["ask", "readonly", "trusted"].includes(value);
+  return ["ask", "readonly", "trusted", "bypass"].includes(value);
 }
 
 function isConfigKey(key: string): key is ConfigKey {

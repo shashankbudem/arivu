@@ -13,9 +13,19 @@ export type ToolCall = {
 export type ChatMessage = {
   role: ChatRole;
   content: ChatContent;
+  /** ISO-8601 instant when this transcript record was created. Kept out of provider payloads. */
+  createdAt?: string;
   name?: string;
   toolCallId?: string;
   toolCalls?: ToolCall[];
+};
+
+export type QueuedPrompt = {
+  id: string;
+  content: ChatContent;
+  skillNames?: string[];
+  state: "queued" | "steering";
+  createdAt: string;
 };
 
 export type ToolSchema = {
@@ -112,6 +122,10 @@ export type AgentRunOptions = {
    * model step, so user toggles apply mid-run — from the next step, not just the next prompt.
    */
   disabledToolNames?: string[] | (() => string[] | Promise<string[]>);
+  /** Drains user messages marked to steer this run at the next safe model boundary. */
+  takeSteeringMessages?: () => ChatMessage[] | Promise<ChatMessage[]>;
+  /** Persists and broadcasts steering messages after they enter the canonical transcript. */
+  onSteeringMessagesApplied?: (messages: ChatMessage[]) => void | Promise<void>;
   /** Aborts the run between steps, cancels the in-flight model request, and terminates running commands. */
   signal?: AbortSignal;
   /** Receives per-run token usage as reported by the provider. */
@@ -630,6 +644,19 @@ export type AgentSession = {
   modelSelectionReason?: string;
   agentLoop?: AgentLoopState;
   taskRuns?: AgentTaskRun[];
+  /**
+   * Reduced, derived context sent to the model after compaction. `messages` remains the
+   * canonical, user-visible transcript and is never replaced by this checkpoint.
+   */
+  contextCompaction?: {
+    version: 1;
+    source: "model" | "deterministic";
+    compactedAt: string;
+    compactedMessageCount: number;
+    sourceNonSystemMessageCount: number;
+    messages: ChatMessage[];
+  };
+  queuedPrompts?: QueuedPrompt[];
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;

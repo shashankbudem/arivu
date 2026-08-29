@@ -13,6 +13,7 @@ export default tseslint.config(
       "dist-desktop/**",
       "node_modules/**",
       "coverage/**",
+      ".claude/worktrees/**",
       "**/*.d.ts",
       "build/**",
       "benchmarks/results/**",

@@ -1,4 +1,8 @@
-export type TrustMode = "ask" | "readonly" | "trusted";
+/**
+ * `ask` and `trusted` are retained as stable persisted values for Manual and Auto.
+ * `bypass` is intentionally explicit: it never opens an approval prompt.
+ */
+export type TrustMode = "ask" | "readonly" | "trusted" | "bypass";
 export type BrowserTargetClass = "background" | "visible" | "local" | "file" | "public";
 
 export type ApprovalAction =

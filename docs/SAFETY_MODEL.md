@@ -2,11 +2,17 @@
 
 Arivu (`arivu`) is allowed to operate on user repositories, so safety is a product feature, not a polish item.
 
-## Trust modes
+## Approval modes
 
-Trust modes are enforced through the capability policy table in `src/permissions/capabilityPolicy.ts`. The table maps harness capabilities to `allow`, `prompt`, or `deny` decisions, and `ApprovalManager` uses those decisions before sensitive tools run.
+Desktop presents three approval modes, backed by the capability policy table in `src/permissions/capabilityPolicy.ts`:
 
-Desktop Settings can save stricter capability overrides for the current workspace root. Overrides can require approval or block enforceable capabilities such as repo reads, writes, commands, network fetches, browser control, MCP calls, and unknown tool activity. Overrides cannot grant `allow` or weaken a built-in `prompt`/`deny` decision. Settings can also save scope rules that block workspace-relative path prefixes for repo reads, direct writes, and patch targets; restrict network tools to an explicit destination-domain allowlist; restrict MCP discovery/calls to named configured servers; and restrict browser actions to target classes such as `background`, `visible`, `local`, `file`, and `public`. Default, review-first, local-only, and locked-down presets fill common workspace policy combinations before the user saves, named local profiles can save/apply reusable policy bundles, `.arivu/workspace-policy.json` can provide a team-shared bundle that must be explicitly applied, and Workspace policy JSON can copy/apply the normalized override and scope-rule bundle. Active scope rules are summarized in Settings and shown on matching Tools drawer rows.
+- **Manual** (`ask`) reviews sensitive actions with the user.
+- **Auto** (`trusted`) lets the agent proceed with routine work and requests approval at review boundaries.
+- **Bypass** (`bypass`) records automatic audit allows without opening approval dialogs.
+
+The table maps harness capabilities to `allow`, `prompt`, or `deny` decisions, and `ApprovalManager` uses those decisions before sensitive tools run.
+
+Desktop Settings can save stricter capability overrides for the current workspace root. Overrides can require approval or block enforceable capabilities such as repo reads, writes, commands, network fetches, browser control, MCP calls, and unknown tool activity. Overrides cannot grant `allow` or weaken a built-in `prompt`/`deny` decision; Bypass intentionally suppresses approval-only overrides, while explicit `deny` rules remain enforced. Settings can also save scope rules that block workspace-relative path prefixes for repo reads, direct writes, and patch targets; restrict network tools to an explicit destination-domain allowlist; restrict MCP discovery/calls to named configured servers; and restrict browser actions to target classes such as `background`, `visible`, `local`, `file`, and `public`. Default, review-first, local-only, and locked-down presets fill common workspace policy combinations before the user saves, named local profiles can save/apply reusable policy bundles, `.arivu/workspace-policy.json` can provide a team-shared bundle that must be explicitly applied, and Workspace policy JSON can copy/apply the normalized override and scope-rule bundle. Active scope rules are summarized in Settings and shown on matching Tools drawer rows.
 
 Desktop task runs persist approval audit records for automatic allows, policy blocks, requested approvals, approvals, and denials. Each approval audit can include a compact action scope, such as the path being read or written, command, network host, browser target, or MCP server/tool. The Activity rail renders those records beside tool calls so restored sessions keep the control-plane decision history and the relevant target. Path, network, MCP server, and browser target-class scopes are enforceable through workspace scope rules today.
 
@@ -84,6 +90,10 @@ Still requires approval:
 
 Browser actions remain allowed by default in `trusted`, but workspace browser-control overrides and browser target-class scope rules can require approval or block them for sensitive workspaces.
 
+### `bypass`
+
+All capabilities are allowed automatically, including commands, network fetches, and MCP calls. No approval dialog is opened, including for destructive actions and workspace overrides that would otherwise require approval. Explicit workspace capability blocks and scope-rule blocks are still enforced, and every automatic allow is retained in the task-run approval audit.
+
 ## Destructive command detection
 
 Detection currently lives in `src/permissions/destructive.ts`.
@@ -133,7 +143,7 @@ Do not commit:
 
 ## Web search safety
 
-`web_search` is an external network tool. Queries are sent to Tavily when configured, or to the fallback Bing/Bing News RSS endpoint when Tavily is unavailable. News-like fallback queries may be normalized to the current month/year before being sent. The tool description instructs the model to keep queries concise and avoid secrets, private code, and personal data.
+`web_search` is an external network tool. Queries are sent to the active Tavily, Brave Search, Exa, Serper, or Bing RSS profile. The approval request names that profile's endpoint, and the browser-task proxy receives the same resolved profile without exposing its API key to page JavaScript. News-like Bing queries may be normalized to the current month/year before being sent. The tool description instructs the model to keep queries concise and avoid secrets, private code, and personal data.
 
 Do not use web search queries for:
 
@@ -194,7 +204,7 @@ Workspace MCP server allowlists filter `mcp_list_tools` discovery to matching co
 Keep tests around:
 
 - config/env precedence
-- Tavily env/config precedence
+- legacy Tavily env/config migration into managed search profiles
 - path containment
 - destructive command detection
 - trust mode approvals

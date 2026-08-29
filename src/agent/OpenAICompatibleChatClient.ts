@@ -13,7 +13,7 @@ import type {
 } from "./types.js";
 
 type OpenAICompatibleConfig = Pick<AppConfig, "apiKey" | "baseUrl" | "model" | "trustMode"> &
-  Partial<Pick<AppConfig, "toolCalling" | "imageInput" | "tavilyApiKey" | "mcpServers" | "requestTimeoutMs">> & {
+  Partial<Pick<AppConfig, "toolCalling" | "imageInput" | "mcpServers" | "requestTimeoutMs">> & {
     onCapabilityObservation?: (observation: ProviderCapabilityObservation) => void | Promise<void>;
     maxRequestRetries?: number;
     maxRateLimitRetries?: number;
@@ -57,7 +57,7 @@ const LOG_MESSAGE_CONTENT_MAX = 4_000;
 const LOG_RESPONSE_BODY_MAX = 8_000;
 let apiRequestLogSeq = 0;
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 360_000;
 const DEFAULT_MAX_REQUEST_RETRIES = 2;
 // Rate limits (429) are transient and the server tells us exactly when capacity returns, so they
 // get their own, more generous retry budget than generic 5xx/timeout errors — a rate-limit blip
@@ -261,6 +261,14 @@ export class OpenAICompatibleChatClient implements ChatClient {
         await this.observeCapability("imageInput", response.status, body);
         throw new Error(`Model request failed (${response.status}): ${body}`);
       }
+      // A non-retryable status (e.g. a 400 for context overflow or a malformed request) will fail
+      // identically without streaming, so re-issuing the whole thing as a non-streaming request just
+      // doubles the cost and the latency before the same error surfaces. Fail fast instead. The
+      // non-streaming fallback is kept only for transient statuses, where a second attempt (on a
+      // fresh retry budget) can plausibly succeed.
+      if (!RETRYABLE_STATUS_CODES.has(response.status)) {
+        throw new Error(`Model request failed (${response.status}): ${body}`);
+      }
       return this.completeWithMode(request, mode, options, capture);
     }
 
@@ -293,10 +301,17 @@ export class OpenAICompatibleChatClient implements ChatClient {
     const streamController = new AbortController();
     const removeStreamAbortLink = linkAbortSignal(options?.signal, streamController);
     const streamTimeoutMs = this.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    const streamTimeout = setTimeout(
-      () => streamController.abort(new Error(`Model response stream timed out after ${streamTimeoutMs}ms.`)),
-      streamTimeoutMs
-    );
+    // Idle timeout, not a whole-stream cap: rearmed on every chunk (see the read loop) so a healthy
+    // long generation (reasoning models, large diffs) is not killed mid-flight — only a genuinely
+    // stalled stream that goes silent for streamTimeoutMs is aborted.
+    let streamTimeout!: ReturnType<typeof setTimeout>;
+    const armStreamTimeout = () => {
+      streamTimeout = setTimeout(
+        () => streamController.abort(new Error(`Model response stream stalled: no data for ${streamTimeoutMs}ms.`)),
+        streamTimeoutMs
+      );
+    };
+    armStreamTimeout();
 
     const processChunk = async (chunk: OpenAIStreamChunk) => {
       if (chunk.usage) {
@@ -361,6 +376,10 @@ export class OpenAICompatibleChatClient implements ChatClient {
       while (!done) {
         throwIfAborted(streamController.signal);
         const read = await reader.read();
+        // Data arrived (or the stream ended): reset the idle window so an in-progress generation
+        // that simply takes longer than streamTimeoutMs to finish is never treated as a stall.
+        clearTimeout(streamTimeout);
+        armStreamTimeout();
         throwIfAborted(streamController.signal);
         done = read.done;
         buffer += decoder.decode(read.value, { stream: !done });
@@ -405,7 +424,7 @@ export class OpenAICompatibleChatClient implements ChatClient {
       .map(([, call]) => ({
         id: call.id,
         name: call.name,
-        arguments: parseJson(call.argumentsText)
+        arguments: parseToolArguments(call.argumentsText)
       }));
     if (assembledToolCalls.length > 0) {
       message.toolCalls = assembledToolCalls;
@@ -632,7 +651,7 @@ function assertImageInputAllowed(config: OpenAICompatibleConfig, request: ChatRe
 function toOpenAIRequestBody(model: string, request: ChatRequest, stream: boolean, mode: CompletionMode) {
   const body: Record<string, unknown> = {
     model,
-    messages: messagesForMode(request, mode).map(toOpenAIMessage).filter(isSendableOpenAIMessage)
+    messages: normalizeSystemMessages(messagesForMode(request, mode)).map(toOpenAIMessage).filter(isSendableOpenAIMessage)
   };
 
   if (stream) {
@@ -661,6 +680,26 @@ function messagesForMode(request: ChatRequest, mode: CompletionMode): ChatMessag
   }
 
   return insertFallbackInstruction(stripToolProtocolMessages(request.messages));
+}
+
+/**
+ * llama.cpp chat templates commonly accept at most one system message and require it to precede
+ * every other role. Arivu intentionally keeps separate system records in session history for the
+ * base prompt, compaction, and agent-loop instructions, so adapt that richer internal form only
+ * at the OpenAI-compatible API boundary.
+ */
+function normalizeSystemMessages(messages: ChatMessage[]): ChatMessage[] {
+  const systemContent = messages
+    .filter((message) => message.role === "system")
+    .map((message) => chatContentToText(message.content).trim())
+    .filter(Boolean);
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+
+  if (systemContent.length === 0) {
+    return nonSystemMessages;
+  }
+
+  return [{ role: "system", content: systemContent.join("\n\n") }, ...nonSystemMessages];
 }
 
 function shouldRetryWithoutTools(status: number, body: string, request: ChatRequest) {
@@ -790,7 +829,7 @@ function fromOpenAIMessage(message: OpenAIMessage): ChatMessage {
   const toolCalls: ToolCall[] | undefined = message.tool_calls?.map((call) => ({
     id: call.id,
     name: call.function.name,
-    arguments: parseJson(call.function.arguments)
+    arguments: parseToolArguments(call.function.arguments)
   }));
 
   return {
@@ -859,10 +898,13 @@ function openAIContentToText(content: OpenAIMessage["content"]) {
 }
 
 function cleanCitationArtifacts(content: string) {
-  return content
-    .replace(/【\d+†L\d+(?:-L\d+)?】/g, "")
-    .replace(/[ \t]+([.,;:!?])/g, "$1")
-    .replace(/\n{3,}/g, "\n\n");
+  // Remove only the citation markers themselves, plus any horizontal space immediately before one
+  // (so "text 【1†L2】." collapses cleanly to "text."). Deliberately NO global whitespace or
+  // newline rewriting: the previous version applied "[ \t]+ before punctuation" and "collapse 3+
+  // newlines" to every assistant message, which turned "cond ? a : b" into "cond? a: b" in code,
+  // mangled space-significant text (YAML, diffs), and dropped blank lines inside code fences.
+  // Content with no markers is now returned byte-for-byte unchanged.
+  return content.replace(/[ \t]*【\d+†L\d+(?:-L\d+)?】/g, "");
 }
 
 class StreamingCitationCleaner {
@@ -1047,4 +1089,16 @@ function parseJson(value: string): unknown {
   } catch {
     return value;
   }
+}
+
+/**
+ * Parse a tool call's raw arguments. Providers routinely send "" (or omit arguments entirely) for
+ * zero-argument tools; that must become an empty object so the tool runs, not the literal string ""
+ * which JSON.parse can't handle and which then fails the tool's schema validation with a spurious error.
+ */
+function parseToolArguments(value: string | undefined): unknown {
+  if (!value || value.trim().length === 0) {
+    return {};
+  }
+  return parseJson(value);
 }

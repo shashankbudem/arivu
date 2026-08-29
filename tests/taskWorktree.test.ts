@@ -1,10 +1,11 @@
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execa } from "execa";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   abortTaskWorktreeConflict,
+  approvedPlanWorktreeInstruction,
   cleanupMergedTaskWorktree,
   continueTaskWorktreeConflict,
   createTaskWorktreePullRequest,
@@ -15,6 +16,7 @@ import {
   previewTaskWorktreePatch,
   refreshTaskWorktreePullRequest,
   resolveTaskWorktreePath,
+  replayTaskWorktreeInstruction,
   summarizeTaskWorktree,
   syncTaskWorktreeWithOriginal,
   taskWorktreeInstruction
@@ -1081,6 +1083,21 @@ describe("task worktrees", () => {
     ).rejects.toThrow("outside Arivu app data");
   });
 
+  it("rejects a managed-root path whose symlink target escapes app data", async () => {
+    const root = path.join(tempDir, "worktrees");
+    const outside = path.join(tempDir, "outside");
+    const link = path.join(root, "session", "run");
+    await mkdir(outside, { recursive: true });
+    await mkdir(path.dirname(link), { recursive: true });
+    await symlink(outside, link);
+    await expect(
+      resolveTaskWorktreePath(
+        { enabled: true, status: "ready", originalRoot: path.join(tempDir, "repo"), path: link, branch: "arivu/task-link" },
+        { worktreesRoot: root }
+      )
+    ).rejects.toThrow("outside Arivu app data");
+  });
+
   it("builds an instruction that points the model at the task worktree", () => {
     const instruction = taskWorktreeInstruction({
       originalRoot: "/repo",
@@ -1093,5 +1110,14 @@ describe("task worktrees", () => {
     expect(instruction).toContain("/worktree");
     expect(instruction).toContain("arivu/task-abc");
     expect(instruction).toContain("original project root is /repo");
+  });
+
+  it("uses identical approved-plan and replay evidence instructions across frontends", () => {
+    expect(approvedPlanWorktreeInstruction("plan-run")).toContain(
+      "Prefix each completion bullet with `Completed:`, `Needs evidence:`, or `Blocked:`."
+    );
+    expect(replayTaskWorktreeInstruction("evidence-run")).toBe(
+      "This prompt replays verification evidence from task run evidence-run. Rerun the selected commands against the current task worktree and report the results."
+    );
   });
 });

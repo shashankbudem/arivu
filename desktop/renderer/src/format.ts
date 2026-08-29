@@ -23,6 +23,29 @@ export function formatDateTime(value: string) {
   }).format(date);
 }
 
+/** Returns a localized date and time only for a valid message timestamp. */
+export function formatMessageDateTime(value?: string, fallback?: string, options: Intl.DateTimeFormatOptions = {}): string | undefined {
+  const timestamp = [value, fallback].find((candidate) => {
+    return typeof candidate === "string" && !Number.isNaN(new Date(candidate).getTime());
+  });
+  if (!timestamp) {
+    return undefined;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+    ...options
+  }).format(new Date(timestamp));
+}
+
+/** Canonical ISO value suitable for a <time dateTime> attribute, if one is available. */
+export function messageDateTimeValue(value?: string, fallback?: string): string | undefined {
+  const timestamp = [value, fallback].find((candidate) => {
+    return typeof candidate === "string" && !Number.isNaN(new Date(candidate).getTime());
+  });
+  return timestamp ? new Date(timestamp).toISOString() : undefined;
+}
+
 export function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value);
 }

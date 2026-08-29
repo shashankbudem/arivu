@@ -15,6 +15,11 @@ function createService() {
       baseUrl: "https://user:password@primary.example/v1?token=secret",
       model: "primary-model",
       apiKey: "primary-secret",
+      visualGrounding: {
+        baseUrl: "https://grounding.example/v1",
+        model: "nvidia/LocateAnything-3B",
+        apiKey: "grounding-secret"
+      },
       fallbacks: [
         {
           baseUrl: "https://fallback.example/v1",
@@ -116,6 +121,7 @@ describe("RuntimeControlService", () => {
     });
     expect(service.currentBrowserTaskModel()).toMatchObject({
       model: "fallback-model",
+      visualGrounding: { model: "nvidia/LocateAnything-3B" },
       fallbacks: [{ model: "second-fallback" }]
     });
     expect(onSessionBrowserModelChange).not.toHaveBeenCalled();
@@ -125,7 +131,10 @@ describe("RuntimeControlService", () => {
       scope: "session",
       reason: "The first fallback is also rate limited."
     });
-    expect(service.currentBrowserTaskModel()).toMatchObject({ model: "second-fallback" });
+    expect(service.currentBrowserTaskModel()).toMatchObject({
+      model: "second-fallback",
+      visualGrounding: { model: "nvidia/LocateAnything-3B" }
+    });
     expect(service.currentBrowserTaskModel().fallbacks).toBeUndefined();
     expect(onSessionBrowserModelChange).toHaveBeenCalledWith(expect.objectContaining({ model: "second-fallback" }));
   });
